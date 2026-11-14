@@ -654,8 +654,11 @@ private fun ConversationHistoryRow(
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = {
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                        anchor.open { showActionMenu = true }
+                        // Forge 本期只有单会话，没有重命名/导出/删除可做。
+                        if (!conversation.forge) {
+                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                            anchor.open { showActionMenu = true }
+                        }
                     },
                 )
                 .padding(
@@ -683,14 +686,27 @@ private fun ConversationHistoryRow(
 
             Column(modifier = Modifier.weight(1f)) {
                 val title = conversation.title.ifBlank { conversation.preview }
-                Text(
-                    text = title,
-                    color = titleColor,
-                    style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = title,
+                        color = titleColor,
+                        style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (conversation.forge) {
+                        Text(
+                            text = stringResource(R.string.forge_mode_forge),
+                            color = accentColor,
+                            style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.sp),
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            modifier = Modifier.padding(start = 6.dp),
+                        )
+                    }
+                }
                 // 标题与角色名相同（如未改名的角色会话）时不再重复第二行。
                 conversation.characterName?.takeIf { it != title }?.let { name ->
                     Text(

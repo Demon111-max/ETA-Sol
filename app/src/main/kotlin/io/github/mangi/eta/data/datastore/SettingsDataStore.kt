@@ -19,6 +19,7 @@ import io.github.mangi.eta.data.model.AppearanceTopBarBlurStyle
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.AssistantOverlaySettings
 import io.github.mangi.eta.data.model.ConversationTitleSettings
+import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.data.model.ForgeSettings
 import io.github.mangi.eta.data.model.SpeechSettings
 import io.github.mangi.eta.data.model.SubagentSettings
@@ -38,6 +39,7 @@ internal object SettingsDataStore {
     private val CONVERSATION_TITLE_SETTINGS = stringPreferencesKey("conversation_title_settings_v1")
     private val ASSISTANT_OVERLAY_SETTINGS = stringPreferencesKey("assistant_overlay_settings_v1")
     private val FORGE_SETTINGS = stringPreferencesKey("forge_settings_v1")
+    private val FORGE_CHAT_MODE = stringPreferencesKey("forge_chat_mode_v1")
     private val speechJson = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -157,6 +159,22 @@ internal object SettingsDataStore {
     suspend fun setForgeSettings(settings: ForgeSettings) {
         ensureInitialized()
         dataStore.edit { it[FORGE_SETTINGS] = speechJson.encodeToString(settings) }
+    }
+
+    fun forgeChatModeFlow(): Flow<ForgeChatMode> {
+        ensureInitialized()
+        return dataStore.data
+            .catch { cause ->
+                if (cause is IOException) emit(emptyPreferences()) else throw cause
+            }
+            .map { prefs -> ForgeChatMode.fromWire(prefs[FORGE_CHAT_MODE]) }
+    }
+
+    suspend fun forgeChatMode(): ForgeChatMode = forgeChatModeFlow().first()
+
+    suspend fun setForgeChatMode(mode: ForgeChatMode) {
+        ensureInitialized()
+        dataStore.edit { it[FORGE_CHAT_MODE] = mode.wireValue }
     }
 
     private const val STORE_NAME = "eta_settings"

@@ -1013,6 +1013,17 @@
   <string name="linux_opencode_tools">opencode</string>
   <string name="linux_opencode_tools_summary">Install the opencode CLI with the official script; the Forge coding mode drives chats with it</string>
   <string name="linux_opencode_tools_ready">opencode is ready at ~/.opencode/bin/opencode</string>
+  <string name="forge_mode_assist">Assist</string>
+  <string name="forge_mode_forge">Forge</string>
+  <string name="forge_conversation_title">Forge chat</string>
+  <string name="forge_gate_linux_missing">Forge needs the Linux tool environment</string>
+  <string name="forge_gate_linux_missing_summary">Install Debian in Linux tools to use Forge.</string>
+  <string name="forge_gate_opencode_missing">opencode is not installed yet</string>
+  <string name="forge_gate_opencode_missing_summary">Install opencode under optional tools in Linux tools.</string>
+  <string name="forge_gate_config_missing">Forge is not configured yet</string>
+  <string name="forge_gate_config_missing_summary">Fill in the relay base URL, API key and model ID.</string>
+  <string name="forge_gate_open_environment">Open Linux tools</string>
+  <string name="forge_gate_open_settings">Open Forge settings</string>
   <string name="forge_settings_title">Forge (opencode)</string>
   <string name="forge_relay_group">Relay</string>
   <string name="forge_base_url">Relay base URL</string>

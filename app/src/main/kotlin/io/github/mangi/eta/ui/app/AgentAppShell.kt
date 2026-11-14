@@ -2,6 +2,7 @@ package io.github.mangi.eta.ui.app
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -60,10 +61,12 @@ import com.itos.coui.topappbar.TopAppBar as CouiTopAppBar
 import com.itos.coui.topappbar.TopAppBarButtonGroup
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.AppearanceUiStyle
+import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.data.model.TtsProvider
 import io.github.mangi.eta.data.repository.SpeechSettingsRepository
 import io.github.mangi.eta.ui.components.AdaptiveTopAppBar
 import io.github.mangi.eta.ui.components.AgentTopBarChatHeader
+import io.github.mangi.eta.ui.components.AssistForgeSwitch
 import io.github.mangi.eta.ui.components.ChatActionIcons
 import io.github.mangi.eta.ui.components.ChatImagePreviewHost
 import io.github.mangi.eta.ui.components.ConversationSidePaneScaffold
@@ -136,6 +139,8 @@ internal fun AgentAppShell(
     homeTitle: String? = null,
     homeCharacter: RoleplayChatUi? = null,
     homeModelPickerState: AgentModelPickerUiState? = null,
+    chatMode: ForgeChatMode = ForgeChatMode.Assist,
+    onChatModeSelected: (ForgeChatMode) -> Unit = {},
     isHomeStreaming: Boolean = false,
     hasPermissionAttention: Boolean = false,
     onHomeModelSelected: (String) -> Unit = {},
@@ -157,69 +162,54 @@ internal fun AgentAppShell(
                     ),
                     topBar = {
                         if (currentRoute !is AppRoute.Settings) {
-                            CouiTopAppBar(
-                                title = {
-                                    if (isHome && homeModelPickerState != null) {
-                                        Box(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            AgentTopBarChatHeader(
-                                                conversationTitle = homeTitle,
-                                                character = homeCharacter,
-                                                state = homeModelPickerState,
-                                                isStreaming = isHomeStreaming,
-                                                onModelSelected = onHomeModelSelected,
-                                                onOpenCharacter = onOpenCharacter,
-                                            )
-                                        }
-                                    } else {
+                            if (isHome && homeModelPickerState != null) {
+                                HomeCouiTopBar(
+                                    color = MiuixTheme.colorScheme.surface,
+                                    dark = dark,
+                                    colors = colors,
+                                    onOpenConversationPane = onOpenConversationPane,
+                                    onNewConversation = onNewConversation,
+                                    onOpenTerminal = onOpenTerminal,
+                                    onLaunchKimiWeb = onLaunchKimiWeb,
+                                    kimiWebLabel = kimiWebLabel,
+                                    canStopKimiWeb = canStopKimiWeb,
+                                    onStopKimiWeb = onStopKimiWeb,
+                                    onRefreshKimiWeb = onRefreshKimiWeb,
+                                    onOpenBrowser = onOpenBrowser,
+                                    chatMode = chatMode,
+                                    onChatModeSelected = onChatModeSelected,
+                                ) {
+                                    AgentTopBarChatHeader(
+                                        conversationTitle = homeTitle,
+                                        character = homeCharacter,
+                                        state = homeModelPickerState,
+                                        isStreaming = isHomeStreaming,
+                                        onModelSelected = onHomeModelSelected,
+                                        onOpenCharacter = onOpenCharacter,
+                                    )
+                                }
+                            } else {
+                                CouiTopAppBar(
+                                    title = {
                                         BasicText(
                                             text = titleForRoute(currentRoute),
                                             style = LocalCouiTextStyle.current,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
-                                    }
-                                },
-                                navigationIcon = {
-                                    if (isHome) {
-                                        CouiTopAppBarIconButton(
-                                            icon = Icons.AutoMirrored.Outlined.ShortText,
-                                            contentDescription = stringResource(R.string.action_conversation_history),
-                                            onClick = onOpenConversationPane,
-                                            dark = dark,
-                                            colors = colors,
-                                        )
-                                    } else {
+                                    },
+                                    navigationIcon = {
                                         CouiBackButton(onClick = onBack, dark = dark, colors = colors)
-                                    }
-                                },
-                                actions = {
-                                    if (isHome) {
-                                        TopAppBarButtonGroup {
-                                            CouiTopBarOverflowMenu(
-                                                dark = dark,
-                                                colors = colors,
-                                                onNewConversation = onNewConversation,
-                                                onOpenTerminal = onOpenTerminal,
-                                                onLaunchKimiWeb = onLaunchKimiWeb,
-                                                kimiWebLabel = kimiWebLabel,
-                                                canStopKimiWeb = canStopKimiWeb,
-                                                onStopKimiWeb = onStopKimiWeb,
-                                                onRefreshKimiWeb = onRefreshKimiWeb,
-                                                onOpenBrowser = onOpenBrowser,
-                                            )
-                                        }
-                                    }
-                                },
-                                dark = dark,
-                                colors = CouiTopAppBarDefaults.colors(
-                                    backgroundColor = MiuixTheme.colorScheme.surface,
-                                    titleColor = colors.title,
+                                    },
+                                    actions = {},
                                     dark = dark,
-                                ),
-                            )
+                                    colors = CouiTopAppBarDefaults.colors(
+                                        backgroundColor = MiuixTheme.colorScheme.surface,
+                                        titleColor = colors.title,
+                                        dark = dark,
+                                    ),
+                                )
+                            }
                         }
                     },
                 ) { padding ->
@@ -261,6 +251,8 @@ internal fun AgentAppShell(
                                     isHomeStreaming = isHomeStreaming,
                                     onHomeModelSelected = onHomeModelSelected,
                                     onOpenCharacter = onOpenCharacter,
+                                    chatMode = chatMode,
+                                    onChatModeSelected = onChatModeSelected,
                                 )
                             }
                         }
@@ -429,6 +421,8 @@ private fun AgentTopBar(
     isHomeStreaming: Boolean,
     onHomeModelSelected: (String) -> Unit,
     onOpenCharacter: () -> Unit,
+    chatMode: ForgeChatMode,
+    onChatModeSelected: (ForgeChatMode) -> Unit,
 ) {
     val isHome = route is AppRoute.Home
     if (isHome && homeModelPickerState != null) {
@@ -443,6 +437,8 @@ private fun AgentTopBar(
             onStopKimiWeb = onStopKimiWeb,
             onRefreshKimiWeb = onRefreshKimiWeb,
             onOpenBrowser = onOpenBrowser,
+            chatMode = chatMode,
+            onChatModeSelected = onChatModeSelected,
         ) {
             AgentTopBarChatHeader(
                 conversationTitle = homeTitle,
@@ -481,6 +477,69 @@ private fun AgentTopBar(
 }
 
 @Composable
+private fun HomeCouiTopBar(
+    color: Color,
+    dark: Boolean,
+    colors: com.itos.coui.layout.CouiPageColors,
+    onOpenConversationPane: () -> Unit,
+    onNewConversation: () -> Unit,
+    onOpenTerminal: () -> Unit,
+    onLaunchKimiWeb: () -> Unit,
+    kimiWebLabel: String,
+    canStopKimiWeb: Boolean,
+    onStopKimiWeb: () -> Unit,
+    onRefreshKimiWeb: () -> Unit,
+    onOpenBrowser: () -> Unit,
+    chatMode: ForgeChatMode,
+    onChatModeSelected: (ForgeChatMode) -> Unit,
+    centerContent: @Composable () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color)
+            .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+            .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal))
+            .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top))
+            .height(CouiTopAppBarDefaults.height)
+            .clipToBounds()
+            .pointerInput(Unit) {
+                detectTapGestures { }
+            }
+            .padding(horizontal = TopBarHorizontalPadding),
+        horizontalArrangement = Arrangement.spacedBy(TopBarControlGap),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CouiTopAppBarIconButton(
+            icon = Icons.AutoMirrored.Outlined.ShortText,
+            contentDescription = stringResource(R.string.action_conversation_history),
+            onClick = onOpenConversationPane,
+            dark = dark,
+            colors = colors,
+        )
+        Box(
+            modifier = Modifier.weight(1f),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            centerContent()
+        }
+        AssistForgeSwitch(mode = chatMode, onModeSelected = onChatModeSelected)
+        CouiTopBarOverflowMenu(
+            dark = dark,
+            colors = colors,
+            onNewConversation = onNewConversation,
+            onOpenTerminal = onOpenTerminal,
+            onLaunchKimiWeb = onLaunchKimiWeb,
+            kimiWebLabel = kimiWebLabel,
+            canStopKimiWeb = canStopKimiWeb,
+            onStopKimiWeb = onStopKimiWeb,
+            onRefreshKimiWeb = onRefreshKimiWeb,
+            onOpenBrowser = onOpenBrowser,
+        )
+    }
+}
+
+@Composable
 private fun HomeMiuixTopBar(
     color: Color,
     onOpenConversationPane: () -> Unit,
@@ -492,6 +551,8 @@ private fun HomeMiuixTopBar(
     onStopKimiWeb: () -> Unit,
     onRefreshKimiWeb: () -> Unit,
     onOpenBrowser: () -> Unit,
+    chatMode: ForgeChatMode,
+    onChatModeSelected: (ForgeChatMode) -> Unit,
     centerContent: @Composable () -> Unit,
 ) {
     Row(
@@ -506,10 +567,8 @@ private fun HomeMiuixTopBar(
             .pointerInput(Unit) {
                 detectTapGestures { }
             }
-            .padding(
-                start = TopAppBarDefaults.NavigationIconPadding,
-                end = TopAppBarDefaults.ActionIconPadding,
-            ),
+            .padding(horizontal = TopBarHorizontalPadding),
+        horizontalArrangement = Arrangement.spacedBy(TopBarControlGap),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onOpenConversationPane) {
@@ -521,10 +580,11 @@ private fun HomeMiuixTopBar(
         }
         Box(
             modifier = Modifier.weight(1f),
-            contentAlignment = Alignment.Center,
+            contentAlignment = Alignment.CenterStart,
         ) {
             centerContent()
         }
+        AssistForgeSwitch(mode = chatMode, onModeSelected = onChatModeSelected)
         TopBarOverflowMenu(
             onNewConversation = onNewConversation,
             onOpenTerminal = onOpenTerminal,
@@ -539,6 +599,10 @@ private fun HomeMiuixTopBar(
 }
 
 private val TopBarMenuIconSize = 20.dp
+
+/** 顶栏左右边距与控件间距（写死，勿改）。 */
+private val TopBarHorizontalPadding = 12.dp
+private val TopBarControlGap = 10.dp
 
 @Composable
 private fun TopBarOverflowMenu(

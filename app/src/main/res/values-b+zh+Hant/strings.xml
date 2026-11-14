@@ -986,6 +986,17 @@
   <string name="linux_opencode_tools">opencode</string>
   <string name="linux_opencode_tools_summary">用官方腳本安裝 opencode 命令列；Forge 編程模式用它驅動對話</string>
   <string name="linux_opencode_tools_ready">opencode 已就緒，位於 ~/.opencode/bin/opencode</string>
+  <string name="forge_mode_assist">Assist</string>
+  <string name="forge_mode_forge">Forge</string>
+  <string name="forge_conversation_title">Forge 对话</string>
+  <string name="forge_gate_linux_missing">Forge 需要先安装 Linux 工具环境</string>
+  <string name="forge_gate_linux_missing_summary">在「Linux 工具环境」里安装 Debian 后即可使用 Forge。</string>
+  <string name="forge_gate_opencode_missing">Linux 环境里还没有 opencode</string>
+  <string name="forge_gate_opencode_missing_summary">在「Linux 工具环境」的可选工具里安装 opencode。</string>
+  <string name="forge_gate_config_missing">还没有填写 Forge 配置</string>
+  <string name="forge_gate_config_missing_summary">需要填写中转站地址、API Key 与模型 ID。</string>
+  <string name="forge_gate_open_environment">前往 Linux 工具环境</string>
+  <string name="forge_gate_open_settings">前往 Forge 设置</string>
   <string name="forge_settings_title">Forge（opencode）</string>
   <string name="forge_relay_group">中转站</string>
   <string name="forge_base_url">中转站地址（Base URL）</string>

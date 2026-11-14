@@ -1,0 +1,153 @@
+package io.github.mangi.eta.ui.screens.forge
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.TextButton
+import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.terminal.LinuxDistribution
+import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
+import io.github.mangi.eta.agent.terminal.LinuxPackageProfiles
+import io.github.mangi.eta.agent.terminal.linuxPackageProfileReady
+import io.github.mangi.eta.data.model.AppearanceUiStyle
+import io.github.mangi.eta.data.repository.ForgeSettingsRepository
+import io.github.mangi.eta.ui.app.LocalUiStyle
+import io.github.mangi.eta.ui.components.ListEmptyState
+import io.github.mangi.eta.ui.components.coui.CouiButton
+import io.github.mangi.eta.ui.components.coui.CouiButtonRole
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Construction
+
+/** Forge 未就绪时缺的那一项，按检查顺序排列。 */
+internal enum class ForgePrerequisite {
+    LinuxEnvironment,
+    Opencode,
+    Config,
+}
+
+internal sealed interface ForgeGateState {
+    data object Checking : ForgeGateState
+
+    data object Ready : ForgeGateState
+
+    data class Missing(val prerequisite: ForgePrerequisite) : ForgeGateState
+}
+
+/**
+ * Forge 页面的未就绪门禁：只做静态说明 + 一个跳转按钮，不自动安装、不做进度动画。
+ * 检查顺序：Debian 环境 → opencode 是否已装 → Forge 配置是否已填。
+ */
+@Composable
+internal fun ForgeScreen(
+    onOpenLinuxEnvironment: () -> Unit,
+    onOpenForgeSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
+    var reloadKey by remember { mutableStateOf(0) }
+    LaunchedEffect(reloadKey) {
+        gate = ForgeGateState.Checking
+        gate = withContext(Dispatchers.IO) { checkForgeGate(context.applicationContext) }
+    }
+
+    Column(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        when (val state = gate) {
+            ForgeGateState.Checking -> Unit
+            // 门禁通过后的对话界面由后续步骤接上。
+            ForgeGateState.Ready -> Unit
+            is ForgeGateState.Missing -> {
+                val (titleRes, summaryRes) = when (state.prerequisite) {
+                    ForgePrerequisite.LinuxEnvironment ->
+                        R.string.forge_gate_linux_missing to R.string.forge_gate_linux_missing_summary
+                    ForgePrerequisite.Opencode ->
+                        R.string.forge_gate_opencode_missing to R.string.forge_gate_opencode_missing_summary
+                    ForgePrerequisite.Config ->
+                        R.string.forge_gate_config_missing to R.string.forge_gate_config_missing_summary
+                }
+                val actionRes = if (state.prerequisite == ForgePrerequisite.Config) {
+                    R.string.forge_gate_open_settings
+                } else {
+                    R.string.forge_gate_open_environment
+                }
+                ListEmptyState(
+                    title = stringResource(titleRes),
+                    summary = stringResource(summaryRes),
+                    icon = Icons.Rounded.Construction,
+                    action = {
+                        ForgeGateAction(
+                            text = stringResource(actionRes),
+                            onClick = {
+                                if (state.prerequisite == ForgePrerequisite.Config) {
+                                    onOpenForgeSettings()
+                                } else {
+                                    onOpenLinuxEnvironment()
+                                }
+                            },
+                        )
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ForgeGateAction(text: String, onClick: () -> Unit) {
+    if (LocalUiStyle.current == AppearanceUiStyle.COUI) {
+        CouiButton(
+            text = text,
+            role = CouiButtonRole.Primary,
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    } else {
+        TextButton(
+            text = text,
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.textButtonColorsPrimary(),
+        )
+    }
+}
+
+private fun checkForgeGate(context: android.content.Context): ForgeGateState {
+    val rootfs = LinuxEnvironmentPaths.rootfsDir(context, LinuxDistribution.DEBIAN)
+    if (!LinuxEnvironmentPaths.rootfsReady(rootfs.absolutePath)) {
+        return ForgeGateState.Missing(ForgePrerequisite.LinuxEnvironment)
+    }
+    if (!linuxPackageProfileReady(rootfs, LinuxPackageProfiles.OPENCODE)) {
+        return ForgeGateState.Missing(ForgePrerequisite.Opencode)
+    }
+    val configured = runBlockingGate {
+        val settings = ForgeSettingsRepository.settings()
+        val credentials = try {
+            ForgeSettingsRepository.credentials(context)
+        } catch (_: Exception) {
+            null
+        }
+        credentials != null && ForgeSettingsRepository.isConfigured(settings, credentials)
+    }
+    if (!configured) return ForgeGateState.Missing(ForgePrerequisite.Config)
+    return ForgeGateState.Ready
+}
+
+private fun <T> runBlockingGate(block: suspend () -> T): T = kotlinx.coroutines.runBlocking { block() }

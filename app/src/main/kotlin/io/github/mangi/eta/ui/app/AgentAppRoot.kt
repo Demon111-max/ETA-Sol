@@ -48,6 +48,9 @@ import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.runtime.AgentRuntimeService
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.model.AppearanceUiStyle
+import io.github.mangi.eta.data.datastore.SettingsDataStore
+import io.github.mangi.eta.data.model.FORGE_CONVERSATION_ID
+import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
 import io.github.mangi.eta.ui.IncomingShareRequest
@@ -65,6 +68,8 @@ import io.github.mangi.eta.ui.model.AgentSkillsAction
 import io.github.mangi.eta.ui.model.AgentSystemEnhanceAction
 import io.github.mangi.eta.ui.model.AgentToolsAction
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
+import io.github.mangi.eta.ui.model.withForgeConversation
+import io.github.mangi.eta.ui.screens.forge.ForgeScreen
 import io.github.mangi.eta.ui.model.LOCAL_NETWORK_PERMISSION_ITEM_ID
 import io.github.mangi.eta.ui.model.PermissionHealthAction
 import io.github.mangi.eta.ui.model.PermissionStatusUi
@@ -192,6 +197,13 @@ fun AgentAppRoot(
     }
 
     var conversationPaneOpen by rememberSaveable { mutableStateOf(false) }
+    // Forge 本期只有单会话：打开与否用独立状态，不塞进 AgentAppState，避免影响 Assist 的会话逻辑。
+    var forgeOpen by rememberSaveable { mutableStateOf(false) }
+    var forgeNewConversationMode by remember { mutableStateOf(ForgeChatMode.Assist) }
+    LaunchedEffect(Unit) {
+        forgeNewConversationMode = SettingsDataStore.forgeChatMode()
+    }
+    val chatMode = if (forgeOpen) ForgeChatMode.Forge else ForgeChatMode.Assist
     var conversationRenameTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationDeleteTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationExportTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
@@ -291,16 +303,44 @@ fun AgentAppRoot(
 
     fun selectConversation(conversationId: String) {
         focusManager.clearFocus()
+        conversationPaneOpen = false
+        if (conversationId == FORGE_CONVERSATION_ID) {
+            // 打开 Forge 对话：不碰 Assist 的会话状态，正在运行的 Assist 继续跑。
+            forgeOpen = true
+            navigator.popToHome()
+            return
+        }
+        forgeOpen = false
         agentState.selectConversation(conversationId)
         navigator.popToHome()
-        conversationPaneOpen = false
     }
 
     fun createConversation() {
         focusManager.clearFocus()
+        conversationPaneOpen = false
+        if (forgeNewConversationMode == ForgeChatMode.Forge) {
+            forgeOpen = true
+            navigator.popToHome()
+            return
+        }
+        forgeOpen = false
         agentState.createConversation()
         navigator.popToHome()
-        conversationPaneOpen = false
+    }
+
+    /** 顶栏分段控件：切到另一段即进入该模式的新对话空白页，不转换当前对话。 */
+    fun selectChatMode(mode: ForgeChatMode) {
+        if (mode == chatMode) return
+        forgeNewConversationMode = mode
+        uiScope.launch { SettingsDataStore.setForgeChatMode(mode) }
+        if (mode == ForgeChatMode.Forge) {
+            focusManager.clearFocus()
+            forgeOpen = true
+            navigator.popToHome()
+            conversationPaneOpen = false
+        } else {
+            createConversation()
+        }
     }
 
     fun openConversationBrowser() {
@@ -321,10 +361,14 @@ fun AgentAppRoot(
             item.id in CorePermissionAttentionIds &&
                 (item.status == PermissionStatusUi.Missing || item.status == PermissionStatusUi.Warning)
         }
+        val forgeTitle = stringResource(R.string.forge_conversation_title)
         AgentAppShell(
             currentRoute = route,
             isCurrentRoute = backStack.lastOrNull() == route,
-            conversationPaneState = agentState.conversationPaneState,
+            conversationPaneState = agentState.conversationPaneState.withForgeConversation(
+                forgeTitle = forgeTitle,
+                forgeOpen = forgeOpen,
+            ),
             isConversationPaneOpen = conversationPaneOpen,
             onBack = { popRoute() },
             onOpenConversationPane = { conversationPaneOpen = true },
@@ -378,12 +422,18 @@ fun AgentAppRoot(
             onOpenPermissions = { pushRoute(AppRoute.Permissions) },
             onOpenSettings = { pushRoute(AppRoute.Settings) },
             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
-            homeTitle = if (isHome) agentState.currentConversationTitle else null,
+            homeTitle = when {
+                !isHome -> null
+                forgeOpen -> stringResource(R.string.forge_conversation_title)
+                else -> agentState.currentConversationTitle
+            },
             homeCharacter = if (isHome) agentState.homeState.roleplayChatUi() else null,
             homeModelPickerState = if (isHome) agentState.modelPickerState else null,
             isHomeStreaming = isHome && agentState.homeState.isStreaming,
             hasPermissionAttention = isHome && hasPermissionAttention,
             onHomeModelSelected = agentState::selectModel,
+            chatMode = chatMode,
+            onChatModeSelected = { mode -> selectChatMode(mode) },
             onOpenCharacter = {
                 agentState.homeState.roleplay?.let { pushRoute(AppRoute.CharacterDetail(it.characterId)) }
             },
@@ -416,6 +466,14 @@ fun AgentAppRoot(
         ) {
             entry<AppRoute.Home>(swipeDismiss = swipeDismiss) {
                 RoutedShell(route = AppRoute.Home, applyShellPadding = false) { shellPadding ->
+                    if (forgeOpen) {
+                        ForgeScreen(
+                            onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
+                            onOpenForgeSettings = { pushRoute(AppRoute.ForgeSettings) },
+                            modifier = Modifier.padding(top = shellPadding.calculateTopPadding()),
+                        )
+                        return@RoutedShell
+                    }
                     AgentHomeScreen(
                         state = agentState.homeState,
                         modelPickerState = agentState.modelPickerState,
