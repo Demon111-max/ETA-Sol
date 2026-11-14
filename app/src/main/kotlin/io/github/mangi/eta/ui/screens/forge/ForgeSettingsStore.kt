@@ -6,6 +6,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.mangi.eta.agent.forge.ForgeConfigWriteResult
 import io.github.mangi.eta.agent.forge.ForgeConfigWriter
+import io.github.mangi.eta.agent.forge.ForgeServerManager
+import io.github.mangi.eta.agent.forge.ForgeServerStartResult
 import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
 import io.github.mangi.eta.data.repository.ForgeCredentialsUnavailable
@@ -21,6 +23,7 @@ internal class ForgeSettingsStore(
     private val context: Context,
     private val scope: CoroutineScope,
     private val onSaved: () -> Unit = {},
+    private val serverManager: ForgeServerManager = ForgeServerManager.default(context),
 ) {
     var settings by mutableStateOf(ForgeSettings())
         private set
@@ -80,7 +83,7 @@ internal class ForgeSettingsStore(
                 message = when (val result = ForgeConfigWriter.write(context, config, secrets)) {
                     ForgeConfigWriteResult.Written -> {
                         onSaved()
-                        "已保存，并写入 Linux 环境里的 opencode 配置"
+                        restartServerIfRunning()
                     }
                     ForgeConfigWriteResult.EnvironmentNotReady ->
                         "已保存；Linux 工具环境尚未安装，配置将在环境就绪后写入"
@@ -97,6 +100,19 @@ internal class ForgeSettingsStore(
             } finally {
                 saving = false
             }
+        }
+    }
+
+    /** 保存后 server 若在跑就用同一套停止/启动方法重启，让新配置生效。 */
+    private suspend fun restartServerIfRunning(): String {
+        val environment = serverManager.environment()
+        return when (val restarted = serverManager.restartIfRunning(environment)) {
+            null -> "已保存，并写入 Linux 环境里的 opencode 配置"
+            is ForgeServerStartResult.Failed -> {
+                messageIsError = true
+                "已保存配置，但 opencode server 重启失败（${restarted.code}）"
+            }
+            ForgeServerStartResult.Running -> "已保存，并写入 opencode 配置；opencode server 已重启"
         }
     }
 }
