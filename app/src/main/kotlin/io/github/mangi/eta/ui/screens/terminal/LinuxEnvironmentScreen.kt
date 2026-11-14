@@ -82,6 +82,7 @@ private enum class InstallTarget {
     NODE,
     SSH,
     KIMI,
+    OPENCODE,
 }
 
 private data class PackageProfileUi(
@@ -124,6 +125,13 @@ private val packageProfileUis = listOf(
         titleRes = R.string.linux_kimi_tools,
         summaryRes = R.string.linux_kimi_tools_summary,
         readyRes = R.string.linux_kimi_tools_ready,
+    ),
+    PackageProfileUi(
+        target = InstallTarget.OPENCODE,
+        profile = LinuxPackageProfiles.OPENCODE,
+        titleRes = R.string.linux_opencode_tools,
+        summaryRes = R.string.linux_opencode_tools_summary,
+        readyRes = R.string.linux_opencode_tools_ready,
     ),
 )
 

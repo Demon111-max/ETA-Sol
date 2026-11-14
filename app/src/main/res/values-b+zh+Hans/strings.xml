@@ -995,6 +995,9 @@
   <string name="linux_kimi_tools">Kimi Code</string>
   <string name="linux_kimi_tools_summary">通过 npm 安装最新正式版 Kimi Code；需要先安装 Node.js 环境</string>
   <string name="linux_kimi_tools_ready">Kimi Code 已就绪，在终端运行 kimi 即可开始</string>
+  <string name="linux_opencode_tools">opencode</string>
+  <string name="linux_opencode_tools_summary">用官方脚本安装 opencode 命令行；Forge 编程模式用它驱动对话</string>
+  <string name="linux_opencode_tools_ready">opencode 已就绪，位于 ~/.opencode/bin/opencode</string>
   <string name="linux_profile_dependency_missing">需要先安装 %1$s</string>
   <string name="linux_kimi_web_launch">启动 Web UI</string>
   <string name="linux_kimi_web_starting">正在启动…</string>

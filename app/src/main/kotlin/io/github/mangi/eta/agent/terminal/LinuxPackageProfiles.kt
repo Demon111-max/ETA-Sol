@@ -34,6 +34,8 @@ internal data class LinuxPackageSpec(
     val packages: List<String> = emptyList(),
     val managedTool: ManagedLinuxTool? = null,
     val setupScript: String? = null,
+    /** 安装完成前的自检脚本；失败即视为安装失败，不写就绪标记。 */
+    val verifyScript: String? = null,
 )
 
 internal data class LinuxPackageProfile(
@@ -118,7 +120,33 @@ internal object LinuxPackageProfiles {
             LinuxDistribution.DEBIAN to LinuxPackageSpec(setupScript = KIMI_INSTALL_SCRIPT),
         ),
     )
-    val ALL = listOf(PYTHON, NODE, SSH, KIMI)
+
+    /**
+     * opencode 只走官方安装脚本：npm 分发的 opencode-ai 是 musl 构建，glibc 的 Debian 里跑不起来。
+     * 脚本把二进制装到 $HOME/.opencode/bin，随后以 `opencode --version` 是否可执行判定就绪。
+     */
+    private const val OPENCODE_INSTALL_SCRIPT = "curl -fsSL https://opencode.ai/install | bash"
+
+    /** 安装脚本装在 $HOME/.opencode/bin，不在 PATH 里，按绝对路径自检。 */
+    private const val OPENCODE_VERIFY_SCRIPT =
+        "\${'$'}HOME/.opencode/bin/opencode --version >/dev/null"
+
+    val OPENCODE = LinuxPackageProfile(
+        id = "opencode",
+        markerName = AlpineEnvironmentPaths.OPENCODE_TOOLS_MARKER,
+        revision = AlpineEnvironmentPaths.OPENCODE_TOOLS_REVISION,
+        specs = mapOf(
+            LinuxDistribution.ALPINE to LinuxPackageSpec(
+                setupScript = OPENCODE_INSTALL_SCRIPT,
+                verifyScript = OPENCODE_VERIFY_SCRIPT,
+            ),
+            LinuxDistribution.DEBIAN to LinuxPackageSpec(
+                setupScript = OPENCODE_INSTALL_SCRIPT,
+                verifyScript = OPENCODE_VERIFY_SCRIPT,
+            ),
+        ),
+    )
+    val ALL = listOf(PYTHON, NODE, SSH, KIMI, OPENCODE)
 }
 
 internal fun linuxPackageProfileReady(rootfs: File, profile: LinuxPackageProfile): Boolean {
@@ -211,6 +239,7 @@ internal class LinuxPackageProfileInstaller(
         val activateCommand = buildString {
             append("set -e\n")
             spec.setupScript?.let { script -> append(script).append('\n') }
+            spec.verifyScript?.let { script -> append(script).append('\n') }
             if (profile == LinuxPackageProfiles.KIMI) append("kimi --version >/dev/null\nkimi web --help >/dev/null\n")
             append("cat > /").append(profile.markerName).append(" <<'ETA_PROFILE_EOF'\n")
             append("profile=").append(profile.revision).append('\n')
