@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Debug 包专用：主资源已为中文提供 app_name，这里覆盖为与官方 Eta 可区分的显示名 -->
+    <string name="app_name">Eta Sol</string>
+</resources>

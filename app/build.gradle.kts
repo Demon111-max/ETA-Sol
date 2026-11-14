@@ -61,6 +61,9 @@ android {
 
     buildTypes {
         debug {
+            // 与手机上已安装的官方 Eta 共存：仅 Debug 包使用独立包名与显示名
+            applicationIdSuffix = ".sol"
+            resValue("string", "app_name", "Eta Sol")
             // 版本名带构建类型标记，设置页与 APK 文件名据此区分 Debug 包
             versionNameSuffix = "-debug" + buildMetadataSuffix
             isMinifyEnabled = false
@@ -87,6 +90,8 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+        // Debug 包需要覆盖 app_name 显示名，AGP 9 起该能力需显式开启
+        resValues = true
     }
 
     androidResources {
