@@ -1,0 +1,122 @@
+package io.github.mangi.eta.agent.forge
+
+import android.content.Context
+import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
+import io.github.mangi.eta.agent.terminal.ShellProcessSupervisor
+import io.github.mangi.eta.agent.terminal.TerminalRuntime
+import io.github.mangi.eta.agent.terminal.runOneShotShell
+import io.github.mangi.eta.agent.terminal.terminalEnvironment
+import io.github.mangi.eta.data.model.ForgeCredentials
+import io.github.mangi.eta.data.model.ForgeSettings
+import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
+
+internal sealed interface ForgeConfigWriteResult {
+    data object Written : ForgeConfigWriteResult
+
+    data object EnvironmentNotReady : ForgeConfigWriteResult
+
+    data class Failed(val code: Int, val output: String) : ForgeConfigWriteResult
+}
+
+/**
+ * 把 Forge 配置写进 Linux 环境里的 opencode 约定位置：
+ * `~/.config/opencode/opencode.json`（provider relay）与 `~/.local/share/opencode/auth.json`（API Key）。
+ * 两个文件都要求 0600；写入走既有的终端通道（proot/chroot 各按当前后端），不新造通道。
+ */
+internal object ForgeConfigWriter {
+    const val CONFIG_PATH = "~/.config/opencode/opencode.json"
+    const val AUTH_PATH = "~/.local/share/opencode/auth.json"
+    const val PROVIDER_ID = "relay"
+    private const val WRITE_TIMEOUT_SECONDS = 60L
+
+    internal fun opencodeConfigJson(settings: ForgeSettings): JsonObject = buildJsonObject {
+        put("\$schema", "https://opencode.ai/config.json")
+        putJsonObject("provider") {
+            putJsonObject(PROVIDER_ID) {
+                put("npm", "@ai-sdk/openai-compatible")
+                put("name", "Relay")
+                putJsonObject("options") {
+                    put("baseURL", settings.baseUrl.trim())
+                }
+                putJsonObject("models") {
+                    putJsonObject(settings.modelId.trim()) {
+                        put("name", settings.modelId.trim())
+                    }
+                }
+            }
+        }
+        put("model", "$PROVIDER_ID/${settings.modelId.trim()}")
+        putJsonObject("permission") {
+            put("edit", "allow")
+            put("bash", "allow")
+        }
+    }
+
+    internal fun authJson(credentials: ForgeCredentials): JsonObject = buildJsonObject {
+        putJsonObject(PROVIDER_ID) {
+            put("type", "api")
+            put("key", credentials.apiKey.trim())
+        }
+    }
+
+    suspend fun write(
+        context: Context,
+        settings: ForgeSettings,
+        credentials: ForgeCredentials,
+    ): ForgeConfigWriteResult = withContext(Dispatchers.IO) {
+        val appContext = context.applicationContext
+        val distribution = LinuxEnvironmentSettingsRepository.current(appContext)
+        val environment = distribution.terminalEnvironment
+        val rootfsPath = LinuxEnvironmentPaths.rootfsDir(appContext, distribution).absolutePath
+        if (!LinuxEnvironmentPaths.rootfsReady(rootfsPath)) {
+            return@withContext ForgeConfigWriteResult.EnvironmentNotReady
+        }
+        val command = writeCommand(
+            configJson = opencodeConfigJson(settings).toString(),
+            authJson = authJson(credentials).toString(),
+        )
+        val supervisor = ShellProcessSupervisor()
+        try {
+            val result = runOneShotShell(
+                processSupervisor = supervisor,
+                identity = TerminalRuntime.defaultIdentity(environment, rootfsPath),
+                command = command,
+                timeoutSeconds = WRITE_TIMEOUT_SECONDS,
+                environment = environment,
+                linuxRootfsPath = rootfsPath,
+            )
+            if (result.exitCode == 0) {
+                ForgeConfigWriteResult.Written
+            } else {
+                ForgeConfigWriteResult.Failed(
+                    code = result.exitCode,
+                    output = result.output.decodeToString().trim().take(400),
+                )
+            }
+        } finally {
+            supervisor.beginClosing()
+        }
+    }
+
+    /** 用 heredoc 落盘，避免把 Key 拼进会回显的命令行；写完立即收权限到 600。 */
+    internal fun writeCommand(configJson: String, authJson: String): String = buildString {
+        append("set -e\n")
+        append("mkdir -p \"${'$'}HOME/.config/opencode\" \"${'$'}HOME/.local/share/opencode\"\n")
+        append("cat > \"${'$'}HOME/.config/opencode/opencode.json\" <<'ETA_FORGE_CONFIG_EOF'\n")
+        append(configJson).append('\n')
+        append("ETA_FORGE_CONFIG_EOF\n")
+        append("cat > \"${'$'}HOME/.local/share/opencode/auth.json\" <<'ETA_FORGE_AUTH_EOF'\n")
+        append(authJson).append('\n')
+        append("ETA_FORGE_AUTH_EOF\n")
+        append(
+            "chmod 600 \"${'$'}HOME/.config/opencode/opencode.json\" " +
+                "\"${'$'}HOME/.local/share/opencode/auth.json\"",
+        )
+    }
+}

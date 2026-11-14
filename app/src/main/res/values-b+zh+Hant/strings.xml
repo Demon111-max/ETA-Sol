@@ -986,6 +986,11 @@
   <string name="linux_opencode_tools">opencode</string>
   <string name="linux_opencode_tools_summary">用官方腳本安裝 opencode 命令列；Forge 編程模式用它驅動對話</string>
   <string name="linux_opencode_tools_ready">opencode 已就緒，位於 ~/.opencode/bin/opencode</string>
+  <string name="forge_settings_title">Forge（opencode）</string>
+  <string name="forge_relay_group">中转站</string>
+  <string name="forge_base_url">中转站地址（Base URL）</string>
+  <string name="forge_model_id">模型 ID</string>
+  <string name="forge_config_note">保存后会写入 Linux 环境里的 opencode 配置文件，模型固定为 relay/模型 ID。API Key 与其他提供商密钥一样加密保存，不会出现在日志里。</string>
   <string name="linux_profile_dependency_missing">請先安裝 %1$s</string>
   <string name="linux_kimi_web_launch">啟動 Web UI</string>
   <string name="linux_kimi_web_starting">正在啟動…</string>

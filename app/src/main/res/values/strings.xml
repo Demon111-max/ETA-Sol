@@ -1013,6 +1013,11 @@
   <string name="linux_opencode_tools">opencode</string>
   <string name="linux_opencode_tools_summary">Install the opencode CLI with the official script; the Forge coding mode drives chats with it</string>
   <string name="linux_opencode_tools_ready">opencode is ready at ~/.opencode/bin/opencode</string>
+  <string name="forge_settings_title">Forge (opencode)</string>
+  <string name="forge_relay_group">Relay</string>
+  <string name="forge_base_url">Relay base URL</string>
+  <string name="forge_model_id">Model ID</string>
+  <string name="forge_config_note">Saving writes the opencode config inside the Linux environment and pins the model to relay/MODEL_ID. The API key is encrypted like other provider keys and never logged.</string>
   <string name="linux_profile_dependency_missing">Install %1$s first</string>
   <string name="linux_kimi_web_launch">Launch Web UI</string>
   <string name="linux_kimi_web_starting">Starting…</string>

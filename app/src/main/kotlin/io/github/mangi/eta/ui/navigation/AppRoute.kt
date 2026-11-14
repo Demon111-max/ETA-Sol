@@ -82,6 +82,9 @@ sealed interface AppRoute : NavKey {
     data object LinuxEnvironment : AppRoute
 
     @Serializable
+    data object ForgeSettings : AppRoute
+
+    @Serializable
     data object SharedFolders : AppRoute
 
     @Serializable

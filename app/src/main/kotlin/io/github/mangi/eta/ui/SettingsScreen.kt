@@ -463,6 +463,17 @@ private fun SettingsPageContent(
                     )
                     CouiIconDivider()
                     CouiPreference(
+                        title = stringResource(R.string.forge_settings_title),
+                        icon = {
+                            CouiSettingsIcon(
+                                Icons.Rounded.Code,
+                                SettingsIconColors.Green,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.ForgeSettings) },
+                    )
+                    CouiIconDivider()
+                    CouiPreference(
                         title = stringResource(R.string.web_tools_settings_title),
                         icon = {
                             CouiSettingsIcon(
@@ -905,6 +916,16 @@ private fun SettingsPageContent(
                             title = stringResource(R.string.settings_tools_list),
                             startAction = { SettingsIcon(Icons.Rounded.Dashboard, tint = SettingsIconColors.Green) },
                             onClick = { onNavigate(AppRoute.Tools) },
+                        )
+                        ArrowPreference(
+                            title = stringResource(R.string.forge_settings_title),
+                            startAction = {
+                                SettingsIcon(
+                                    icon = Icons.Rounded.Code,
+                                    tint = SettingsIconColors.Green,
+                                )
+                            },
+                            onClick = { onNavigate(AppRoute.ForgeSettings) },
                         )
                         ArrowPreference(
                             title = stringResource(R.string.web_tools_settings_title),
