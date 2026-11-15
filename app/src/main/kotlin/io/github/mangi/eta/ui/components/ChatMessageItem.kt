@@ -475,7 +475,7 @@ private fun UserMessageBubble(
                                     onClick = {},
                                     onLongClick = openCouiMenu,
                                 )
-                                .padding(horizontal = 16.dp, vertical = 10.5.dp),
+                                .padding(horizontal = 18.dp, vertical = 10.5.dp),
                         ) {
                             bubbleContent()
                         }
@@ -596,7 +596,7 @@ private fun UserMessageBubble(
                                     },
                                 )
                                 .padding(
-                                    horizontal = if (assistantOverlay) 14.dp else 16.dp,
+                                    horizontal = if (assistantOverlay) 14.dp else 18.dp,
                                     vertical = if (assistantOverlay) 9.dp else 10.5.dp,
                                 ),
                         ) {
@@ -615,13 +615,8 @@ private fun UserMessageBubble(
     }
 }
 
-/** 单行时左侧呈完整半胶囊弧度，右下角保留利落的 4dp 对话收角。 */
-private val UserBubbleShape = RoundedCornerShape(
-    topStart = 22.dp,
-    topEnd = 22.dp,
-    bottomEnd = 4.dp,
-    bottomStart = 22.dp,
-)
+/** 全胶囊：四角统一按短边 50% 取圆角，单行是完整药丸形，多行也保持大圆角（仿 DSHA 的用户气泡）。 */
+private val UserBubbleShape = RoundedCornerShape(percent = 50)
 
 private val OverlayUserBubbleShape = RoundedCornerShape(
     topStart = 14.dp,
