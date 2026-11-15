@@ -97,7 +97,11 @@ internal sealed interface ForgeEvent {
 
     data class Idle(val sessionId: String) : ForgeEvent
 
-    data class Failed(val sessionId: String, val message: String?) : ForgeEvent
+    data class Failed(val sessionId: String, val message: String?, val name: String? = null) : ForgeEvent {
+        /** 用户手动停止也会以 session.error 到达（MessageAbortedError / Aborted），那不是故障。 */
+        val isAbort: Boolean
+            get() = name == "MessageAbortedError" || message.equals("Aborted", ignoreCase = true)
+    }
 
     data class Ignored(val type: String) : ForgeEvent
 }
@@ -279,7 +283,11 @@ internal object ForgeProtocol {
                 val message = (error?.get("data") as? JsonObject)?.stringOrNull("message")
                     ?: error?.stringOrNull("message")
                     ?: properties?.stringOrNull("message")
-                ForgeEvent.Failed(sessionId.orEmpty(), message)
+                ForgeEvent.Failed(
+                    sessionId.orEmpty(),
+                    message,
+                    name = error?.stringOrNull("name"),
+                )
             }
 
             else -> ForgeEvent.Ignored(type)

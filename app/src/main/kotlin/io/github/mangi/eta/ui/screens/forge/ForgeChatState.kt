@@ -227,8 +227,11 @@ internal class ForgeChatState(
 
             is ForgeEvent.Failed -> if (event.sessionId == session) {
                 busy = false
-                notice = event.message?.takeIf { it.isNotBlank() }?.let {
-                    context.getString(R.string.forge_run_failed, it)
+                // 手动停止触发的 Aborted 不是故障，不弹错误提示。
+                if (!event.isAbort) {
+                    notice = event.message?.takeIf { it.isNotBlank() }?.let {
+                        context.getString(R.string.forge_run_failed, it)
+                    }
                 }
             }
 

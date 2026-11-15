@@ -1292,13 +1292,9 @@ internal fun ThinkingRow(
         ?.snapshot?.completedDocumentFor(message.content)
     // 展开态必须在组合期同步推导：若经 LaunchedEffect 晚一帧收起，思考结束的那一帧尾部窗口
     // 已解除而正文仍展开，会以全文高度闪现一帧，再从该高度执行收起动画。
-    // compact（对话流内）按 dsh 形态：流式中也不自动展开，折叠行只推进一行预览摘要，
-    // 展开与否只认手动选择；卡片形态保持流式自动展开。
-    val expanded = if (compact) {
-        manualExpanded ?: false
-    } else {
-        manualExpanded ?: message.isStreaming
-    }
+    // 流式中自动展开正文（尾部窗口多行滚动，用户点过之后只认手动选择）；
+    // 思考一结束自动收起成 dsh 的一行标题（图标 + 预览摘要）。
+    val expanded = manualExpanded ?: message.isStreaming
     // 自动模式下高度上限覆盖到收起动画结束，退出过程不会先撑开再收拢。
     val tailWindow = manualExpanded == null
 
@@ -1490,7 +1486,6 @@ private fun DshThinkingHeader(
             active = message.isStreaming,
             style = textStyle,
             color = tertiary,
-            modifier = Modifier.weight(1f, fill = false),
         )
         if (!expanded && preview.isNotEmpty()) {
             DshRowDot()
