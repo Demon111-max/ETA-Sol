@@ -75,6 +75,12 @@ internal object CharacterRepository {
             discardNewAvatar(avatar, failure)
             throw failure
         }
+        if (avatar != null) {
+            val oldPath = existing.avatarPath
+            if (!oldPath.isNullOrBlank() && oldPath != avatar) {
+                runCatching { File(oldPath).delete() }
+            }
+        }
         saved
     }
 

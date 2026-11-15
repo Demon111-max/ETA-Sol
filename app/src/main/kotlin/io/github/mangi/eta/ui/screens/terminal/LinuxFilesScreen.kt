@@ -233,7 +233,7 @@ internal fun LinuxFilesScreen(
                         }
                     }
                     else -> {
-                        itemsIndexed(currentEntries, key = { _, entry -> entry.name }) { index, entry ->
+                        itemsIndexed(currentEntries, key = { _, entry -> "entry:" + entry.name }) { index, entry ->
                             FileRow(
                                 name = entry.name,
                                 isDir = entry.isDir,

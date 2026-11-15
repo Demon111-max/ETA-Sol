@@ -399,14 +399,14 @@ internal class TerminalScreenBuffer(
     }
 
     private fun tabForward(count: Int) {
-        repeat(count) {
+        repeat(count.coerceIn(0, cols)) {
             cursorCol = (((cursorCol / 8) + 1) * 8).coerceAtMost(cols - 1)
         }
         wrapPending = false
     }
 
     private fun tabBackward(count: Int) {
-        repeat(count) {
+        repeat(count.coerceIn(0, cols)) {
             cursorCol = if (cursorCol == 0) 0 else ((cursorCol - 1) / 8) * 8
         }
         wrapPending = false
@@ -418,9 +418,9 @@ internal class TerminalScreenBuffer(
     }
 
     private fun scrollUp(count: Int) {
-        repeat(count) {
-            val regionHeight = scrollBottom - scrollTop + 1
-            if (regionHeight <= 0) return
+        val regionHeight = scrollBottom - scrollTop + 1
+        if (regionHeight <= 0) return
+        repeat(count.coerceAtMost(regionHeight)) {
             val top = screen[scrollTop]
             for (row in scrollTop until scrollBottom) {
                 screen[row] = screen[row + 1]
@@ -436,9 +436,9 @@ internal class TerminalScreenBuffer(
     }
 
     private fun scrollDown(count: Int) {
-        repeat(count) {
-            val regionHeight = scrollBottom - scrollTop + 1
-            if (regionHeight <= 0) return
+        val regionHeight = scrollBottom - scrollTop + 1
+        if (regionHeight <= 0) return
+        repeat(count.coerceAtMost(regionHeight)) {
             val bottom = screen[scrollBottom]
             for (row in scrollBottom downTo scrollTop + 1) {
                 screen[row] = screen[row - 1]

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -279,11 +280,17 @@ internal class ForgeApiClient(
             .header("Accept", "text/event-stream")
             .get()
             .build()
-        eventClient.newCall(request).execute().use { response ->
+        val call = eventClient.newCall(request)
+        currentCoroutineContext().job.invokeOnCancellation { call.cancel() }
+        call.execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val source = response.body.source() ?: throw IOException("empty event stream")
             while (currentCoroutineContext().isActive) {
-                val line = source.readUtf8Line() ?: break
+                val line = try {
+                    source.readUtf8Line()
+                } catch (failure: IOException) {
+                    if (currentCoroutineContext().isActive) throw failure else break
+                } ?: break
                 if (!line.startsWith("data:")) continue
                 val payload = line.removePrefix("data:").trim()
                 if (payload.isEmpty()) continue

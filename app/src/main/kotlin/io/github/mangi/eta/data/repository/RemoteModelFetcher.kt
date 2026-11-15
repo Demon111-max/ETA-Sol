@@ -69,7 +69,8 @@ internal object RemoteModelFetcher {
                     profile == null && provider is AnthropicProviderSetting -> fetchAnthropic(provider, controller, client, credentials)
                     else -> fetchOpenAiCompatible(provider, controller, client, credentials)
                 }
-                val models = if (profile == ProviderConnectionProfile.OPENAI_CODEX) fetched else fetched.filter(::isChatCapableModel)
+                val models = (if (profile == ProviderConnectionProfile.OPENAI_CODEX) fetched else fetched.filter(::isChatCapableModel))
+                    .distinctBy { it.modelId }
                 controller.throwIfCancelled()
                 if (binding != null && !credentials.isCurrent(binding)) {
                     throw ProviderAuthException("oauth_session_changed", "登录账号已变更，请重新拉取模型")

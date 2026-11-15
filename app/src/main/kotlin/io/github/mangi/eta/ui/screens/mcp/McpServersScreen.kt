@@ -652,16 +652,17 @@ internal fun McpServerDetailScreen(
                 confirmText = stringResource(R.string.action_save),
                 onConfirm = {
                     server?.let { current ->
+                        val tokenSnapshot = token
                         scope.launch(Dispatchers.IO) {
                             McpServerRepository.update(
                                 current.copy(
-                                    authorizationType = if (token.isBlank()) {
+                                    authorizationType = if (tokenSnapshot.isBlank()) {
                                         McpAuthorizationType.NONE
                                     } else {
                                         McpAuthorizationType.BEARER
                                     },
                                 ),
-                                bearerToken = token,
+                                bearerToken = tokenSnapshot,
                             )
                         }
                         token = ""
@@ -826,16 +827,17 @@ internal fun McpServerDetailScreen(
                         onCancel = { showToken = false },
                         onConfirm = {
                             server?.let { current ->
+                                val tokenSnapshot = token
                                 scope.launch(Dispatchers.IO) {
                                     McpServerRepository.update(
                                         current.copy(
-                                            authorizationType = if (token.isBlank()) {
+                                            authorizationType = if (tokenSnapshot.isBlank()) {
                                                 McpAuthorizationType.NONE
                                             } else {
                                                 McpAuthorizationType.BEARER
                                             },
                                         ),
-                                        bearerToken = token,
+                                        bearerToken = tokenSnapshot,
                                     )
                                 }
                                 token = ""

@@ -258,9 +258,11 @@ internal object AgentConversationStore {
                 !checkpoint.historyJson.startsWith(io.github.mangi.eta.data.db.ChunkedTextDao.REFERENCE_PREFIX)
             ) journal else decodeCheckpoint(dao, conversationId, "history", checkpoint?.historyJson)
             val state = AgentChatHomeUiState(
-                roleplay = conversation.roleplayJson.takeIf(String::isNotBlank)?.let { json.decodeFromString<RoleplayBinding>(it) },
+                roleplay = conversation.roleplayJson.takeIf(String::isNotBlank)?.let {
+                    runCatching { json.decodeFromString<RoleplayBinding>(it) }.getOrNull()
+                },
                 roleplayMessages = conversation.revisionsJson.takeIf(String::isNotBlank)?.let {
-                    json.decodeFromString<RoleplayMessageState>(it)
+                    runCatching { json.decodeFromString<RoleplayMessageState>(it) }.getOrNull()
                 } ?: RoleplayMessageState(),
                 journal = journal,
                 messages = page.messages,

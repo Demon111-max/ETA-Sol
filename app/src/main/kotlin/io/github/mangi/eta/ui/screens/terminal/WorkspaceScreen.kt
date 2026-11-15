@@ -322,7 +322,7 @@ internal fun WorkspaceScreen(onBack: () -> Unit) {
                     icon = Icons.Rounded.FolderOpen,
                 )
             }
-            else -> itemsIndexed(currentEntries, key = { _, entry -> entry.path }) { index, entry ->
+            else -> itemsIndexed(currentEntries, key = { _, entry -> "entry:" + entry.path }) { index, entry ->
                 val summary = if (entry.directory) stringResource(R.string.capability_workspace_directory)
                 else stringResource(
                     R.string.capability_workspace_file_export,
