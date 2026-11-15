@@ -122,13 +122,30 @@ internal object LinuxPackageProfiles {
     )
 
     /**
-     * opencode 只走官方安装脚本：npm 分发的 opencode-ai 是 musl 构建，glibc 的 Debian 里跑不起来。
-     * 脚本把二进制装到 $HOME/.opencode/bin，随后以 `opencode --version` 是否可执行判定就绪。
-     * 固定装真机验证过的 1.19.5：不带版本号时脚本要先查 npm registry 与 GitHub 接口定最新版，
-     * 这两步在国内网络下容易断且失败不透出原因；带版本号后脚本直接走官方下载。
+     * opencode 固定装真机验证过的 1.19.5。官方脚本从 GitHub 下载二进制，国内网络下经常断，
+     * 条目改为首选 npmmirror 直下官方 npm 平台包（与官方脚本同源的二进制）：Debian 用 glibc 包、
+     * Alpine 用 musl 包——npm 全量安装当年就是选错 musl 包才在 Debian 上跑不起来，这里按发行版写死包名。
+     * 镜像失败才回退官方脚本（带版本号，跳过它先查 npm/GitHub 接口定版本的两步）。
+     * 二进制装到 $HOME/.opencode/bin，随后以 `opencode --version` 是否可执行判定就绪。
      */
-    private const val OPENCODE_INSTALL_SCRIPT =
-        "curl -fsSL https://opencode.ai/install | bash -s -- --version 1.19.5"
+    private const val OPENCODE_VERSION = "1.19.5"
+
+    private fun opencodeInstallScript(musl: Boolean): String {
+        val suffix = if (musl) "-musl" else ""
+        return """
+            oc_arch=${'$'}(uname -m)
+            case "${'$'}oc_arch" in aarch64) oc_arch=arm64 ;; x86_64) oc_arch=x64 ;; esac
+            oc_pkg="opencode-linux-${'$'}oc_arch$suffix"
+            mkdir -p "${'$'}HOME/.opencode/bin"
+            rm -rf /tmp/eta-opencode-dl && mkdir -p /tmp/eta-opencode-dl
+            if curl -fsSL "https://registry.npmmirror.com/${'$'}oc_pkg/-/${'$'}oc_pkg-$OPENCODE_VERSION.tgz" -o /tmp/eta-opencode-dl/oc.tgz && tar -xzf /tmp/eta-opencode-dl/oc.tgz -C /tmp/eta-opencode-dl; then
+              cp /tmp/eta-opencode-dl/package/bin/opencode "${'$'}HOME/.opencode/bin/opencode" && chmod 755 "${'$'}HOME/.opencode/bin/opencode" || curl -fsSL https://opencode.ai/install | bash -s -- --version $OPENCODE_VERSION
+            else
+              curl -fsSL https://opencode.ai/install | bash -s -- --version $OPENCODE_VERSION
+            fi
+            rm -rf /tmp/eta-opencode-dl
+        """.trimIndent()
+    }
 
     /** 安装脚本装在 $HOME/.opencode/bin，不在 PATH 里，按绝对路径自检。 */
     private const val OPENCODE_VERIFY_SCRIPT =
@@ -140,11 +157,11 @@ internal object LinuxPackageProfiles {
         revision = AlpineEnvironmentPaths.OPENCODE_TOOLS_REVISION,
         specs = mapOf(
             LinuxDistribution.ALPINE to LinuxPackageSpec(
-                setupScript = OPENCODE_INSTALL_SCRIPT,
+                setupScript = opencodeInstallScript(musl = true),
                 verifyScript = OPENCODE_VERIFY_SCRIPT,
             ),
             LinuxDistribution.DEBIAN to LinuxPackageSpec(
-                setupScript = OPENCODE_INSTALL_SCRIPT,
+                setupScript = opencodeInstallScript(musl = false),
                 verifyScript = OPENCODE_VERIFY_SCRIPT,
             ),
         ),
