@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.screens.forge
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -59,59 +60,76 @@ internal fun ForgeScreen(
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
-    var reloadKey by remember { mutableStateOf(0) }
-    LaunchedEffect(reloadKey) {
+    LaunchedEffect(Unit) {
         gate = ForgeGateState.Checking
         gate = withContext(Dispatchers.IO) { checkForgeGate(context.applicationContext) }
     }
 
+    when (val state = gate) {
+        // 门禁通过后直接进对话；检查中与未就绪保持同一块静态版面。
+        ForgeGateState.Ready -> ForgeChatPane(modifier = modifier.fillMaxSize())
+
+        // 检查中保持空白：不引入任何进度指示。
+        ForgeGateState.Checking -> Box(modifier = modifier.fillMaxSize())
+
+        is ForgeGateState.Missing -> ForgeGateMissing(
+            prerequisite = state.prerequisite,
+            onOpenLinuxEnvironment = onOpenLinuxEnvironment,
+            onOpenForgeSettings = onOpenForgeSettings,
+            modifier = modifier,
+        )
+    }
+}
+
+@Composable
+private fun ForgeGateMissing(
+    prerequisite: ForgePrerequisite,
+    onOpenLinuxEnvironment: () -> Unit,
+    onOpenForgeSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val (titleRes, summaryRes) = when (prerequisite) {
+        ForgePrerequisite.LinuxEnvironment ->
+            R.string.forge_gate_linux_missing to R.string.forge_gate_linux_missing_summary
+
+        ForgePrerequisite.Opencode ->
+            R.string.forge_gate_opencode_missing to R.string.forge_gate_opencode_missing_summary
+
+        ForgePrerequisite.Config ->
+            R.string.forge_gate_config_missing to R.string.forge_gate_config_missing_summary
+    }
+    val actionRes = if (prerequisite == ForgePrerequisite.Config) {
+        R.string.forge_gate_open_settings
+    } else {
+        R.string.forge_gate_open_environment
+    }
     Column(
         modifier = modifier.fillMaxSize(),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        when (val state = gate) {
-            ForgeGateState.Checking -> Unit
-            // 门禁通过后的对话界面由后续步骤接上。
-            ForgeGateState.Ready -> Unit
-            is ForgeGateState.Missing -> {
-                val (titleRes, summaryRes) = when (state.prerequisite) {
-                    ForgePrerequisite.LinuxEnvironment ->
-                        R.string.forge_gate_linux_missing to R.string.forge_gate_linux_missing_summary
-                    ForgePrerequisite.Opencode ->
-                        R.string.forge_gate_opencode_missing to R.string.forge_gate_opencode_missing_summary
-                    ForgePrerequisite.Config ->
-                        R.string.forge_gate_config_missing to R.string.forge_gate_config_missing_summary
-                }
-                val actionRes = if (state.prerequisite == ForgePrerequisite.Config) {
-                    R.string.forge_gate_open_settings
-                } else {
-                    R.string.forge_gate_open_environment
-                }
-                ListEmptyState(
-                    title = stringResource(titleRes),
-                    summary = stringResource(summaryRes),
-                    icon = Icons.Rounded.Construction,
-                    action = {
-                        ForgeGateAction(
-                            text = stringResource(actionRes),
-                            onClick = {
-                                if (state.prerequisite == ForgePrerequisite.Config) {
-                                    onOpenForgeSettings()
-                                } else {
-                                    onOpenLinuxEnvironment()
-                                }
-                            },
-                        )
+        ListEmptyState(
+            title = stringResource(titleRes),
+            summary = stringResource(summaryRes),
+            icon = Icons.Rounded.Construction,
+            action = {
+                ForgeGateAction(
+                    text = stringResource(actionRes),
+                    onClick = {
+                        if (prerequisite == ForgePrerequisite.Config) {
+                            onOpenForgeSettings()
+                        } else {
+                            onOpenLinuxEnvironment()
+                        }
                     },
                 )
-            }
-        }
+            },
+        )
     }
 }
 
 @Composable
-private fun ForgeGateAction(text: String, onClick: () -> Unit) {
+internal fun ForgeGateAction(text: String, onClick: () -> Unit) {
     if (LocalUiStyle.current == AppearanceUiStyle.COUI) {
         CouiButton(
             text = text,

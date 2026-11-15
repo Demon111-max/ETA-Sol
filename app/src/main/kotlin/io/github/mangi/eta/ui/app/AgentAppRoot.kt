@@ -200,8 +200,18 @@ fun AgentAppRoot(
     // Forge 本期只有单会话：打开与否用独立状态，不塞进 AgentAppState，避免影响 Assist 的会话逻辑。
     var forgeOpen by rememberSaveable { mutableStateOf(false) }
     var forgeNewConversationMode by remember { mutableStateOf(ForgeChatMode.Assist) }
+    // 启动时的首页就是「下一个新对话」，所以控件要落在上次用过的模式上。
+    // 只认首次组合：旋转屏幕后再次进入不能把用户从 Assist 对话里拽回 Forge。
+    var forgeStartupApplied by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        forgeNewConversationMode = SettingsDataStore.forgeChatMode()
+        val persisted = SettingsDataStore.forgeChatMode()
+        forgeNewConversationMode = persisted
+        if (!forgeStartupApplied) {
+            forgeStartupApplied = true
+            if (persisted == ForgeChatMode.Forge) {
+                forgeOpen = true
+            }
+        }
     }
     val chatMode = if (forgeOpen) ForgeChatMode.Forge else ForgeChatMode.Assist
     var conversationRenameTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }

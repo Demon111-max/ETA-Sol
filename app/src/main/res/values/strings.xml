@@ -1024,6 +1024,15 @@
   <string name="forge_gate_config_missing_summary">Fill in the relay base URL, API key and model ID.</string>
   <string name="forge_gate_open_environment">Open Linux tools</string>
   <string name="forge_gate_open_settings">Open Forge settings</string>
+  <string name="forge_input_hint">Ask opencode to do it</string>
+  <string name="forge_working">opencode is working…</string>
+  <string name="forge_empty_hint">Describe the change; opencode will work inside the Linux environment</string>
+  <string name="forge_server_starting">Starting opencode…</string>
+  <string name="forge_server_failed_title">opencode did not start</string>
+  <string name="forge_server_failed">Failed to start: %1$s</string>
+  <string name="forge_retry">Retry</string>
+  <string name="forge_send_failed">Failed to send: %1$s</string>
+  <string name="forge_run_failed">opencode reported an error: %1$s</string>
   <string name="forge_settings_title">Forge (opencode)</string>
   <string name="forge_relay_group">Relay</string>
   <string name="forge_base_url">Relay base URL</string>

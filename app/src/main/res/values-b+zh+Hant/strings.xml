@@ -997,6 +997,15 @@
   <string name="forge_gate_config_missing_summary">需要填写中转站地址、API Key 与模型 ID。</string>
   <string name="forge_gate_open_environment">前往 Linux 工具环境</string>
   <string name="forge_gate_open_settings">前往 Forge 设置</string>
+  <string name="forge_input_hint">交給 opencode 去完成</string>
+  <string name="forge_working">opencode 正在執行…</string>
+  <string name="forge_empty_hint">直接說要改什麼，opencode 會在 Linux 環境裡動手</string>
+  <string name="forge_server_starting">正在啟動 opencode…</string>
+  <string name="forge_server_failed_title">opencode 沒有啟動</string>
+  <string name="forge_server_failed">啟動失敗：%1$s</string>
+  <string name="forge_retry">重試</string>
+  <string name="forge_send_failed">傳送失敗：%1$s</string>
+  <string name="forge_run_failed">opencode 回報錯誤：%1$s</string>
   <string name="forge_settings_title">Forge（opencode）</string>
   <string name="forge_relay_group">中转站</string>
   <string name="forge_base_url">中转站地址（Base URL）</string>

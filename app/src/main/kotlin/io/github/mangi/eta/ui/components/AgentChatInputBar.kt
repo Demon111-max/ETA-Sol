@@ -168,6 +168,10 @@ internal fun AgentChatInputBar(
     onAttachFilePath: (String) -> Unit,
     onRemoveFileReference: (String) -> Unit,
     onCancelMessageEdit: () -> Unit,
+    // Forge 模式复用同一条输入条：不带附件入口，提示语换成 opencode 的措辞。
+    showAttach: Boolean = true,
+    hintText: String? = null,
+    workingText: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
@@ -384,6 +388,8 @@ internal fun AgentChatInputBar(
                     if (textFieldState.text.isBlank()) {
                         Text(
                             text = when {
+                                hintText != null && isStreaming -> workingText ?: hintText
+                                hintText != null -> hintText
                                 // 角色对话的占位文字跟随角色，避免“交给 Eta”打断沉浸感。
                                 character != null && isStreaming ->
                                     stringResource(R.string.chat_character_typing, character.characterName)
@@ -427,7 +433,7 @@ internal fun AgentChatInputBar(
                                     tint = MiuixTheme.colorScheme.onSurface,
                                 )
                             }
-                        } else {
+                        } else if (showAttach) {
                             AgentAttachmentPickerButton(
                                 popupAnchorTopPx = inputContainerTopPx,
                                 popupMaxHeight = thinkingPopupMaxHeight,
