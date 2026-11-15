@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -184,70 +186,98 @@ internal fun ForgeChatPane(
         }
     }
 
-    Column(modifier = modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-        ) {
-            // 启动遮罩、失败页、对话三态之间走交叉淡入淡出，不硬切（仿 DSHA 启动屏的收尾）。
-            AnimatedContent(
-                targetState = state.startup,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(240)) togetherWith
-                        fadeOut(animationSpec = tween(160))
-                },
-                label = "forgeStartup",
-                modifier = Modifier.fillMaxSize(),
-            ) { startup ->
-                when (startup) {
-                    ForgeStartup.Connecting -> ForgeStartupSplash(stage = state.startupStage)
+    // 底部整叠（提示条/提问卡/工作区条/输入区）的实测高度：列表按它抬高底部留白，
+    // 停在底部时最后一行正好落在输入区上方，不被浮层盖住。
+    var bottomStackHeight by remember { mutableStateOf(0.dp) }
+    val density = LocalDensity.current
+    val surface = MiuixTheme.colorScheme.surface
 
-                    is ForgeStartup.Failed -> Box(modifier = Modifier.padding(top = topInset)) {
-                        ListEmptyState(
-                        title = stringResource(R.string.forge_server_failed_title),
-                        summary = startup.message,
-                        icon = Icons.Rounded.ErrorOutline,
-                        action = {
-                            ForgeGateAction(
-                                text = stringResource(R.string.forge_retry),
-                                onClick = { state.retry() },
-                            )
-                        },
+    Box(modifier = modifier.fillMaxSize()) {
+        // 启动遮罩、失败页、对话三态之间走交叉淡入淡出，不硬切（仿 DSHA 启动屏的收尾）。
+        AnimatedContent(
+            targetState = state.startup,
+            transitionSpec = {
+                fadeIn(animationSpec = tween(240)) togetherWith
+                    fadeOut(animationSpec = tween(160))
+            },
+            label = "forgeStartup",
+            modifier = Modifier.fillMaxSize(),
+        ) { startup ->
+            when (startup) {
+                ForgeStartup.Connecting -> ForgeStartupSplash(stage = state.startupStage)
+
+                is ForgeStartup.Failed -> Box(modifier = Modifier.padding(top = topInset)) {
+                    ListEmptyState(
+                    title = stringResource(R.string.forge_server_failed_title),
+                    summary = startup.message,
+                    icon = Icons.Rounded.ErrorOutline,
+                    action = {
+                        ForgeGateAction(
+                            text = stringResource(R.string.forge_retry),
+                            onClick = { state.retry() },
                         )
-                    }
-
-                    ForgeStartup.Ready -> ForgeTranscript(
-                        state = state,
-                        topInset = topInset,
-                        onOpenWorkspaces = { workspaceDialogOpen = true },
+                    },
                     )
                 }
+
+                ForgeStartup.Ready -> ForgeTranscript(
+                    state = state,
+                    topInset = topInset,
+                    bottomInset = bottomStackHeight,
+                    onOpenWorkspaces = { workspaceDialogOpen = true },
+                )
             }
         }
         if (state.startup is ForgeStartup.Ready) {
-            state.notice?.let { notice ->
-                ForgeNoticeBar(
-                    text = notice,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            // 与 Assist 同构：消息层整屏铺满，底部整叠作为浮层盖在列表上，背后一层
+            // 垂直渐隐承接，内容滚动时从渐隐里穿过。以前是上下分栏：列表底边把一行字
+            // 齐根切断、下面接着输入区的白色块（用户图 3 指的就是这里，不是顶栏）。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .imePadding()
+                    .onSizeChanged { size ->
+                        bottomStackHeight = with(density) { size.height.toDp() }
+                    },
+            ) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.0f to Color.Transparent,
+                                0.26f to surface.copy(alpha = 0.86f),
+                                0.55f to surface.copy(alpha = 0.98f),
+                                1.0f to surface,
+                            ),
+                        ),
                 )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    state.notice?.let { notice ->
+                        ForgeNoticeBar(
+                            text = notice,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        )
+                    }
+                    state.pendingQuestion?.let { request ->
+                        ForgeQuestionCard(
+                            request = request,
+                            onAnswer = { answers -> state.answerQuestion(answers) },
+                            onSkip = { state.dismissQuestion() },
+                        )
+                    }
+                    ForgeWorkspaceBar(
+                        workspace = state.workspace,
+                        onClick = { workspaceDialogOpen = true },
+                    )
+                    ForgeComposer(
+                        state = state,
+                        onSend = { text -> state.send(text) },
+                        onStop = { state.stop() },
+                    )
+                }
             }
-            state.pendingQuestion?.let { request ->
-                ForgeQuestionCard(
-                    request = request,
-                    onAnswer = { answers -> state.answerQuestion(answers) },
-                    onSkip = { state.dismissQuestion() },
-                )
-            }
-            ForgeWorkspaceBar(
-                workspace = state.workspace,
-                onClick = { workspaceDialogOpen = true },
-            )
-            ForgeComposer(
-                state = state,
-                onSend = { text -> state.send(text) },
-                onStop = { state.stop() },
-            )
         }
     }
     if (workspaceDialogOpen && state.startup is ForgeStartup.Ready) {
@@ -722,6 +752,7 @@ private fun ForgeStartupSplash(stage: ForgeStartupStage, modifier: Modifier = Mo
 private fun ForgeTranscript(
     state: ForgeChatState,
     topInset: Dp = 0.dp,
+    bottomInset: Dp = 0.dp,
     onOpenWorkspaces: () -> Unit = {},
 ) {
     val messages = state.messages
@@ -821,11 +852,18 @@ private fun ForgeTranscript(
         .any { turn -> turn.messages.any { it.id == turnError.anchorMessageId } }
     val coroutineScope = rememberCoroutineScope()
     Box(modifier = Modifier.fillMaxSize()) {
-        // 与 Assist 同款：列表整屏铺到顶栏底下，顶部留白走 contentPadding，顶栏才有内容可模糊。
+        // 与 Assist 同款：列表整屏铺满，顶部留白走 contentPadding 让顶栏有内容可模糊；
+        // 底部留白 = 输入区整叠高度，停在底部时最后一行落在输入区上方，
+        // 滚动时内容从输入区的渐隐层下穿过，不再被分栏底边切断。
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = topInset + 12.dp, bottom = 12.dp),
+            contentPadding = PaddingValues(
+                start = 14.dp,
+                end = 14.dp,
+                top = topInset + 12.dp,
+                bottom = bottomInset + 12.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             items(turns, key = { it.key }) { turn ->
@@ -859,25 +897,11 @@ private fun ForgeTranscript(
                 }
             }
         }
-        // 顶部渐隐（与输入区底部渐隐同一套语言）：内容滑到顶栏下时柔和淡入底色，
-        // 不再被白色实心顶栏齐根切断一行字。
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(topInset + 10.dp)
-                .background(
-                    Brush.verticalGradient(
-                        0.0f to MiuixTheme.colorScheme.surface,
-                        0.75f to MiuixTheme.colorScheme.surface.copy(alpha = 0.92f),
-                        1.0f to Color.Transparent,
-                    ),
-                ),
-        )
         if (!followBottom) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 12.dp)
+                    .padding(end = 16.dp, bottom = bottomInset + 12.dp)
                     .size(36.dp)
                     .clip(CircleShape)
                     .background(MiuixTheme.colorScheme.surfaceContainerHigh)
@@ -1131,7 +1155,6 @@ private fun ForgeComposer(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val surface = MiuixTheme.colorScheme.surface
     val attachments = state.pendingAttachments
     // 输入栏的待发模型是 Assist 的形状：图片走图片条、其余走文件引用条，这里做一次映射。
     val pendingImages = attachments.filter { it.isImage }.map { attachment ->
@@ -1159,24 +1182,11 @@ private fun ForgeComposer(
     val queuedMessages = state.queuedTexts.mapIndexed { index, text ->
         QueuedMessageUi(id = "forge-queue-$index", content = text)
     }
+    // 底部渐隐与 imePadding 已由外层底部整叠统一提供（盖住工作区条/提问卡/输入区），
+    // 这里只剩输入区本体，别再套一层渐隐免得交界处颜色叠深。
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .imePadding(),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        // 与 Assist 输入区同一套底部渐隐，避免实心矩形把消息流截断。
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.0f to Color.Transparent,
-                        0.26f to surface.copy(alpha = 0.86f),
-                        0.55f to surface.copy(alpha = 0.98f),
-                        1.0f to surface,
-                    ),
-                ),
-        )
         Column(
             modifier = Modifier
                 .fillMaxWidth()
