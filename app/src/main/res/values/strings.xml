@@ -1032,6 +1032,7 @@
   <string name="forge_server_failed">Failed to start: %1$s</string>
   <string name="forge_retry">Retry</string>
   <string name="forge_send_failed">Failed to send: %1$s</string>
+  <string name="forge_new_conversation_failed">Could not start a new chat: %1$s</string>
   <string name="forge_run_failed">opencode reported an error: %1$s</string>
   <string name="forge_settings_title">Forge (opencode)</string>
   <string name="forge_relay_group">Relay</string>

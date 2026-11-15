@@ -1017,6 +1017,7 @@
   <string name="forge_server_failed">启动失败：%1$s</string>
   <string name="forge_retry">重试</string>
   <string name="forge_send_failed">发送失败：%1$s</string>
+  <string name="forge_new_conversation_failed">新建对话失败：%1$s</string>
   <string name="forge_run_failed">opencode 报错：%1$s</string>
   <string name="forge_settings_title">Forge（opencode）</string>
   <string name="forge_relay_group">中转站</string>

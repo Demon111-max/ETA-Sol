@@ -143,7 +143,7 @@ internal object LinuxPackageProfiles {
             oc_pkg="opencode-linux-${'$'}oc_arch$suffix"
             mkdir -p "${'$'}HOME/.opencode/bin"
             rm -rf /tmp/eta-opencode-dl && mkdir -p /tmp/eta-opencode-dl
-            if curl -fsSL "https://registry.npmmirror.com/${'$'}oc_pkg/-/${'$'}oc_pkg-$OPENCODE_VERSION.tgz" -o /tmp/eta-opencode-dl/oc.tgz && tar -xzf /tmp/eta-opencode-dl/oc.tgz -C /tmp/eta-opencode-dl; then
+            if curl -fsSL --connect-timeout 15 --max-time 300 --retry 2 "https://registry.npmmirror.com/${'$'}oc_pkg/-/${'$'}oc_pkg-$OPENCODE_VERSION.tgz" -o /tmp/eta-opencode-dl/oc.tgz && tar -xzf /tmp/eta-opencode-dl/oc.tgz -C /tmp/eta-opencode-dl; then
               cp /tmp/eta-opencode-dl/package/bin/opencode "${'$'}HOME/.opencode/bin/opencode" && chmod 755 "${'$'}HOME/.opencode/bin/opencode" || curl -fsSL https://opencode.ai/install | bash -s -- --version $OPENCODE_VERSION
             else
               curl -fsSL https://opencode.ai/install | bash -s -- --version $OPENCODE_VERSION

@@ -40,26 +40,39 @@ internal class ForgeApiClient(
             .build()
     }
 
-    /** 已有会话就沿用第一个，没有就新建一个；Forge 本期只有单会话。 */
+    /** 已有会话就沿用最近更新的一个，没有就新建一个。 */
     suspend fun ensureSession(): Result<String> {
-        val existing = runCatching { listSessions() }
-        existing.getOrNull()?.firstOrNull()?.let { return Result.success(it) }
+        val existing = runCatching { latestSession() }
+        existing.getOrNull()?.let { return Result.success(it) }
         if (existing.isFailure && (existing.exceptionOrNull() as? IOException) != null) {
             return Result.failure(existing.exceptionOrNull()!!)
         }
         return createSession()
     }
 
-    private suspend fun listSessions(): List<String> = withContext(Dispatchers.IO) {
+    private suspend fun latestSession(): String? = withContext(Dispatchers.IO) {
         val request = Request.Builder().url("$baseUrl/session").get().build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val body = response.body.string().orEmpty()
-            ForgeProtocol.parseSessionList(Json.parseToJsonElement(body))
+            ForgeProtocol.parseLatestSessionId(Json.parseToJsonElement(body))
         }
     }
 
-    private suspend fun createSession(): Result<String> = withContext(Dispatchers.IO) {
+    /** 查会话当前是否还在跑：SSE 断线重连后用它对齐 busy，光靠事件会漏掉断线期间的 idle。 */
+    suspend fun sessionBusy(sessionId: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder().url("$baseUrl/session/status").get().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                val body = response.body.string().orEmpty()
+                ForgeProtocol.parseSessionBusy(Json.parseToJsonElement(body), sessionId)
+            }
+        }
+    }
+
+    /** 新建一个 opencode 会话（Forge 新建对话用）。 */
+    suspend fun createSession(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val request = Request.Builder()
                 .url("$baseUrl/session")

@@ -1005,6 +1005,7 @@
   <string name="forge_server_failed">啟動失敗：%1$s</string>
   <string name="forge_retry">重試</string>
   <string name="forge_send_failed">傳送失敗：%1$s</string>
+  <string name="forge_new_conversation_failed">新增對話失敗：%1$s</string>
   <string name="forge_run_failed">opencode 回報錯誤：%1$s</string>
   <string name="forge_settings_title">Forge（opencode）</string>
   <string name="forge_relay_group">中转站</string>

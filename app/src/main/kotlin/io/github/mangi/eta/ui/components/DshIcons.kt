@@ -46,11 +46,16 @@ internal fun dshIconForTool(toolId: String): ImageVector {
 }
 
 private val BASH_TOOLS = setOf(
-    "bash", "shell", "exec", "run_command", "terminal", "terminal_job", "terminal_daemon",
+    "bash", "shell", "exec",
     "code_interpreter", "code_interpreter_call", "代码执行",
 )
 
-private val CODE_TOOLS = setOf("computer", "computer_call", "计算机操作")
+// 终端类归 code（dsh 原版分工）：Eta 的 terminal 系列与 run_command 都在这里，
+// 不能放进 BASH_TOOLS，否则会被前面的 api 分支先命中。
+private val CODE_TOOLS = setOf(
+    "computer", "computer_call", "计算机操作",
+    "terminal", "terminal_job", "terminal_daemon", "run_command", "get_logcat",
+)
 
 private val READ_TOOLS = setOf(
     "read", "list", "ls", "read_file", "stat_file", "read_image", "observe", "observe_screen",
@@ -59,11 +64,15 @@ private val READ_TOOLS = setOf(
 
 private val BROWSER_TOOLS = setOf(
     "browser_use", "browser_interact", "browser_screenshot", "网页浏览",
+    // Eta 的手机界面操作：看屏幕、点按滑动，与「浏览界面」同义，归 browse。
+    "click", "tap", "tap_element", "long_press", "swipe", "scroll", "get_current_context",
 )
 
 private val WRITE_TOOLS = setOf(
     "write", "edit", "patch", "apply_patch", "multiedit",
     "write_file", "edit_file", "replace_text",
+    // Eta 的文字输入类工具，本质是往界面里写字，归 edit。
+    "type_text", "input_text", "clear_text",
 )
 
 private val SEARCH_TOOLS = setOf(

@@ -99,8 +99,9 @@ internal fun ToolActivityRow(
     showTitle: Boolean = true,
 ) {
     val running = message.status == ToolActivityStatusUi.Running
-    val elapsedSeconds = rememberRunningSeconds(message.id, running)
     if (message.toolName == AgentSubagentToolCatalog.TOOL_NAME) {
+        // 计时只给子智能体行用：放进这个分支里调，非子智能体行不再每秒白白重组一次。
+        val elapsedSeconds = rememberRunningSeconds(message.id, running)
         val snapshot = remember(message.command, message.argumentsSummary, message.resultSummary, message.status) {
             SubagentActivitySnapshot.decode(message.command) ?: SubagentActivitySnapshot(
                 subagentType = message.argumentsSummary.substringBefore(" · ").ifBlank { "subagent" },
@@ -141,16 +142,21 @@ internal fun ToolActivityRow(
     }
     // 折叠行摘要：浏览器条目优先显示实时页面行；失败时按 dsh 惯例换成错误首行；
     // 其余时候是调用摘要（命令/路径等）。
-    val summary = browserLine ?: if (failed) {
+    val rawSummary = browserLine ?: if (failed) {
         outcome ?: message.argumentsSummary.ifBlank { null }
     } else {
         message.argumentsSummary.ifBlank { null }
     }
+    // 失败但摘要全空时也要留一个失败标识，否则折叠行和一条无摘要的成功行看不出区别。
+    val summary = rawSummary ?: if (failed) stringResource(R.string.tool_status_failed) else null
     // 结果只有一行且已作为结论显示时，展开不会带来新信息，不提供展开入口。
     val resultDetail = message.resultSummary?.trim()?.takeIf { it.isNotEmpty() && it != outcome }
+    // 已展开的行必须始终可收起：浏览器标记转移后 showBrowserShortcut 变 false，
+    // hasDetail 若跟着变 false，这行会被卡在展开态点不回去。
     val hasDetail = !message.command.isNullOrBlank() ||
         resultDetail != null ||
-        showBrowserShortcut
+        showBrowserShortcut ||
+        expanded
 
     Column(modifier = modifier.fillMaxWidth()) {
         DshRowHeader(
@@ -321,7 +327,6 @@ private fun ToolActivityStatusUi.dotColor() = when (this) {
     ToolActivityStatusUi.Unknown -> MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.45f)
 }
 
-private const val RUNNING_TIMER_THRESHOLD_SECONDS = 3
 private const val MAX_RESULT_LINES = 12
 
 /**

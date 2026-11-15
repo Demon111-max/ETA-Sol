@@ -59,11 +59,19 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 思考块、工具行、正文都复用现有组件，不经过 Eta 的 AgentLoop。
  */
 @Composable
-internal fun ForgeChatPane(modifier: Modifier = Modifier, topInset: Dp = 0.dp) {
+internal fun ForgeChatPane(
+    modifier: Modifier = Modifier,
+    topInset: Dp = 0.dp,
+    newConversationSignal: Int = 0,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state = remember { ForgeChatState(context.applicationContext, scope) }
     LaunchedEffect(Unit) { state.start() }
+    // 「新建对话」信号变化时另起一个 opencode 会话；初始值 0 不触发。
+    LaunchedEffect(newConversationSignal) {
+        if (newConversationSignal > 0) state.newConversation()
+    }
     DisposableEffect(Unit) { onDispose { state.shutdown() } }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -128,7 +136,15 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
     }
     val listState = rememberLazyListState()
     val lastSignature = messages.lastOrNull()?.let { message ->
-        "${message.id}:${message.parts.size}:${message.parts.lastOrNull()?.id}"
+        // 签名要含最后一个 part 的内容长度：流式 delta 只加长文本，part 数和 id 都不变，
+        // 不含长度的话流式期间签名不变、列表不会跟着滚到底。
+        val tail = when (val last = message.parts.lastOrNull()) {
+            is ForgePart.Text -> "t${last.text.length}"
+            is ForgePart.Reasoning -> "r${last.text.length}"
+            is ForgePart.Tool -> "tool${last.status}"
+            else -> ""
+        }
+        "${message.id}:${message.parts.size}:${message.parts.lastOrNull()?.id}:$tail"
     }
     LaunchedEffect(lastSignature) {
         // 流式追加时贴住底部；用无动画的 scrollToItem，不引入新的滚动效果。

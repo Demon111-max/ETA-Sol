@@ -433,18 +433,21 @@ internal fun AgentChatInputBar(
                                     tint = MiuixTheme.colorScheme.onSurface,
                                 )
                             }
-                        } else if (showAttach) {
-                            AgentAttachmentPickerButton(
-                                popupAnchorTopPx = inputContainerTopPx,
-                                popupMaxHeight = thinkingPopupMaxHeight,
-                                onAttachImage = onAttachImage,
-                                onAttachFiles = onAttachFiles,
-                                onAttachFolder = onAttachFolder,
-                                onAttachFilePath = onAttachFilePath,
-                            )
+                        } else {
+                            if (showAttach) {
+                                AgentAttachmentPickerButton(
+                                    popupAnchorTopPx = inputContainerTopPx,
+                                    popupMaxHeight = thinkingPopupMaxHeight,
+                                    onAttachImage = onAttachImage,
+                                    onAttachFiles = onAttachFiles,
+                                    onAttachFolder = onAttachFolder,
+                                    onAttachFilePath = onAttachFilePath,
+                                )
 
-                            Spacer(modifier = Modifier.width(2.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                            }
 
+                            // 思考档位不跟附件按钮绑定：没有附件入口的场景（如 Forge）也要能调档位。
                             if (availableReasoningEfforts.isNotEmpty()) {
                                 ThinkingEffortChip(
                                     effort = reasoningEffort,

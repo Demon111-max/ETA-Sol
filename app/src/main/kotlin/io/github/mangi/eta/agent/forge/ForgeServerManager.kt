@@ -49,7 +49,10 @@ internal class ForgeServerManager(
 ) {
     companion object {
         const val HOST = "127.0.0.1"
-        const val PORT = 4096
+
+        // 不用 opencode 默认的 4096：Sol 等其他应用的 opencode server 也监听 4096，
+        // PRoot 共用宿主网络命名空间，撞上会连错 server。Forge 专用 4097。
+        const val PORT = 4097
         const val BASE_URL = "http://$HOST:$PORT"
         const val COMMAND = "export PATH=\"\$HOME/.opencode/bin:\$PATH\" && opencode serve --hostname $HOST --port $PORT"
         const val HEALTH_PATH = "/session"
@@ -118,15 +121,41 @@ internal class ForgeServerManager(
 
     /** 已在跑就直接用；否则启动守护任务并最多等 30 秒就绪。 */
     suspend fun ensureRunning(environment: TerminalEnvironment): ForgeServerStartResult = startupMutex.withLock {
-        if (isHealthy()) return ForgeServerStartResult.Running
-        val existing = daemonSupervisor.list().filter { it.running && it.task.command.trim() == COMMAND }
-        if (existing.isEmpty()) {
+        val current = status(environment)
+        if (current.running && current.healthy) return ForgeServerStartResult.Running
+        when (current.code) {
+            "INVALID_ENVIRONMENT", "LINUX_ENVIRONMENT_NOT_READY" ->
+                return ForgeServerStartResult.Failed(current.code)
+        }
+        // 端口只有一个：停掉其他环境（发行版/身份/后端不同）名下的 Forge server，
+        // 否则健康检查会把旧 server 误认成本环境的，配置改了也静默不生效。
+        val distribution = environment.linuxDistribution
+        if (distribution != null) {
+            val rootfsPath = LinuxEnvironmentPaths.rootfsDir(context, distribution).absolutePath
+            if (LinuxEnvironmentPaths.rootfsReady(rootfsPath)) {
+                val identity = TerminalRuntime.defaultIdentity(environment, rootfsPath)
+                val backend = LinuxEnvironmentPaths.backendOf(rootfsPath)
+                daemonSupervisor.list()
+                    .filter { task ->
+                        task.running && task.task.command.trim() == COMMAND &&
+                            (task.task.environment != environment || task.task.identity != identity ||
+                                task.task.backend != backend)
+                    }
+                    .forEach { daemonSupervisor.stop(it.task.id) }
+            }
+        }
+        if (!current.running) {
+            if (isHealthy()) {
+                // 本环境的任务没在跑、端口却有人应答：是本应用之外的 server，不冒认也不乱杀。
+                return ForgeServerStartResult.Failed("FORGE_PORT_IN_USE")
+            }
             when (val started = start(environment)) {
                 is ForgeServerStartResult.Failed -> return started
                 ForgeServerStartResult.Running -> Unit
             }
         }
-        if (waitUntilHealthy()) ForgeServerStartResult.Running else ForgeServerStartResult.Failed("FORGE_SERVER_TIMEOUT")
+        val failure = waitUntilHealthy(environment)
+        if (failure == null) ForgeServerStartResult.Running else ForgeServerStartResult.Failed(failure)
     }
 
     suspend fun start(environment: TerminalEnvironment): ForgeServerStartResult = withContext(Dispatchers.IO) {
@@ -179,13 +208,15 @@ internal class ForgeServerManager(
         return restart(environment)
     }
 
-    private suspend fun waitUntilHealthy(): Boolean {
+    /** 等 server 就绪：返回 null 表示就绪，否则返回失败码；守护任务中途退出立即失败，不干等满 30 秒。 */
+    private suspend fun waitUntilHealthy(environment: TerminalEnvironment): String? {
         val deadline = System.currentTimeMillis() + HEALTH_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
-            if (isHealthy()) return true
+            if (isHealthy()) return null
+            if (status(environment).code == "FORGE_SERVER_EXITED") return "FORGE_SERVER_EXITED"
             delay(POLL_INTERVAL_MS)
         }
-        return isHealthy()
+        return if (isHealthy()) null else "FORGE_SERVER_TIMEOUT"
     }
 
 }

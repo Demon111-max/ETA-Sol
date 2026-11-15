@@ -120,6 +120,31 @@ internal object ForgeProtocol {
         (element as? JsonArray).orEmpty()
             .mapNotNull { parseSessionId(it) }
 
+    /** 会话列表里最近更新的一个：服务端返回顺序不保证，新建多个会话后重启要回到最近用的那个。 */
+    fun parseLatestSessionId(element: JsonElement): String? {
+        val array = element as? JsonArray ?: return null
+        var bestId: String? = null
+        var bestUpdated = Long.MIN_VALUE
+        for (entry in array) {
+            val obj = entry as? JsonObject ?: continue
+            val id = obj.stringOrNull("id") ?: continue
+            val updated = ((obj["time"] as? JsonObject)?.get("updated") as? JsonPrimitive)
+                ?.contentOrNull?.toLongOrNull() ?: Long.MIN_VALUE
+            if (bestId == null || updated > bestUpdated) {
+                bestId = id
+                bestUpdated = updated
+            }
+        }
+        return bestId
+    }
+
+    /** /session/status 的形状是 { 会话ID: { type: idle|busy|retry } }；查不到按不忙处理。 */
+    fun parseSessionBusy(element: JsonElement, sessionId: String): Boolean {
+        val status = (element as? JsonObject)?.get(sessionId) as? JsonObject ?: return false
+        val type = status.stringOrNull("type") ?: return false
+        return type != "idle"
+    }
+
     fun parseMessages(element: JsonElement): List<ForgeChatMessage> =
         (element as? JsonArray).orEmpty()
             .mapNotNull { parseMessageEntry(it) }
@@ -248,7 +273,14 @@ internal object ForgeProtocol {
 
             "session.idle" -> sessionId?.let { ForgeEvent.Idle(it) } ?: ForgeEvent.Ignored(type)
 
-            "session.error" -> ForgeEvent.Failed(sessionId.orEmpty(), properties?.stringOrNull("message"))
+            "session.error" -> {
+                // opencode 的错误在 properties.error.data.message 里，顶层没有 message 字段。
+                val error = properties?.get("error") as? JsonObject
+                val message = (error?.get("data") as? JsonObject)?.stringOrNull("message")
+                    ?: error?.stringOrNull("message")
+                    ?: properties?.stringOrNull("message")
+                ForgeEvent.Failed(sessionId.orEmpty(), message)
+            }
 
             else -> ForgeEvent.Ignored(type)
         }

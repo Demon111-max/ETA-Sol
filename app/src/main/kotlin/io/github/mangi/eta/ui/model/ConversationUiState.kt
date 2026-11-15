@@ -54,8 +54,13 @@ internal fun ConversationPaneUiState.withForgeConversation(
         mode = ConversationModeUi.Chat,
         forge = true,
     )
+    // Forge 条目排在置顶会话之后、普通会话之前：它 updatedAtMillis=0 会被判进「今天」组，
+    // 放在最前面会与置顶组后面的真实「今天」组撞出两个同名分组标题。
+    val insertAt = assistConversations.indexOfFirst { !it.isPinned }
+        .let { if (it < 0) assistConversations.size else it }
+    val merged = assistConversations.toMutableList().apply { add(insertAt, entry) }
     return copy(
-        conversations = listOf(entry) + assistConversations,
+        conversations = merged,
         selectedConversationId = if (forgeOpen) FORGE_CONVERSATION_ID else selectedConversationId,
     )
 }

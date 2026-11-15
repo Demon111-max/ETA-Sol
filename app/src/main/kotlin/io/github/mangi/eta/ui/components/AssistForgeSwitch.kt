@@ -96,7 +96,9 @@ internal fun AssistForgeSwitch(
                             interactionSource = source,
                             indication = null,
                             role = Role.Tab,
-                            onClick = { if (!selected) onModeSelected(item) },
+                            // 已选段也要转发：高亮段是「当前打开的对话」的模式，
+                            // 点它可能是想把「下一个新对话」的记住模式改过来（见 AgentAppRoot.selectChatMode）。
+                            onClick = { onModeSelected(item) },
                         ),
                     contentAlignment = Alignment.Center,
                 ) {

@@ -761,7 +761,9 @@ private fun ConversationHistoryRow(
                 )
             }
 
-            if (selected) {
+            // Forge 合成条目没有对应的数据库会话，置顶/重命名/导出/删除都无从谈起，不给「…」菜单
+            // （长按路径已有同样守卫）。
+            if (selected && !conversation.forge) {
                 val moreLabel = stringResource(R.string.action_more)
                 Box(
                     modifier = Modifier

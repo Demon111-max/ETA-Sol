@@ -62,6 +62,7 @@ internal fun ForgeScreen(
     onOpenModelProviders: () -> Unit,
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
+    newConversationSignal: Int = 0,
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
@@ -72,7 +73,11 @@ internal fun ForgeScreen(
 
     when (val state = gate) {
         // 门禁通过后直接进对话；检查中与未就绪保持同一块静态版面。
-        ForgeGateState.Ready -> ForgeChatPane(modifier = modifier.fillMaxSize(), topInset = topInset)
+        ForgeGateState.Ready -> ForgeChatPane(
+            modifier = modifier.fillMaxSize(),
+            topInset = topInset,
+            newConversationSignal = newConversationSignal,
+        )
 
         // 检查中保持空白：不引入任何进度指示。
         ForgeGateState.Checking -> Box(modifier = modifier.fillMaxSize())

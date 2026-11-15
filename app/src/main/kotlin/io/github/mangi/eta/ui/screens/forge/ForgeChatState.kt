@@ -110,6 +110,7 @@ internal class ForgeChatState(
             }
             sessionId = id
             messages = api.loadMessages(id).getOrDefault(emptyList())
+            api.sessionBusy(id).onSuccess { busy = it }
             startup = ForgeStartup.Ready
             subscribe(id)
         }
@@ -140,6 +141,31 @@ internal class ForgeChatState(
         }
     }
 
+    /**
+     * 新建对话：另起一个 opencode 会话并切过去，界面清零；
+     * 旧会话留在服务端不删，正在跑的轮次也不受影响（事件按会话 ID 过滤）。
+     */
+    fun newConversation() {
+        if (startup !is ForgeStartup.Ready) return
+        scope.launch {
+            api.createSession()
+                .onSuccess { id ->
+                    sessionId = id
+                    messages = emptyList()
+                    busy = false
+                    notice = null
+                    // 事件订阅按会话 ID 过滤，切了会话必须重订，否则新会话的事件全被丢掉。
+                    subscribe(id)
+                }
+                .onFailure { error ->
+                    notice = context.getString(
+                        R.string.forge_new_conversation_failed,
+                        error.message.orEmpty(),
+                    )
+                }
+        }
+    }
+
     fun stop() {
         val id = sessionId ?: return
         scope.launch {
@@ -163,14 +189,24 @@ internal class ForgeChatState(
                     throw cancel
                 } catch (_: Exception) {
                     // SSE 断线：重新拉一次全量消息对齐，不自己编内容。
-                    api.loadMessages(id).onSuccess { messages = it }
+                    alignAfterReconnect(id)
                     delay(RECONNECT_DELAY_MS)
                     continue
                 }
-                api.loadMessages(id).onSuccess { messages = it }
+                alignAfterReconnect(id)
                 delay(RECONNECT_DELAY_MS)
             }
         }
+    }
+
+    /**
+     * 断线重连对齐：拉全量消息，并按服务端状态对齐 busy——
+     * 断线期间发出的 idle 事件收不到，只对齐消息会让 busy 永远挂着。
+     * 已切到别的会话时不回写（sessionId 已变）。
+     */
+    private suspend fun alignAfterReconnect(id: String) {
+        api.loadMessages(id).onSuccess { if (sessionId == id) messages = it }
+        api.sessionBusy(id).onSuccess { if (sessionId == id) busy = it }
     }
 
     private fun handle(session: String, event: ForgeEvent) {

@@ -1472,7 +1472,15 @@ private fun DshThinkingHeader(
         modifier = Modifier
             .fillMaxWidth()
             .height(24.dp)
-            .clickable(onClick = onClick),
+            // 正文还没到时不给点击：点了只会翻行首图标、正文区不出现，
+            // 等内容到达又突然展开，反馈对不上（Forge 思考刚开始时必现）。
+            .then(
+                if (message.content.isNotBlank()) {
+                    Modifier.clickable(onClick = onClick)
+                } else {
+                    Modifier
+                },
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         DshLeadingIcon(expanded = expanded, icon = DshThinkIcon(), tint = tertiary)
@@ -1505,10 +1513,13 @@ private fun reasoningFirstLine(text: String): String {
     return if (newline == -1) text else text.substring(0, newline)
 }
 
+/** 段落分隔（空行）正则：提为常量，避免流式每个增量都新建一个 Regex。 */
+private val ReasoningParagraphSeparator = Regex("\\r?\\n(?:[\\t ]*\\r?\\n)+")
+
 private fun reasoningLatestParagraphFirstLine(text: String): String {
     var summary = ""
     var paragraphStart = 0
-    val separator = Regex("\\r?\\n(?:[\\t ]*\\r?\\n)+")
+    val separator = ReasoningParagraphSeparator
     while (true) {
         val next = separator.find(text, paragraphStart)
         val paragraphEnd = if (next == null) {

@@ -198,7 +198,16 @@ fun AgentAppRoot(
     var conversationPaneOpen by rememberSaveable { mutableStateOf(false) }
     // Forge 本期只有单会话：打开与否用独立状态，不塞进 AgentAppState，避免影响 Assist 的会话逻辑。
     var forgeOpen by rememberSaveable { mutableStateOf(false) }
-    var forgeNewConversationMode by remember { mutableStateOf(ForgeChatMode.Assist) }
+    // Forge 里点「新建对话」的信号：计数递增，ForgeChatPane 收到新值就另起一个 opencode 会话。
+    var forgeNewConversationSignal by remember { mutableStateOf(0) }
+    // 记住模式存 wireValue 字符串走 rememberSaveable：进程被杀重建后也保持，
+    // 不会闪回 Assist 让新建对话开错模式（枚举本身不保证能被 rememberSaveable 保存）。
+    var forgeNewConversationModeWire by rememberSaveable { mutableStateOf(ForgeChatMode.Assist.wireValue) }
+    var forgeNewConversationMode: ForgeChatMode
+        get() = ForgeChatMode.fromWire(forgeNewConversationModeWire)
+        set(value) {
+            forgeNewConversationModeWire = value.wireValue
+        }
     // 启动时的首页就是「下一个新对话」，所以控件要落在上次用过的模式上。
     // 只认首次组合：旋转屏幕后再次进入不能把用户从 Assist 对话里拽回 Forge。
     var forgeStartupApplied by rememberSaveable { mutableStateOf(false) }
@@ -258,6 +267,7 @@ fun AgentAppRoot(
     LaunchedEffect(requestedConversationId) {
         val conversationId = requestedConversationId ?: return@LaunchedEffect
         agentState.selectConversation(conversationId)
+        forgeOpen = false
         conversationPaneOpen = false
         navigator.popToHome()
         onRequestedConversationOpened()
@@ -267,6 +277,7 @@ fun AgentAppRoot(
         val request = requestedArchivedConversation ?: return@LaunchedEffect
         // 外部入口的结果要先导入归档才有会话；找不到时停在当前界面，不切到无关的会话。
         if (agentState.openArchivedConversation(request.source, request.conversationKey)) {
+            forgeOpen = false
             conversationPaneOpen = false
             navigator.popToHome()
         }
@@ -277,6 +288,7 @@ fun AgentAppRoot(
         val conversationKey = assistantConversationKey ?: return@LaunchedEffect
         val opened = agentState.openAssistantConversation(conversationKey)
         if (opened) {
+            forgeOpen = false
             conversationPaneOpen = false
             // 接管落到主聊天舞台：与主界面同一页面、同一侧边对话列表，不再开独立对话页。
             navigator.popToHome()
@@ -287,6 +299,7 @@ fun AgentAppRoot(
     LaunchedEffect(sharedContent) {
         val request = sharedContent ?: return@LaunchedEffect
         focusManager.clearFocus()
+        forgeOpen = false
         conversationPaneOpen = false
         if (backStack.lastOrNull() != AppRoute.Home) {
             navigator.popToHome()
@@ -329,6 +342,7 @@ fun AgentAppRoot(
         conversationPaneOpen = false
         if (forgeNewConversationMode == ForgeChatMode.Forge) {
             forgeOpen = true
+            forgeNewConversationSignal++
             navigator.popToHome()
             return
         }
@@ -339,9 +353,11 @@ fun AgentAppRoot(
 
     /** 顶栏分段控件：切到另一段即进入该模式的新对话空白页，不转换当前对话。 */
     fun selectChatMode(mode: ForgeChatMode) {
-        if (mode == chatMode) return
+        // 先更新「下一个新对话」的记住模式并落盘：点已高亮的那一段（正看着该模式的对话、
+        // 但记住模式是另一个）时也要能改过来，否则之后新建对话会开错模式。
         forgeNewConversationMode = mode
         uiScope.launch { SettingsDataStore.setForgeChatMode(mode) }
+        if (mode == chatMode) return
         if (mode == ForgeChatMode.Forge) {
             focusManager.clearFocus()
             forgeOpen = true
@@ -480,6 +496,7 @@ fun AgentAppRoot(
                             onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
                             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
                             topInset = shellPadding.calculateTopPadding(),
+                            newConversationSignal = forgeNewConversationSignal,
                         )
                         return@RoutedShell
                     }

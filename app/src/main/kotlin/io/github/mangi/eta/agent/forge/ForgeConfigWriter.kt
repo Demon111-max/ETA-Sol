@@ -108,7 +108,9 @@ internal object ForgeConfigWriter {
             } else {
                 ForgeConfigWriteResult.Failed(
                     code = result.exitCode,
-                    output = result.output.decodeToString().trim().take(400),
+                    // shell 的报错走 stderr，只取 stdout 会把真因丢掉、界面只剩一个退出码。
+                    output = (result.output.decodeToString() + result.stderr.decodeToString())
+                        .trim().take(400),
                 )
             }
         } finally {

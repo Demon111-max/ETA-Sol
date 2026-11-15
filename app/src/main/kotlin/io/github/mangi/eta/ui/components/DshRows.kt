@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -154,7 +155,9 @@ internal fun DshRowHeader(
             active = running,
             style = textStyle,
             color = tertiary,
-            modifier = Modifier.weight(1f, fill = false),
+            // 标题按自身宽度走（上限 200dp 防极端长名），剩余宽度全给摘要：
+            // 原先标题与摘要权重相同五五分，摘要只有两三个字时标题也会被过早截断。
+            modifier = Modifier.widthIn(max = 200.dp),
         )
         if (summary != null) {
             DshRowDot()

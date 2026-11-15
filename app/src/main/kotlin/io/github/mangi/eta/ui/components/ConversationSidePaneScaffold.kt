@@ -244,6 +244,9 @@ fun ConversationSidePaneScaffold(
                                         locked = true
                                         startInteraction = DragInteraction.Start()
                                         dragInteractions.tryEmit(startInteraction)
+                                        // 锁定时把判定期间累积的横向位移一并派发，
+                                        // 否则侧栏起手有约 20dp 死区、之后整体滞后手指同一距离。
+                                        paneDragState.dispatchRawDelta(totalDx)
                                     } else {
                                         aborted = true
                                     }
