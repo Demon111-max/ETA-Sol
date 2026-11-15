@@ -203,17 +203,13 @@ fun AgentAppRoot(
     // 记住模式存 wireValue 字符串走 rememberSaveable：进程被杀重建后也保持，
     // 不会闪回 Assist 让新建对话开错模式（枚举本身不保证能被 rememberSaveable 保存）。
     var forgeNewConversationModeWire by rememberSaveable { mutableStateOf(ForgeChatMode.Assist.wireValue) }
-    var forgeNewConversationMode: ForgeChatMode
-        get() = ForgeChatMode.fromWire(forgeNewConversationModeWire)
-        set(value) {
-            forgeNewConversationModeWire = value.wireValue
-        }
+    val forgeNewConversationMode = ForgeChatMode.fromWire(forgeNewConversationModeWire)
     // 启动时的首页就是「下一个新对话」，所以控件要落在上次用过的模式上。
     // 只认首次组合：旋转屏幕后再次进入不能把用户从 Assist 对话里拽回 Forge。
     var forgeStartupApplied by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         val persisted = SettingsDataStore.forgeChatMode()
-        forgeNewConversationMode = persisted
+        forgeNewConversationModeWire = persisted.wireValue
         if (!forgeStartupApplied) {
             forgeStartupApplied = true
             if (persisted == ForgeChatMode.Forge) {
@@ -355,7 +351,7 @@ fun AgentAppRoot(
     fun selectChatMode(mode: ForgeChatMode) {
         // 先更新「下一个新对话」的记住模式并落盘：点已高亮的那一段（正看着该模式的对话、
         // 但记住模式是另一个）时也要能改过来，否则之后新建对话会开错模式。
-        forgeNewConversationMode = mode
+        forgeNewConversationModeWire = mode.wireValue
         uiScope.launch { SettingsDataStore.setForgeChatMode(mode) }
         if (mode == chatMode) return
         if (mode == ForgeChatMode.Forge) {
