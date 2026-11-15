@@ -152,9 +152,13 @@ internal object LinuxPackageProfiles {
         """.trimIndent()
     }
 
-    /** 安装脚本装在 $HOME/.opencode/bin，不在 PATH 里，按绝对路径自检。 */
+    /**
+     * 安装脚本装在 $HOME/.opencode/bin，不在 PATH 里，按绝对路径自检。
+     * 注意：这里只能用 ${'$'} 模板拼 $，绝不能写 \$ 转义——那样 shell 收到的会是字面 ${'$'}，
+     * 整条安装命令会在自检行被判语法错误（Unterminated quoted string），装得再对也报失败。
+     */
     private const val OPENCODE_VERIFY_SCRIPT =
-        "\${'$'}HOME/.opencode/bin/opencode --version >/dev/null"
+        "${'$'}HOME/.opencode/bin/opencode --version >/dev/null"
 
     val OPENCODE = LinuxPackageProfile(
         id = "opencode",

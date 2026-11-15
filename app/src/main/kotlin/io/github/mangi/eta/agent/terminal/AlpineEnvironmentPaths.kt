@@ -20,8 +20,8 @@ internal object AlpineEnvironmentPaths {
     const val NODE_TOOLS_REVISION = 2
     const val SSH_TOOLS_REVISION = 1
     const val KIMI_TOOLS_REVISION = 1
-    // revision 3：opencode 改走 npmmirror 直下官方平台包（官方脚本的 GitHub 下载在国内网络常断），已就绪环境需重走安装。
-    const val OPENCODE_TOOLS_REVISION = 3
+    // revision 4：修复自检脚本的 $ 转义错误（语法错误导致安装必失败），已就绪环境需重走安装。
+    const val OPENCODE_TOOLS_REVISION = 4
 
     fun environmentDir(context: Context): File =
         LinuxEnvironmentPaths.environmentDir(context, LinuxDistribution.ALPINE)
