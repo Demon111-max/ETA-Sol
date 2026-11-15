@@ -1051,6 +1051,7 @@
   <string name="linux_profile_stage_verifying">Verifying %1$s</string>
   <string name="linux_profile_stage_complete">Installation complete</string>
   <string name="linux_profile_stage_failed">%1$s failed. Try again later</string>
+  <string name="linux_profile_failed_exit_code">Exit code: %1$d</string>
   <string name="linux_profile_installed">%1$s installed</string>
   <string name="linux_profile_already_ready">%1$s is already ready</string>
   <string name="linux_installed">Installed</string>

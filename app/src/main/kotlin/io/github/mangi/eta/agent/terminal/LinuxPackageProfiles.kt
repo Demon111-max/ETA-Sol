@@ -27,7 +27,12 @@ internal sealed interface PackageProfileInstallResult {
     /** 依赖的 profile 尚未安装，按依赖链先装它。 */
     data class DependencyMissing(val profileId: String) : PackageProfileInstallResult
     data object Installed : PackageProfileInstallResult
-    data class Failed(val stage: PackageProfileInstallStage) : PackageProfileInstallResult
+    /** 失败时带上退出码与输出末尾，界面直接展示，避免只报一句笼统的「失败」。 */
+    data class Failed(
+        val stage: PackageProfileInstallStage,
+        val exitCode: Int? = null,
+        val detail: String = "",
+    ) : PackageProfileInstallResult
 }
 
 internal data class LinuxPackageSpec(
@@ -169,6 +174,10 @@ internal object LinuxPackageProfiles {
     val ALL = listOf(PYTHON, NODE, SSH, KIMI, OPENCODE)
 }
 
+/** 失败详情只保留输出末尾几行：真正的报错通常在最后，整段输出太长不能全塞进界面。 */
+private fun String.installOutputTail(): String =
+    lines().filter { it.isNotBlank() }.takeLast(6).joinToString("\n").takeLast(600)
+
 internal fun linuxPackageProfileReady(rootfs: File, profile: LinuxPackageProfile): Boolean {
     val marker = File(rootfs, profile.markerName)
     if (!marker.isFile) return false
@@ -251,7 +260,9 @@ internal class LinuxPackageProfileInstaller(
             )
             if (installResult.exitCode != 0) {
                 return@withContext PackageProfileInstallResult.Failed(
-                    PackageProfileInstallStage.INSTALLING,
+                    stage = PackageProfileInstallStage.INSTALLING,
+                    exitCode = installResult.exitCode,
+                    detail = installResult.output.installOutputTail(),
                 )
             }
         }
@@ -275,10 +286,15 @@ internal class LinuxPackageProfileInstaller(
         AndroidAgentLogger.info(
             "Package profile action=activate distribution=${distribution.wireName} profile=${profile.id} " +
                 "outcome=${if (result.exitCode == 0) "succeeded" else "failed"} " +
-                "exitCode=${result.exitCode} outputChars=${result.output.length}",
+                "exitCode=${result.exitCode} outputChars=${result.output.length} " +
+                "outputTail=${result.output.installOutputTail()}",
         )
         if (result.exitCode != 0) {
-            return@withContext PackageProfileInstallResult.Failed(PackageProfileInstallStage.INSTALLING)
+            return@withContext PackageProfileInstallResult.Failed(
+                stage = PackageProfileInstallStage.INSTALLING,
+                exitCode = result.exitCode,
+                detail = result.output.installOutputTail(),
+            )
         }
 
         onProgress(PackageProfileInstallProgress(PackageProfileInstallStage.COMPLETE))
