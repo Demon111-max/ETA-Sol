@@ -1043,17 +1043,17 @@ private fun ConversationDrawerGroup.localizedLabel(): String = when (val value =
 
 private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawerGroup> {
     if (isEmpty()) return emptyList()
-    val groups = mutableListOf<ConversationDrawerGroup>()
+    // 必须按 section 全量归并，不能只合并相邻项：列表按更新时间排序，
+    // 但 section 还看 isActiveRun / 时间是否为 0——一个正在后台跑的旧对话
+    // 或时间缺失的条目会被判进 Today 却排在旧日期分组中间，只合并相邻项
+    // 就会把同一 section 切成两组，LazyColumn 里两个组头 key 相同直接闪退。
+    val bySection = LinkedHashMap<ConversationDrawerSection, MutableList<ConversationSummaryUi>>()
     for (conversation in this) {
-        val section = conversation.drawerSection()
-        val last = groups.lastOrNull()
-        if (last?.section == section) {
-            groups[groups.lastIndex] = last.copy(items = last.items + conversation)
-        } else {
-            groups += ConversationDrawerGroup(section = section, items = listOf(conversation))
-        }
+        bySection.getOrPut(conversation.drawerSection()) { mutableListOf() } += conversation
     }
-    return groups
+    return bySection.map { (section, items) ->
+        ConversationDrawerGroup(section = section, items = items)
+    }
 }
 
 private fun ConversationSummaryUi.drawerSection(): ConversationDrawerSection = when {
