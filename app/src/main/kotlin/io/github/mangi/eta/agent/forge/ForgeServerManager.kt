@@ -123,9 +123,11 @@ internal class ForgeServerManager(
     suspend fun ensureRunning(environment: TerminalEnvironment): ForgeServerStartResult = startupMutex.withLock {
         val current = status(environment)
         if (current.running && current.healthy) return ForgeServerStartResult.Running
-        when (current.code) {
-            "INVALID_ENVIRONMENT", "LINUX_ENVIRONMENT_NOT_READY" ->
-                return ForgeServerStartResult.Failed(current.code)
+        val statusCode = current.code
+        if (statusCode != null &&
+            (statusCode == "INVALID_ENVIRONMENT" || statusCode == "LINUX_ENVIRONMENT_NOT_READY")
+        ) {
+            return ForgeServerStartResult.Failed(statusCode)
         }
         // 端口只有一个：停掉其他环境（发行版/身份/后端不同）名下的 Forge server，
         // 否则健康检查会把旧 server 误认成本环境的，配置改了也静默不生效。
