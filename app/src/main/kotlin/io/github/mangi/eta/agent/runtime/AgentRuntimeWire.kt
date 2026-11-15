@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.runtime
 
+import io.github.mangi.eta.BuildConfig
 import io.github.mangi.eta.agent.model.AgentContextSnapshot
 import io.github.mangi.eta.agent.model.AssistantScreenContextProjection
 
@@ -90,7 +91,8 @@ internal object AgentRuntimeWire {
     /** service -> client：返回各运行的会话归属与当前阶段。 */
     const val MSG_QUERY_ACTIVE_RUNS_RESPONSE = 17
 
-    private const val MODULE_PACKAGE = "io.github.mangi.eta"
+    // 服务端组件的包名必须取安装包自身的 applicationId：双包共存的调试版带 .sol 后缀，
+    // 写死官方包名会把绑定请求发给官方版 Eta，Assist 永远连不上自己的 Runtime。
     private const val SERVICE_CLASS = "io.github.mangi.eta.agent.runtime.AgentRuntimeService"
 
     private const val KEY_TYPE = "type"
@@ -268,7 +270,7 @@ internal object AgentRuntimeWire {
     )
 
     fun serviceIntent(): Intent =
-        Intent(ACTION_BIND).setComponent(ComponentName(MODULE_PACKAGE, SERVICE_CLASS))
+        Intent(ACTION_BIND).setComponent(ComponentName(BuildConfig.APPLICATION_ID, SERVICE_CLASS))
 
     private val json = Json {
         ignoreUnknownKeys = true
