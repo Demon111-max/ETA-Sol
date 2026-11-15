@@ -95,7 +95,13 @@ internal class ForgeApiClient(
                 .url("$baseUrl/session")
                 .post("{}".toRequestBody(JsonMediaType))
                 .build()
-            client.newCall(request).execute().use { response ->
+            val call = client.newCall(request)
+            // 与 events() 同一套：协程被取消（如用户点停止）时把底层 HTTP 一起掐断，
+            // 否则 execute() 会占着线程干等到读超时，上层的 busy 也下不来。
+            currentCoroutineContext().job.invokeOnCompletion { cause ->
+                if (cause != null) call.cancel()
+            }
+            call.execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                 val body = response.body.string().orEmpty()
                 ForgeProtocol.parseSessionId(Json.parseToJsonElement(body))
@@ -238,7 +244,13 @@ internal class ForgeApiClient(
                 .url("$baseUrl/session/$sessionId/message")
                 .post(payload.toString().toRequestBody(JsonMediaType))
                 .build()
-            client.newCall(request).execute().use { response ->
+            val call = client.newCall(request)
+            // 发送的 POST 要等整轮跑完才返回：协程取消时必须连它一起掐断，
+            // 否则点停止后请求还挂着，会话也被 busy 卡住再也发不出去。
+            currentCoroutineContext().job.invokeOnCompletion { cause ->
+                if (cause != null) call.cancel()
+            }
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
                     val detail = response.body.string().orEmpty().let(::serverErrorDetail)
                     throw IOException("HTTP ${response.code} $detail".trim())

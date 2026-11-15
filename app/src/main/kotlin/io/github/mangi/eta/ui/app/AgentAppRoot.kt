@@ -200,7 +200,9 @@ fun AgentAppRoot(
 
     var conversationPaneOpen by rememberSaveable { mutableStateOf(false) }
     // Forge 打开与否用独立状态，不塞进 AgentAppState，避免影响 Assist 的会话逻辑。
-    var forgeOpen by rememberSaveable { mutableStateOf(false) }
+    // 不走 rememberSaveable、启动也不按记住模式打开它：冷启动永远先落在 Assist，
+    // Forge 靠用户点切换或点 Forge 条目进入；否则上次停在 Forge，次次开屏都是 Forge。
+    var forgeOpen by remember { mutableStateOf(false) }
     // Forge 里点「新建对话」的信号：计数递增，ForgeChatPane 收到新值就另起一个 opencode 会话。
     var forgeNewConversationSignal by remember { mutableStateOf(0) }
     // Forge 的真实会话列表（来自 opencode，不进 Eta 数据库）：侧边栏按它一条会话生成一个条目。
@@ -243,18 +245,9 @@ fun AgentAppRoot(
     // 不会闪回 Assist 让新建对话开错模式（枚举本身不保证能被 rememberSaveable 保存）。
     var forgeNewConversationModeWire by rememberSaveable { mutableStateOf(ForgeChatMode.Assist.wireValue) }
     val forgeNewConversationMode = ForgeChatMode.fromWire(forgeNewConversationModeWire)
-    // 启动时的首页就是「下一个新对话」，所以控件要落在上次用过的模式上。
-    // 只认首次组合：旋转屏幕后再次进入不能把用户从 Assist 对话里拽回 Forge。
-    var forgeStartupApplied by rememberSaveable { mutableStateOf(false) }
+    // 记住模式只决定「新建对话」开哪种，不决定开屏落点（开屏永远是 Assist，见 forgeOpen）。
     LaunchedEffect(Unit) {
-        val persisted = SettingsDataStore.forgeChatMode()
-        forgeNewConversationModeWire = persisted.wireValue
-        if (!forgeStartupApplied) {
-            forgeStartupApplied = true
-            if (persisted == ForgeChatMode.Forge) {
-                forgeOpen = true
-            }
-        }
+        forgeNewConversationModeWire = SettingsDataStore.forgeChatMode().wireValue
     }
     val chatMode = if (forgeOpen) ForgeChatMode.Forge else ForgeChatMode.Assist
     // 侧边栏每次打开都刷新一次 Forge 会话列表（server 在跑才拿得到，失败保留旧列表）。

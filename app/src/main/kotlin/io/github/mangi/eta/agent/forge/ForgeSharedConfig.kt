@@ -1,7 +1,10 @@
 package io.github.mangi.eta.agent.forge
 
+import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
+import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
+import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderTypes
 import io.github.mangi.eta.data.model.runtimeProviderType
@@ -43,12 +46,21 @@ internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
     if (baseUrl.isEmpty() || apiKey.isEmpty() || modelId.isEmpty()) {
         return ForgeSharedConfig.NotConfigured
     }
+    // 协议（Chat Completions / Responses）长在服务商自己的 endpointMode 上：
+    // runtimeProviderType 对这两类服务商都只报 OPENAI_COMPATIBLE，不看协议，
+    // Forge 必须单独把协议带出来，否则 Responses 的 GPT 渠道会被按 Chat 协议喂给 opencode。
+    val endpointMode = when (provider) {
+        is OpenAiCompatibleProviderSetting -> provider.endpointMode
+        is CustomProviderSetting -> provider.endpointMode
+        else -> OpenAiEndpointMode.CHAT_COMPLETIONS
+    }
     return ForgeSharedConfig.Ready(
         settings = ForgeSettings(
             baseUrl = baseUrl,
             modelId = modelId,
             providerId = forgeProviderId(provider.name, provider.id),
             providerName = provider.name.trim().ifBlank { provider.id },
+            endpointMode = endpointMode,
         ),
         credentials = ForgeCredentials(apiKey = apiKey),
     )

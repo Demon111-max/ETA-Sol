@@ -83,6 +83,7 @@ internal class ForgeChatState(
     private var modelId: String = ""
     private var eventJob: Job? = null
     private var startJob: Job? = null
+    private var sendJob: Job? = null
     private val server = ForgeServerManager.default(context)
     private val api = ForgeApiClient()
 
@@ -156,6 +157,7 @@ internal class ForgeChatState(
             subscribe(id)
             refreshPendingQuestion(id)
             onSessionsChanged(id)
+            maybeSetFallbackTitle(id)
         }
     }
 
@@ -177,12 +179,17 @@ internal class ForgeChatState(
         modelId = shared.settings.modelId
         providerId = shared.settings.providerId
         val fingerprint = shared.settings.providerId + "\n" + shared.settings.baseUrl +
-            "\n" + shared.settings.modelId + "\n" + shared.credentials.apiKey
+            "\n" + shared.settings.modelId + "\n" + shared.credentials.apiKey +
+            "\n" + shared.settings.endpointMode
         if (fingerprint != appliedConfigFingerprint) {
             when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
                 ForgeConfigWriteResult.Written -> {
                     appliedConfigFingerprint = fingerprint
-                    server.restartIfRunning(server.environment())
+                    // 重启失败要让调用方知道：server 没起来还继续往下发，只会无声卡死。
+                    val restarted = server.restartIfRunning(server.environment())
+                    if (restarted is ForgeServerStartResult.Failed) {
+                        return ConfigApply.Failed(restarted.code)
+                    }
                 }
 
                 ForgeConfigWriteResult.EnvironmentNotReady -> Unit
@@ -197,7 +204,7 @@ internal class ForgeChatState(
         if (text.isBlank() || busy) return
         busy = true
         notice = null
-        scope.launch {
+        sendJob = scope.launch {
             // 发送前先对齐配置：换过 Key/服务商/模型时，这一步会把新配置写好并重启 server，
             // 再往下建会话/发消息就都走新配置。server 重启后当前会话的事件订阅会断线重连对齐。
             when (val applied = applySharedConfig()) {
@@ -214,6 +221,17 @@ internal class ForgeChatState(
                 }
 
                 ConfigApply.Ready -> Unit
+            }
+            // 配置刚重启过、或 server 意外不在跑时，先确保它在跑再发；
+            // 拉不起来就把失败摆到界面上，不要对着不在跑的 server 无声地发。
+            when (val ensured = server.ensureRunning(server.environment())) {
+                is ForgeServerStartResult.Failed -> {
+                    busy = false
+                    notice = context.getString(R.string.forge_send_failed, ensured.code)
+                    return@launch
+                }
+
+                ForgeServerStartResult.Running -> Unit
             }
             var id = sessionId ?: api.createSession().getOrElse { error ->
                 busy = false
@@ -317,6 +335,7 @@ internal class ForgeChatState(
             subscribe(id)
             refreshPendingQuestion(id)
             onSessionsChanged(id)
+            maybeSetFallbackTitle(id)
         }
     }
 
@@ -357,12 +376,35 @@ internal class ForgeChatState(
         }
     }
 
-    fun stop() {
-        val id = sessionId ?: return
+    /**
+     * 标题兜底：opencode 靠一笔单独的标题生成调用改名，那笔调用在中转站上失败时，
+     * 标题会永远停在「New session - 时间戳」。本会话已有内容、标题却还是默认样式时，
+     * 用第一条用户消息当标题写回去；服务端已经有正经标题则不碰。
+     */
+    private fun maybeSetFallbackTitle(id: String) {
+        val firstUserText = messages.firstOrNull { it.role == ForgeRole.User }
+            ?.parts?.filterIsInstance<ForgePart.Text>()?.firstOrNull()?.text
+            ?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
+        if (firstUserText.isBlank()) return
         scope.launch {
-            api.abort(id)
-            busy = false
+            val summary = api.listSessions().getOrNull()?.firstOrNull { it.id == id }
+                ?: return@launch
+            if (summary.title.isNotBlank() && !summary.title.startsWith("New session")) {
+                return@launch
+            }
+            api.renameSession(id, firstUserText.take(30))
+            onSessionsChanged(id)
         }
+    }
+
+    fun stop() {
+        // 先掐断在途的发送并立刻放开 busy：以前是等 abort 请求回来才清 busy，
+        // server 无响应时停止按钮等于没按，整个会话被一个 busy 永久卡死。
+        sendJob?.cancel()
+        sendJob = null
+        busy = false
+        val id = sessionId ?: return
+        scope.launch { api.abort(id) }
     }
 
     fun shutdown() {
@@ -432,6 +474,7 @@ internal class ForgeChatState(
                 busy = false
                 // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
                 onSessionsChanged(session)
+                maybeSetFallbackTitle(session)
             }
 
             is ForgeEvent.Failed -> if (event.sessionId == session) {

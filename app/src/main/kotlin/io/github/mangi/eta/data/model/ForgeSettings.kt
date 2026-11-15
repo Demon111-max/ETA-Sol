@@ -16,6 +16,8 @@ internal data class ForgeSettings(
     val providerId: String = "relay",
     /** opencode 侧的 provider 显示名，与 Assist 里看到的服务商名一致。 */
     val providerName: String = "Relay",
+    /** 服务商的接口协议（OpenAiEndpointMode）：决定 opencode 配置里选哪个 AI SDK 包。 */
+    val endpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,
 ) {
     companion object {
         const val DEFAULT_MODEL_ID = "deepseek-v4.1-flash"

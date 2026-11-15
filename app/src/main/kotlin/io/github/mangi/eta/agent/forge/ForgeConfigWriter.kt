@@ -8,6 +8,7 @@ import io.github.mangi.eta.agent.terminal.runOneShotShell
 import io.github.mangi.eta.agent.terminal.terminalEnvironment
 import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
+import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -40,7 +41,16 @@ internal object ForgeConfigWriter {
         put("\$schema", "https://opencode.ai/config.json")
         putJsonObject("provider") {
             putJsonObject(settings.providerId) {
-                put("npm", "@ai-sdk/openai-compatible")
+                // 按协议选包：Responses 走 @ai-sdk/openai，Chat Completions 走兼容包。
+                // 写死兼容包会让 GPT 这类 Responses 渠道在 opencode 里发不出/挂死。
+                put(
+                    "npm",
+                    if (settings.endpointMode == OpenAiEndpointMode.RESPONSES) {
+                        "@ai-sdk/openai"
+                    } else {
+                        "@ai-sdk/openai-compatible"
+                    },
+                )
                 put("name", settings.providerName.ifBlank { settings.providerId })
                 putJsonObject("options") {
                     put("baseURL", settings.baseUrl.trim())
