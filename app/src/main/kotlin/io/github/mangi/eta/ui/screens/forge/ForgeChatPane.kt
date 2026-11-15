@@ -68,6 +68,7 @@ internal fun ForgeChatPane(
     newConversationSignal: Int = 0,
     openSessionRequest: Pair<String, Int>? = null,
     onSessionsChanged: (String?) -> Unit = {},
+    onBusyChanged: (String?, Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -87,7 +88,14 @@ internal fun ForgeChatPane(
         val request = openSessionRequest ?: return@LaunchedEffect
         state.openSession(request.first)
     }
-    DisposableEffect(Unit) { onDispose { state.shutdown() } }
+    // 运行状态同步给上层：侧边栏要在正在跑的 Forge 会话条目上显示运行圆点。
+    LaunchedEffect(state.busy, state.sessionId) { onBusyChanged(state.sessionId, state.busy) }
+    DisposableEffect(Unit) {
+        onDispose {
+            state.shutdown()
+            onBusyChanged(null, false)
+        }
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         Box(

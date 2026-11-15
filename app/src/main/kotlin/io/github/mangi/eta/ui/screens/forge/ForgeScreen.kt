@@ -65,6 +65,7 @@ internal fun ForgeScreen(
     newConversationSignal: Int = 0,
     openSessionRequest: Pair<String, Int>? = null,
     onSessionsChanged: (String?) -> Unit = {},
+    onBusyChanged: (String?, Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
@@ -81,6 +82,7 @@ internal fun ForgeScreen(
             newConversationSignal = newConversationSignal,
             openSessionRequest = openSessionRequest,
             onSessionsChanged = onSessionsChanged,
+            onBusyChanged = onBusyChanged,
         )
 
         // 检查中保持空白：不引入任何进度指示。

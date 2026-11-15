@@ -45,20 +45,30 @@ internal fun ConversationPaneUiState.withForgeConversations(
     forgeOpen: Boolean,
     activeSessionId: String?,
     untitledTitle: String,
+    busySessionId: String? = null,
 ): ConversationPaneUiState {
     val query = searchQuery.trim()
     val assistConversations = conversations.filterNot { it.forge }
     val forgeEntries = sessions
         .filter { query.isEmpty() || it.title.contains(query, ignoreCase = true) }
         .map { session ->
+            // 正在跑的会话顶到列表前部并显示运行圆点（与 Assist 的活跃会话同款处理），
+            // 更新时间按当前时刻算，免得它被判进旧日期分组、把「今天」组从中间截断。
+            val isBusy = session.id == busySessionId
+            val effectiveUpdated = if (isBusy) {
+                maxOf(session.updatedAtMillis, System.currentTimeMillis())
+            } else {
+                session.updatedAtMillis
+            }
             val label = session.title.ifBlank { untitledTitle }
             ConversationSummaryUi(
                 id = forgeConversationId(session.id),
                 title = label,
                 preview = label,
-                timeLabel = forgeTimeLabel(session.updatedAtMillis),
-                updatedAtMillis = session.updatedAtMillis,
+                timeLabel = forgeTimeLabel(effectiveUpdated),
+                updatedAtMillis = effectiveUpdated,
                 mode = ConversationModeUi.Chat,
+                isActiveRun = isBusy,
                 forge = true,
             )
         }

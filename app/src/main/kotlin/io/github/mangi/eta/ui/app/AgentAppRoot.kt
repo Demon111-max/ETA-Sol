@@ -206,6 +206,8 @@ fun AgentAppRoot(
     // Forge 的真实会话列表（来自 opencode，不进 Eta 数据库）：侧边栏按它一条会话生成一个条目。
     var forgeSessions by remember { mutableStateOf<List<ForgeSessionSummary>>(emptyList()) }
     var forgeActiveSessionId by remember { mutableStateOf<String?>(null) }
+    // 正在跑的那条 Forge 会话 id：侧边栏条目要给它显示运行圆点。
+    var forgeBusySessionId by remember { mutableStateOf<String?>(null) }
     // 侧边栏点开某个 Forge 会话的请求：会话 id + 序号，ForgeChatPane 收到新序号就切过去。
     var forgeOpenSessionRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
 
@@ -442,6 +444,7 @@ fun AgentAppRoot(
                 forgeOpen = forgeOpen,
                 activeSessionId = forgeActiveSessionId,
                 untitledTitle = forgeTitle,
+                busySessionId = forgeBusySessionId,
             ),
             isConversationPaneOpen = conversationPaneOpen,
             onBack = { popRoute() },
@@ -554,6 +557,9 @@ fun AgentAppRoot(
                             onSessionsChanged = { activeId ->
                                 forgeActiveSessionId = activeId
                                 refreshForgeSessions()
+                            },
+                            onBusyChanged = { busyId, busy ->
+                                forgeBusySessionId = if (busy) busyId else null
                             },
                         )
                         return@RoutedShell
@@ -1013,7 +1019,18 @@ fun AgentAppRoot(
     }
 
     conversationRenameTarget?.let { conversation ->
-        var renameInput by remember(conversation.id) { mutableStateOf(conversation.title) }
+        var renameInput by remember(conversation.id) {
+            mutableStateOf(
+                if (conversation.forge) {
+                    // Forge 条目的显示标题可能是占位文案（没标题的会话），真标题从会话列表里取。
+                    forgeSessions.firstOrNull {
+                        it.id == forgeSessionIdOf(conversation.id)
+                    }?.title.orEmpty()
+                } else {
+                    conversation.title
+                },
+            )
+        }
         when (LocalUiStyle.current) {
             AppearanceUiStyle.COUI -> {
                 CouiInputDialog(
