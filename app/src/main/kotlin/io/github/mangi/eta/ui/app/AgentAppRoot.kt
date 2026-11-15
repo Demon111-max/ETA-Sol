@@ -386,10 +386,10 @@ fun AgentAppRoot(
         navigator.popToHome()
     }
 
-    fun createConversation() {
+    fun createConversation(targetMode: ForgeChatMode = forgeNewConversationMode) {
         focusManager.clearFocus()
         conversationPaneOpen = false
-        if (forgeNewConversationMode == ForgeChatMode.Forge) {
+        if (targetMode == ForgeChatMode.Forge) {
             forgeOpen = true
             forgeNewConversationSignal++
             navigator.popToHome()
@@ -413,7 +413,10 @@ fun AgentAppRoot(
             navigator.popToHome()
             conversationPaneOpen = false
         } else {
-            createConversation()
+            // 必须把目标模式显式传进去：上面刚写的 forgeNewConversationModeWire 要等
+            // 重组后才反映到 forgeNewConversationMode，无参调用读到的是旧模式，
+            // 会在 Forge 段上误走 Forge 分支，表现为第一次点 Assist 切换失败。
+            createConversation(mode)
         }
     }
 
