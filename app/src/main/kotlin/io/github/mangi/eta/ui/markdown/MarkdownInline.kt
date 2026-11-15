@@ -92,8 +92,9 @@ internal class MarkdownInlineBuilder(
             GFMElementTypes.STRIKETHROUGH -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
                 appendChildren(node, state)
             }
-            MarkdownElementTypes.CODE_SPAN -> appendCode(codeSpanText(node))
-            GFMElementTypes.INLINE_MATH, GFMElementTypes.BLOCK_MATH -> appendCode(mathText(node))
+            MarkdownElementTypes.CODE_SPAN -> appendMathAwareCodeSpan(node)
+            GFMElementTypes.INLINE_MATH, GFMElementTypes.BLOCK_MATH ->
+                append(LatexReadable.convert(mathText(node)))
             MarkdownElementTypes.INLINE_LINK -> appendInlineLink(node, state)
             MarkdownElementTypes.FULL_REFERENCE_LINK -> appendReferenceLink(
                 node = node,
@@ -259,6 +260,16 @@ internal class MarkdownInlineBuilder(
             }
         }
         return pairs
+    }
+
+    private fun AnnotatedString.Builder.appendMathAwareCodeSpan(node: ASTNode) {
+        val code = codeSpanText(node)
+        if (LatexReadable.containsLatexCommand(code)) {
+            // 模型把公式写进反引号（如 `r \le 8`）时，不要按代码标记渲染，换成可读符号当正文。
+            append(LatexReadable.convert(code))
+        } else {
+            appendCode(code)
+        }
     }
 
     private fun AnnotatedString.Builder.appendCode(code: String) {

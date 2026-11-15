@@ -157,6 +157,9 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
         }
         return
     }
+    // 按轮分组：一轮里 opencode 会产出多条助手消息（每步一条），必须合成一个工作过程块，
+    // 否则每条消息各带一个汇总头、轮次没结束就逐个收起，和 dsh 一整段连着的样子对不上。
+    val turns = remember(messages) { messages.groupIntoTurns() }
     val listState = rememberLazyListState()
     val lastSignature = messages.lastOrNull()?.let { message ->
         // 签名要含最后一个 part 的内容长度：流式 delta 只加长文本，part 数和 id 都不变，
@@ -171,7 +174,7 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
     }
     LaunchedEffect(lastSignature) {
         // 流式追加时贴住底部；用无动画的 scrollToItem，不引入新的滚动效果。
-        listState.scrollToItem(messages.lastIndex)
+        listState.scrollToItem(turns.lastIndex)
     }
     // 与 Assist 同款：列表整屏铺到顶栏底下，顶部留白走 contentPadding，顶栏才有内容可模糊。
     LazyColumn(
@@ -180,66 +183,108 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
         contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = topInset + 12.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(messages, key = { it.id }) { message ->
-            ForgeMessageRow(
-                message = message,
-                active = state.busy && message.id == messages.lastOrNull()?.id,
-            )
+        items(turns, key = { it.key }) { turn ->
+            when (turn) {
+                is ForgeTurn.User -> ForgeUserRow(message = turn.message)
+
+                is ForgeTurn.Assistant -> ForgeAssistantTurnRow(
+                    messages = turn.messages,
+                    active = state.busy &&
+                        turn.messages.lastOrNull()?.id == messages.lastOrNull()?.id,
+                )
+            }
         }
     }
 }
 
+/** 一轮对话：一条用户消息，或连续的若干条助手消息（opencode 一步一条，要合并显示）。 */
+private sealed interface ForgeTurn {
+    val key: String
+
+    data class User(val message: ForgeChatMessage) : ForgeTurn {
+        override val key: String get() = message.id
+    }
+
+    data class Assistant(val messages: List<ForgeChatMessage>) : ForgeTurn {
+        override val key: String get() = messages.first().id
+    }
+}
+
+private fun List<ForgeChatMessage>.groupIntoTurns(): List<ForgeTurn> {
+    val turns = mutableListOf<ForgeTurn>()
+    var pending = mutableListOf<ForgeChatMessage>()
+    fun flush() {
+        if (pending.isNotEmpty()) {
+            turns += ForgeTurn.Assistant(pending.toList())
+            pending = mutableListOf()
+        }
+    }
+    for (message in this) {
+        when (message.role) {
+            ForgeRole.User -> {
+                flush()
+                turns += ForgeTurn.User(message)
+            }
+
+            ForgeRole.Assistant -> pending += message
+        }
+    }
+    flush()
+    return turns
+}
+
 @Composable
-private fun ForgeMessageRow(message: ForgeChatMessage, active: Boolean) {
-    when (message.role) {
-        ForgeRole.User -> ChatMessageItem(
-            message = UserMessageUi(
-                id = message.id,
-                content = message.parts
-                    .filterIsInstance<ForgePart.Text>()
-                    .joinToString("\n") { it.text },
-            ),
-            onSuggestionClick = {},
-            onRunTraceClick = {},
-            onOpenBrowser = {},
-            showBrowserShortcut = false,
-            showCopyAction = false,
-            modifier = Modifier.fillMaxWidth(),
-        )
+private fun ForgeUserRow(message: ForgeChatMessage) {
+    ChatMessageItem(
+        message = UserMessageUi(
+            id = message.id,
+            content = message.parts
+                .filterIsInstance<ForgePart.Text>()
+                .joinToString("\n") { it.text },
+        ),
+        onSuggestionClick = {},
+        onRunTraceClick = {},
+        onOpenBrowser = {},
+        showBrowserShortcut = false,
+        showCopyAction = false,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
 
-        ForgeRole.Assistant -> {
-            val segments = remember(message.parts) { message.toSegments() }
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                segments.forEach { segment ->
-                    when (segment) {
-                        is ForgeSegment.Work -> AgentWorkProcess(
-                            id = segment.key,
-                            messages = segment.items,
-                            onOpenBrowser = {},
-                            currentBrowserMessageId = null,
-                            retainedStreamingStates = emptyMap<String, StreamingMarkdownState>(),
-                            active = active,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+@Composable
+private fun ForgeAssistantTurnRow(messages: List<ForgeChatMessage>, active: Boolean) {
+    // 整轮的 parts 按顺序摊平再切段：相邻的思考/工具（哪怕跨消息）连成同一个工作过程块，
+    // 汇总头只在整轮结束时出现一次，轮次进行中不提前收起。
+    val segments = remember(messages) { messages.flatMap { it.parts }.toSegments() }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        segments.forEach { segment ->
+            when (segment) {
+                is ForgeSegment.Work -> AgentWorkProcess(
+                    id = segment.key,
+                    messages = segment.items,
+                    onOpenBrowser = {},
+                    currentBrowserMessageId = null,
+                    retainedStreamingStates = emptyMap<String, StreamingMarkdownState>(),
+                    active = active,
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
-                        is ForgeSegment.Body -> ChatMessageItem(
-                            message = AgentMessageUi(
-                                id = segment.id,
-                                content = segment.text,
-                                isStreaming = segment.streaming,
-                            ),
-                            onSuggestionClick = {},
-                            onRunTraceClick = {},
-                            onOpenBrowser = {},
-                            showBrowserShortcut = false,
-                            showCopyAction = false,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
+                is ForgeSegment.Body -> ChatMessageItem(
+                    message = AgentMessageUi(
+                        id = segment.id,
+                        content = segment.text,
+                        isStreaming = segment.streaming,
+                    ),
+                    onSuggestionClick = {},
+                    onRunTraceClick = {},
+                    onOpenBrowser = {},
+                    showBrowserShortcut = false,
+                    showCopyAction = false,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
     }
@@ -329,18 +374,18 @@ private sealed interface ForgeSegment {
 }
 
 /**
- * 一条助手消息按 parts 顺序切成「工作过程」与「正文」两类段落，
+ * 一轮里的全部 parts 按顺序切成「工作过程」与「正文」两类段落，
  * 思考与工具归入同一段工作过程（对应 Assist 的可折叠工作块），正文单独成段。
  */
-private fun ForgeChatMessage.toSegments(): List<ForgeSegment> {
+private fun List<ForgePart>.toSegments(): List<ForgeSegment> {
     val segments = mutableListOf<ForgeSegment>()
     val work = mutableListOf<AgentChatMessageUi>()
     fun flushWork() {
         if (work.isEmpty()) return
-        segments += ForgeSegment.Work(key = "work-$id-${segments.size}", items = work.toList())
+        segments += ForgeSegment.Work(key = "work-${work.first().id}-${segments.size}", items = work.toList())
         work.clear()
     }
-    parts.forEach { part ->
+    forEach { part ->
         when (part) {
             is ForgePart.Reasoning -> work += ThinkingMessageUi(
                 id = part.id,

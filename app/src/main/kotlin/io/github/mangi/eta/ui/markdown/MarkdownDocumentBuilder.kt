@@ -86,12 +86,10 @@ private class BlockConverter(
         val meaningful = node.children.filterNot { it.isWhitespaceLike() }
         val math = meaningful.singleOrNull()?.takeIf { it.type == GFMElementTypes.BLOCK_MATH }
         if (math != null) {
-            return MarkdownCode(
-                offset = node.startOffset,
-                language = MATH_LANGUAGE,
-                text = AnnotatedString(mathSource(math)),
-                isMath = true,
-            )
+            // 独占一段的公式不进代码块：换成可读符号当普通段落显示（渲染层没有公式排版引擎，
+            // 原始 LaTeX 塞进带 LaTeX 标题栏的代码块里没人看得懂）。
+            val readable = LatexReadable.convert(mathSource(math))
+            return if (readable.isBlank()) null else MarkdownParagraph(node.startOffset, AnnotatedString(readable))
         }
         val text = inline(node.children)
         return if (text.isEmpty()) null else MarkdownParagraph(node.startOffset, text)
