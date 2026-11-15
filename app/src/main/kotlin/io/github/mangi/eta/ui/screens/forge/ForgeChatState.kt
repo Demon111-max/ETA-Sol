@@ -35,6 +35,15 @@ internal sealed interface ForgeStartup {
     data class Failed(val message: String) : ForgeStartup
 }
 
+/** 一次共用配置对齐的结果：启动与发送共用同一套处理，只在失败呈现上不同。 */
+private sealed interface ConfigApply {
+    data object Ready : ConfigApply
+
+    data object NotConfigured : ConfigApply
+
+    data class Failed(val output: String) : ConfigApply
+}
+
 /**
  * Forge 单会话对话的状态：确保 opencode server 在跑、拿一个 session、订阅 /event。
  *
@@ -83,34 +92,23 @@ internal class ForgeChatState(
         startJob = scope.launch {
             startup = ForgeStartup.Connecting
             notice = null
-            // 配置与 Assist 共用同一套服务商设置：进 Forge 时解析一次，变了才重写并重启 server。
-            val shared = resolveForgeSharedConfig()
-            if (shared !is ForgeSharedConfig.Ready) {
-                startup = ForgeStartup.Failed(context.getString(R.string.forge_gate_config_missing))
-                return@launch
-            }
-            modelId = shared.settings.modelId
-            providerId = shared.settings.providerId
-            val environment = server.environment()
-            val fingerprint = shared.settings.providerId + "\n" + shared.settings.baseUrl +
-                "\n" + shared.settings.modelId + "\n" + shared.credentials.apiKey
-            if (fingerprint != appliedConfigFingerprint) {
-                when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
-                    ForgeConfigWriteResult.Written -> {
-                        appliedConfigFingerprint = fingerprint
-                        server.restartIfRunning(environment)
-                    }
-
-                    ForgeConfigWriteResult.EnvironmentNotReady -> Unit
-
-                    is ForgeConfigWriteResult.Failed -> {
-                        startup = ForgeStartup.Failed(
-                            context.getString(R.string.forge_server_failed, written.output),
-                        )
-                        return@launch
-                    }
+            // 配置与 Assist 共用同一套服务商设置：解析并应用（变了才重写配置并重启 server）。
+            when (val applied = applySharedConfig()) {
+                ConfigApply.NotConfigured -> {
+                    startup = ForgeStartup.Failed(context.getString(R.string.forge_gate_config_missing))
+                    return@launch
                 }
+
+                is ConfigApply.Failed -> {
+                    startup = ForgeStartup.Failed(
+                        context.getString(R.string.forge_server_failed, applied.output),
+                    )
+                    return@launch
+                }
+
+                ConfigApply.Ready -> Unit
             }
+            val environment = server.environment()
             when (val result = server.ensureRunning(environment)) {
                 is ForgeServerStartResult.Failed -> {
                     startup = ForgeStartup.Failed(
@@ -167,11 +165,56 @@ internal class ForgeChatState(
         start()
     }
 
+    /**
+     * 把共用配置对齐到当前选择：解析服务商/模型/Key，与上次应用的指纹不同才
+     * 重写 opencode 配置并重启 server（重启会等到健康才返回）。启动时调一次，
+     * 之后每次发送前再调一次——用户在设置里换了 Key/服务商/模型，Forge 不必
+     * 重进也要立刻生效，否则会一直拿启动时那套旧配置发，换掉的死 Key 一直 403。
+     */
+    private suspend fun applySharedConfig(): ConfigApply {
+        val shared = resolveForgeSharedConfig()
+        if (shared !is ForgeSharedConfig.Ready) return ConfigApply.NotConfigured
+        modelId = shared.settings.modelId
+        providerId = shared.settings.providerId
+        val fingerprint = shared.settings.providerId + "\n" + shared.settings.baseUrl +
+            "\n" + shared.settings.modelId + "\n" + shared.credentials.apiKey
+        if (fingerprint != appliedConfigFingerprint) {
+            when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
+                ForgeConfigWriteResult.Written -> {
+                    appliedConfigFingerprint = fingerprint
+                    server.restartIfRunning(server.environment())
+                }
+
+                ForgeConfigWriteResult.EnvironmentNotReady -> Unit
+
+                is ForgeConfigWriteResult.Failed -> return ConfigApply.Failed(written.output)
+            }
+        }
+        return ConfigApply.Ready
+    }
+
     fun send(text: String) {
         if (text.isBlank() || busy) return
         busy = true
         notice = null
         scope.launch {
+            // 发送前先对齐配置：换过 Key/服务商/模型时，这一步会把新配置写好并重启 server，
+            // 再往下建会话/发消息就都走新配置。server 重启后当前会话的事件订阅会断线重连对齐。
+            when (val applied = applySharedConfig()) {
+                ConfigApply.NotConfigured -> {
+                    busy = false
+                    notice = context.getString(R.string.forge_gate_config_missing)
+                    return@launch
+                }
+
+                is ConfigApply.Failed -> {
+                    busy = false
+                    notice = context.getString(R.string.forge_send_failed, applied.output)
+                    return@launch
+                }
+
+                ConfigApply.Ready -> Unit
+            }
             var id = sessionId ?: api.createSession().getOrElse { error ->
                 busy = false
                 notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
