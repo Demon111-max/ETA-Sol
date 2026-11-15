@@ -124,8 +124,11 @@ internal object LinuxPackageProfiles {
     /**
      * opencode 只走官方安装脚本：npm 分发的 opencode-ai 是 musl 构建，glibc 的 Debian 里跑不起来。
      * 脚本把二进制装到 $HOME/.opencode/bin，随后以 `opencode --version` 是否可执行判定就绪。
+     * 固定装真机验证过的 1.19.5：不带版本号时脚本要先查 npm registry 与 GitHub 接口定最新版，
+     * 这两步在国内网络下容易断且失败不透出原因；带版本号后脚本直接走官方下载。
      */
-    private const val OPENCODE_INSTALL_SCRIPT = "curl -fsSL https://opencode.ai/install | bash"
+    private const val OPENCODE_INSTALL_SCRIPT =
+        "curl -fsSL https://opencode.ai/install | bash -s -- --version 1.19.5"
 
     /** 安装脚本装在 $HOME/.opencode/bin，不在 PATH 里，按绝对路径自检。 */
     private const val OPENCODE_VERIFY_SCRIPT =

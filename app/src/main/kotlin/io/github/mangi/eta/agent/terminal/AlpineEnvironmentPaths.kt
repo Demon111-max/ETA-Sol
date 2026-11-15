@@ -20,7 +20,8 @@ internal object AlpineEnvironmentPaths {
     const val NODE_TOOLS_REVISION = 2
     const val SSH_TOOLS_REVISION = 1
     const val KIMI_TOOLS_REVISION = 1
-    const val OPENCODE_TOOLS_REVISION = 1
+    // revision 2：opencode 安装固定版本 1.19.5（绕开官方脚本的版本查询步骤），已就绪环境需重走安装。
+    const val OPENCODE_TOOLS_REVISION = 2
 
     fun environmentDir(context: Context): File =
         LinuxEnvironmentPaths.environmentDir(context, LinuxDistribution.ALPINE)
