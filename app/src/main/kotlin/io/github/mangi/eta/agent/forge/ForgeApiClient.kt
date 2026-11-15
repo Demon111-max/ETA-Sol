@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -127,6 +128,67 @@ internal class ForgeApiClient(
             }
         }
     }
+
+    /** 当前全部挂起中的 question 请求（跨会话，调用方按会话过滤）。 */
+    suspend fun listPendingQuestions(): Result<List<ForgeQuestionRequest>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder().url("$baseUrl/question").get().build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    val body = response.body.string().orEmpty()
+                    ForgeProtocol.parsePendingQuestions(Json.parseToJsonElement(body))
+                }
+            }
+        }
+
+    /** 回答 question：answers 与 questions 一一对应，每项是选中的选项名（或自定义答案文本）。 */
+    suspend fun replyQuestion(
+        pending: ForgeQuestionRequest,
+        answers: List<List<String>>,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val payload = buildJsonObject {
+                putJsonArray("answers") {
+                    answers.forEach { group ->
+                        addJsonArray { group.forEach { add(it) } }
+                    }
+                }
+            }
+            val request = Request.Builder()
+                .url(questionUrl(pending, "reply"))
+                .post(payload.toString().toRequestBody(JsonMediaType))
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                response.body.close()
+                Unit
+            }
+        }
+    }
+
+    /** 拒绝 question（用户点跳过）：模型会收到拒绝结果、自己决定下一步。 */
+    suspend fun rejectQuestion(pending: ForgeQuestionRequest): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url(questionUrl(pending, "reject"))
+                    .post("{}".toRequestBody(JsonMediaType))
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    response.body.close()
+                    Unit
+                }
+            }
+        }
+
+    private fun questionUrl(pending: ForgeQuestionRequest, action: String): String =
+        if (pending.v2) {
+            "$baseUrl/api/session/${pending.sessionId}/question/${pending.id}/$action"
+        } else {
+            "$baseUrl/question/${pending.id}/$action"
+        }
 
     /** 拉全量消息：首次进入与 SSE 断线对齐都用它。 */
     suspend fun loadMessages(sessionId: String): Result<List<ForgeChatMessage>> =

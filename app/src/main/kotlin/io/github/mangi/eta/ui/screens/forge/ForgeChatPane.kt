@@ -1,10 +1,12 @@
 package io.github.mangi.eta.ui.screens.forge
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -13,6 +15,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.runtime.Composable
@@ -27,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
@@ -34,6 +39,8 @@ import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.forge.ForgeChatMessage
 import io.github.mangi.eta.agent.forge.ForgePart
+import io.github.mangi.eta.agent.forge.ForgeProtocol
+import io.github.mangi.eta.agent.forge.ForgeQuestionRequest
 import io.github.mangi.eta.agent.forge.ForgeRole
 import io.github.mangi.eta.agent.forge.ForgeToolStatus
 import io.github.mangi.eta.data.model.ReasoningEffort
@@ -54,7 +61,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
@@ -131,6 +140,13 @@ internal fun ForgeChatPane(
                 ForgeCaption(
                     text = notice,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                )
+            }
+            state.pendingQuestion?.let { request ->
+                ForgeQuestionCard(
+                    request = request,
+                    onAnswer = { answers -> state.answerQuestion(answers) },
+                    onSkip = { state.dismissQuestion() },
                 )
             }
             ForgeComposer(
@@ -357,6 +373,147 @@ private fun ForgeComposer(
     }
 }
 
+/**
+ * question 工具的提问卡：模型问了问题、整轮正挂起等回答。
+ * 选项点选（多选可多点），允许自定义时还能自己写答案，写了以自写为准；
+ * 每个问题都有答案才能提交；跳过走 reject 让模型自己决定下一步。
+ */
+@Composable
+private fun ForgeQuestionCard(
+    request: ForgeQuestionRequest,
+    onAnswer: (List<List<String>>) -> Unit,
+    onSkip: () -> Unit,
+) {
+    var selections by remember(request.id) { mutableStateOf<Map<Int, Set<String>>>(emptyMap()) }
+    var customAnswers by remember(request.id) { mutableStateOf<Map<Int, String>>(emptyMap()) }
+    val ready = request.questions.indices.all { index ->
+        selections[index]?.isNotEmpty() == true || customAnswers[index]?.isNotBlank() == true
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .background(MiuixTheme.colorScheme.surfaceContainer, RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        request.questions.forEachIndexed { index, question ->
+            question.header?.takeIf { it.isNotBlank() }?.let { header ->
+                Text(
+                    text = header,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
+            Text(
+                text = question.question,
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            question.options.forEach { option ->
+                val selected = selections[index]?.contains(option.label) == true
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (selected) {
+                                MiuixTheme.colorScheme.primary.copy(alpha = 0.12f)
+                            } else {
+                                MiuixTheme.colorScheme.surface
+                            },
+                            RoundedCornerShape(12.dp),
+                        )
+                        .clickable {
+                            val current = selections[index].orEmpty()
+                            val next = when {
+                                question.multiple ->
+                                    if (option.label in current) current - option.label else current + option.label
+
+                                selected -> emptySet()
+                                else -> setOf(option.label)
+                            }
+                            selections = selections + (index to next)
+                            // 选了选项就以选项为准，清掉这个问题的自写答案。
+                            if (next.isNotEmpty()) customAnswers = customAnswers - index
+                        }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Text(
+                        text = option.label,
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurface,
+                    )
+                    option.description?.takeIf { it.isNotBlank() }?.let { description ->
+                        Text(
+                            text = description,
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
+                }
+            }
+            if (question.custom) {
+                val custom = customAnswers[index].orEmpty()
+                BasicTextField(
+                    value = custom,
+                    onValueChange = { value ->
+                        customAnswers = customAnswers + (index to value)
+                        // 自写答案与选项互斥（多选时选项保留，自写在提交时优先）。
+                        if (value.isNotBlank() && !question.multiple) {
+                            selections = selections + (index to emptySet())
+                        }
+                    },
+                    textStyle = MiuixTheme.textStyles.body2.copy(
+                        color = MiuixTheme.colorScheme.onSurface,
+                    ),
+                    cursorBrush = SolidColor(MiuixTheme.colorScheme.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    decorationBox = { innerTextField ->
+                        Box {
+                            if (custom.isEmpty()) {
+                                Text(
+                                    text = stringResource(R.string.forge_question_custom_hint),
+                                    style = MiuixTheme.textStyles.body2,
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                )
+                            }
+                            innerTextField()
+                        }
+                    },
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(
+                text = stringResource(R.string.forge_question_skip),
+                onClick = onSkip,
+            )
+            TextButton(
+                text = stringResource(R.string.forge_question_submit),
+                onClick = {
+                    val answers = request.questions.indices.map { index ->
+                        val custom = customAnswers[index]?.trim().orEmpty()
+                        if (custom.isNotEmpty()) {
+                            listOf(custom)
+                        } else {
+                            selections[index].orEmpty().toList()
+                        }
+                    }
+                    onAnswer(answers)
+                },
+                enabled = ready,
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
+        }
+    }
+}
+
 @Composable
 private fun ForgeCaption(text: String, modifier: Modifier = Modifier) {
     Text(
@@ -419,7 +576,9 @@ private fun ForgePart.Tool.toToolActivity(): ToolActivityMessageUi = ToolActivit
         ForgeToolStatus.Completed -> ToolActivityStatusUi.Success
         ForgeToolStatus.Failed -> ToolActivityStatusUi.Failed
     },
-    argumentsSummary = title?.takeIf(String::isNotBlank) ?: summarizeInput(input).orEmpty(),
+    argumentsSummary = title?.takeIf(String::isNotBlank)
+        ?: (if (tool == "question") ForgeProtocol.summarizeQuestionInput(input) else null)
+        ?: summarizeInput(input).orEmpty(),
     command = input?.takeIf(String::isNotBlank),
     resultSummary = error?.takeIf(String::isNotBlank) ?: output?.takeIf(String::isNotBlank),
 )

@@ -79,6 +79,33 @@ internal data class ForgeSessionSummary(
     val updatedAtMillis: Long,
 )
 
+/** opencode question 工具的一个选项。 */
+internal data class ForgeQuestionOption(
+    val label: String,
+    val description: String?,
+)
+
+/** opencode question 工具的一个问题：题面 + 选项，可多选、可自定义答案。 */
+internal data class ForgeQuestion(
+    val question: String,
+    val header: String?,
+    val options: List<ForgeQuestionOption>,
+    val multiple: Boolean,
+    val custom: Boolean,
+)
+
+/**
+ * 一次待回答的 question 请求。模型调用 question 工具后 opencode 会把整轮挂起，
+ * 等客户端经 /question/{id}/reply 回答案才继续；没人答就一直挂到超时。
+ * v2 标记事件来自新版事件面（question.v2.asked），回答案要走 /api/session/... 路径。
+ */
+internal data class ForgeQuestionRequest(
+    val id: String,
+    val sessionId: String,
+    val questions: List<ForgeQuestion>,
+    val v2: Boolean,
+)
+
 /** /event 上与本页面有关的事件。 */
 internal sealed interface ForgeEvent {
     data class PartUpdated(val sessionId: String, val part: ForgePart) : ForgeEvent
@@ -109,6 +136,12 @@ internal sealed interface ForgeEvent {
         val isAbort: Boolean
             get() = name == "MessageAbortedError" || message.equals("Aborted", ignoreCase = true)
     }
+
+    /** 模型调用了 question 工具在等用户回答，整轮挂起中。 */
+    data class QuestionAsked(val request: ForgeQuestionRequest) : ForgeEvent
+
+    /** question 已被回答或拒绝（可能是在别处答的），界面上的提问卡可以撤了。 */
+    data class QuestionCleared(val requestId: String) : ForgeEvent
 
     data class Ignored(val type: String) : ForgeEvent
 }
@@ -313,8 +346,61 @@ internal object ForgeProtocol {
                 )
             }
 
+            "question.asked", "question.v2.asked" -> {
+                val request = parseQuestionRequest(properties, v2 = type.startsWith("question.v2"))
+                if (request != null) {
+                    ForgeEvent.QuestionAsked(request)
+                } else {
+                    ForgeEvent.Ignored(type)
+                }
+            }
+
+            "question.replied", "question.rejected", "question.v2.replied", "question.v2.rejected" ->
+                ForgeEvent.QuestionCleared(
+                    properties?.stringOrNull("requestID") ?: properties?.stringOrNull("id").orEmpty(),
+                )
+
             else -> ForgeEvent.Ignored(type)
         }
+    }
+
+    /** question.asked 的 properties 本身就是请求对象：{id, sessionID, questions[]}。 */
+    fun parseQuestionRequest(properties: JsonObject?, v2: Boolean): ForgeQuestionRequest? {
+        if (properties == null) return null
+        val id = properties.stringOrNull("id") ?: return null
+        val requestSessionId = properties.stringOrNull("sessionID") ?: return null
+        val questions = (properties["questions"] as? JsonArray)?.mapNotNull { element ->
+            val item = element as? JsonObject ?: return@mapNotNull null
+            val text = item.stringOrNull("question") ?: return@mapNotNull null
+            val options = (item["options"] as? JsonArray)?.mapNotNull { optionElement ->
+                val option = optionElement as? JsonObject ?: return@mapNotNull null
+                val label = option.stringOrNull("label") ?: return@mapNotNull null
+                ForgeQuestionOption(label = label, description = option.stringOrNull("description"))
+            }.orEmpty()
+            ForgeQuestion(
+                question = text,
+                header = item.stringOrNull("header"),
+                options = options,
+                multiple = (item["multiple"] as? JsonPrimitive)?.contentOrNull == "true",
+                custom = (item["custom"] as? JsonPrimitive)?.contentOrNull != "false",
+            )
+        }.orEmpty()
+        if (questions.isEmpty()) return null
+        return ForgeQuestionRequest(id = id, sessionId = requestSessionId, questions = questions, v2 = v2)
+    }
+
+    /** GET /question 的返回：全部挂起中的请求（跨会话），形状与 question.asked 的请求对象一致。 */
+    fun parsePendingQuestions(element: JsonElement): List<ForgeQuestionRequest> =
+        (element as? JsonArray)?.mapNotNull { parseQuestionRequest(it as? JsonObject, v2 = false) }
+            .orEmpty()
+
+    /** question 工具行的一句话摘要：取第一个问题的题面，别把整段 JSON 摆在行上。 */
+    fun summarizeQuestionInput(input: String?): String? {
+        val raw = input?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        val obj = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+        val first = (obj["questions"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return null
+        return first.stringOrNull("question")
     }
 
     private fun JsonObject.role(): ForgeRole =

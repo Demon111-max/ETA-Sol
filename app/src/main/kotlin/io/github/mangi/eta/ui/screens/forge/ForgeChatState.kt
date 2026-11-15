@@ -11,6 +11,7 @@ import io.github.mangi.eta.agent.forge.ForgeConfigWriteResult
 import io.github.mangi.eta.agent.forge.ForgeConfigWriter
 import io.github.mangi.eta.agent.forge.ForgeEvent
 import io.github.mangi.eta.agent.forge.ForgePart
+import io.github.mangi.eta.agent.forge.ForgeQuestionRequest
 import io.github.mangi.eta.agent.forge.ForgeRole
 import io.github.mangi.eta.agent.forge.ForgeServerManager
 import io.github.mangi.eta.agent.forge.ForgeServerStartResult
@@ -48,6 +49,13 @@ internal class ForgeChatState(
     var messages by mutableStateOf<List<ForgeChatMessage>>(emptyList())
     var busy by mutableStateOf(false)
     var notice by mutableStateOf<String?>(null)
+
+    /**
+     * 模型调用 question 工具后挂起等回答的请求；不为空时界面出提问卡。
+     * 没人回答整轮会一直挂着，所以进入/切会话/重连时都要向服务端重新对齐一次。
+     */
+    var pendingQuestion by mutableStateOf<ForgeQuestionRequest?>(null)
+        private set
 
     /** Forge 的思考档位：发送时按档位名选 opencode 配置里预置的 variant。 */
     var reasoningEffort by mutableStateOf(ReasoningEffort.DEFAULT)
@@ -120,6 +128,7 @@ internal class ForgeChatState(
                 sessionId = null
                 messages = emptyList()
                 busy = false
+                pendingQuestion = null
                 startup = ForgeStartup.Ready
                 onSessionsChanged(null)
                 return@launch
@@ -135,6 +144,7 @@ internal class ForgeChatState(
             api.sessionBusy(id).onSuccess { busy = it }
             startup = ForgeStartup.Ready
             subscribe(id)
+            refreshPendingQuestion(id)
             onSessionsChanged(id)
         }
     }
@@ -191,6 +201,7 @@ internal class ForgeChatState(
         messages = emptyList()
         busy = false
         notice = null
+        pendingQuestion = null
         onSessionsChanged(null)
     }
 
@@ -207,12 +218,51 @@ internal class ForgeChatState(
         if (id == sessionId) return
         scope.launch {
             sessionId = id
+            pendingQuestion = null
             messages = api.loadMessages(id).getOrDefault(emptyList())
             busy = false
             api.sessionBusy(id).onSuccess { busy = it }
             notice = null
             subscribe(id)
+            refreshPendingQuestion(id)
             onSessionsChanged(id)
+        }
+    }
+
+    /** 回答提问卡：答完 opencode 会把这一轮继续跑下去；失败保留卡片让用户重试。 */
+    fun answerQuestion(answers: List<List<String>>) {
+        val pending = pendingQuestion ?: return
+        scope.launch {
+            api.replyQuestion(pending, answers)
+                .onSuccess {
+                    if (pendingQuestion?.id == pending.id) pendingQuestion = null
+                }
+                .onFailure { error ->
+                    notice = context.getString(R.string.forge_question_failed, error.message.orEmpty())
+                }
+        }
+    }
+
+    /** 跳过提问卡：走 reject，模型收到拒绝后自己决定下一步。 */
+    fun dismissQuestion() {
+        val pending = pendingQuestion ?: return
+        scope.launch {
+            api.rejectQuestion(pending)
+                .onSuccess {
+                    if (pendingQuestion?.id == pending.id) pendingQuestion = null
+                }
+                .onFailure { error ->
+                    notice = context.getString(R.string.forge_question_failed, error.message.orEmpty())
+                }
+        }
+    }
+
+    /** 向服务端对齐当前会话挂起中的 question（事件可能在断线/切会话期间错过）。 */
+    private suspend fun refreshPendingQuestion(id: String) {
+        api.listPendingQuestions().onSuccess { list ->
+            if (sessionId == id) {
+                pendingQuestion = list.firstOrNull { it.sessionId == id }
+            }
         }
     }
 
@@ -257,6 +307,7 @@ internal class ForgeChatState(
     private suspend fun alignAfterReconnect(id: String) {
         api.loadMessages(id).onSuccess { if (sessionId == id) messages = it }
         api.sessionBusy(id).onSuccess { if (sessionId == id) busy = it }
+        refreshPendingQuestion(id)
     }
 
     private fun handle(session: String, event: ForgeEvent) {
@@ -286,6 +337,18 @@ internal class ForgeChatState(
                     notice = event.message?.takeIf { it.isNotBlank() }?.let {
                         context.getString(R.string.forge_run_failed, it)
                     }
+                }
+            }
+
+            is ForgeEvent.QuestionAsked -> {
+                // 只接当前打开会话的提问；别的会话的提问等切回去时靠列表对齐捡回来。
+                if (event.request.sessionId == session) pendingQuestion = event.request
+            }
+
+            is ForgeEvent.QuestionCleared -> {
+                val current = pendingQuestion
+                if (current != null && (event.requestId.isBlank() || event.requestId == current.id)) {
+                    pendingQuestion = null
                 }
             }
 
