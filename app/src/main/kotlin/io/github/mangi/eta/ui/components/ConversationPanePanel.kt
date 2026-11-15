@@ -238,6 +238,23 @@ internal fun ConversationPanePanel(
                                     }
                                 }
                             }
+                            // Forge 列表没拉到（server 没在跑）时在末尾留一行说明，
+                            // 别让 Forge 会话整批消失得无声无息。
+                            state.forgeListHint?.let { hint ->
+                                item(key = "pane_forge_hint") {
+                                    Text(
+                                        text = hint,
+                                        style = MiuixTheme.textStyles.footnote2,
+                                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                        modifier = Modifier.padding(
+                                            start = 16.dp,
+                                            end = 16.dp,
+                                            top = 10.dp,
+                                            bottom = 4.dp,
+                                        ),
+                                    )
+                                }
+                            }
                         }
                     }
                     ConversationPaneTopBar(

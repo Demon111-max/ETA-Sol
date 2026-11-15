@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,21 +19,27 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.TextButton
 import io.github.mangi.eta.R
-import io.github.mangi.eta.agent.terminal.LinuxDistribution
 import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.LinuxPackageProfiles
 import io.github.mangi.eta.agent.terminal.linuxPackageProfileReady
 import io.github.mangi.eta.agent.forge.ForgeSharedConfig
 import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
 import io.github.mangi.eta.data.model.AppearanceUiStyle
+import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.ListEmptyState
 import io.github.mangi.eta.ui.components.coui.CouiButton
 import io.github.mangi.eta.ui.components.coui.CouiButtonRole
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Construction
@@ -73,6 +80,23 @@ internal fun ForgeScreen(
     LaunchedEffect(Unit) {
         gate = ForgeGateState.Checking
         gate = withContext(Dispatchers.IO) { checkForgeGate(context.applicationContext) }
+    }
+    // 门禁不能只查一次：用户按提示去装好环境/opencode 再回来，还显示「缺失」、
+    // 非得杀掉 App 重进。页面每次回到前台时重查一次（已通过的不打扰，不降级闪烁）。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && gate !is ForgeGateState.Ready) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    val checked = checkForgeGate(context.applicationContext)
+                    withContext(Dispatchers.Main) {
+                        if (gate !is ForgeGateState.Ready) gate = checked
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     when (val state = gate) {
@@ -166,11 +190,17 @@ internal fun ForgeGateAction(text: String, onClick: () -> Unit) {
 }
 
 private fun checkForgeGate(context: android.content.Context): ForgeGateState {
-    val rootfs = LinuxEnvironmentPaths.rootfsDir(context, LinuxDistribution.DEBIAN)
+    // 发行版必须跟用户当前选的走：以前写死 Debian，选了 Alpine 时环境明明装好也报缺失、
+    // 文案还让他去装 Debian，而 server 与写配置用的都是 current()——三处口径必须一致。
+    val distribution = LinuxEnvironmentSettingsRepository.current(context)
+    val rootfs = LinuxEnvironmentPaths.rootfsDir(context, distribution)
     if (!LinuxEnvironmentPaths.rootfsReady(rootfs.absolutePath)) {
         return ForgeGateState.Missing(ForgePrerequisite.LinuxEnvironment)
     }
-    if (!linuxPackageProfileReady(rootfs, LinuxPackageProfiles.OPENCODE)) {
+    // opencode 就绪判定：标记文件之外再看二进制本体——标记丢了但手动装过的不该误判未装，
+    // 标记还在但二进制被删的也不能放行（装到 $HOME/.opencode/bin，root 身份即 rootfs/root）。
+    val binaryPresent = File(rootfs, "root/.opencode/bin/opencode").isFile
+    if (!linuxPackageProfileReady(rootfs, LinuxPackageProfiles.OPENCODE) && !binaryPresent) {
         return ForgeGateState.Missing(ForgePrerequisite.Opencode)
     }
     val configured = runBlockingGate { resolveForgeSharedConfig() is ForgeSharedConfig.Ready }

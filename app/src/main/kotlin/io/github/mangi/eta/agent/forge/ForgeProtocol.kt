@@ -73,6 +73,17 @@ internal sealed interface ForgePart {
             get() = true
     }
 
+    /** 文件附件 part（用户从其他客户端或本机 Forge 发的附件消息）：只留 mime 与文件名供界面占位显示。 */
+    data class Attachment(
+        override val id: String,
+        override val messageId: String,
+        val mime: String?,
+        val filename: String?,
+    ) : ForgePart {
+        override val ended: Boolean
+            get() = true
+    }
+
     data class Other(
         override val id: String,
         override val messageId: String,
@@ -86,6 +97,8 @@ internal data class ForgeChatMessage(
     val id: String,
     val role: ForgeRole,
     val parts: List<ForgePart>,
+    /** 助手消息 info.tokens 折算的上下文占用（input + 缓存读 + 缓存写）；用户消息与无数据时为 null。 */
+    val contextTokens: Long? = null,
 )
 
 /** 侧边栏 Forge 会话列表的一项：会话 id / 标题 / 最近更新时间（毫秒）。 */
@@ -161,8 +174,8 @@ internal sealed interface ForgeEvent {
     /** 模型调用了 question 工具在等用户回答，整轮挂起中。 */
     data class QuestionAsked(val request: ForgeQuestionRequest) : ForgeEvent
 
-    /** question 已被回答或拒绝（可能是在别处答的），界面上的提问卡可以撤了。 */
-    data class QuestionCleared(val requestId: String) : ForgeEvent
+    /** question 已被回答或拒绝（可能是在别处答的），界面上的提问卡可以撤了。sessionId 缺失时为 null，处理方不得据此跨会话清卡。 */
+    data class QuestionCleared(val requestId: String, val sessionId: String?) : ForgeEvent
 
     data class Ignored(val type: String) : ForgeEvent
 }
@@ -185,13 +198,14 @@ internal object ForgeProtocol {
         (element as? JsonArray).orEmpty()
             .mapNotNull { parseSessionId(it) }
 
-    /** 会话列表里最近更新的一个：服务端返回顺序不保证，新建多个会话后重启要回到最近用的那个。 */
+    /** 会话列表里最近更新的一个：服务端返回顺序不保证，新建多个会话后重启要回到最近用的那个。子智能体的子会话（parentID 非空）不算顶层会话，跳过。 */
     fun parseLatestSessionId(element: JsonElement): String? {
         val array = element as? JsonArray ?: return null
         var bestId: String? = null
         var bestUpdated = Long.MIN_VALUE
         for (entry in array) {
             val obj = entry as? JsonObject ?: continue
+            if (!obj.stringOrNull("parentID").isNullOrBlank()) continue
             val id = obj.stringOrNull("id") ?: continue
             val updated = ((obj["time"] as? JsonObject)?.get("updated") as? JsonPrimitive)
                 ?.contentOrNull?.toLongOrNull() ?: Long.MIN_VALUE
@@ -203,11 +217,12 @@ internal object ForgeProtocol {
         return bestId
     }
 
-    /** 侧边栏列表用的会话摘要：id / 标题 / 最近更新时间，按最近更新倒序。 */
+    /** 侧边栏列表用的会话摘要：id / 标题 / 最近更新时间，按最近更新倒序。子会话（parentID 非空）不进列表。 */
     fun parseSessionSummaries(element: JsonElement): List<ForgeSessionSummary> {
         val array = element as? JsonArray ?: return emptyList()
         return array.mapNotNull { entry ->
             val obj = entry as? JsonObject ?: return@mapNotNull null
+            if (!obj.stringOrNull("parentID").isNullOrBlank()) return@mapNotNull null
             val id = obj.stringOrNull("id") ?: return@mapNotNull null
             val updated = ((obj["time"] as? JsonObject)?.get("updated") as? JsonPrimitive)
                 ?.contentOrNull?.toLongOrNull() ?: 0L
@@ -226,6 +241,15 @@ internal object ForgeProtocol {
         return type != "idle"
     }
 
+    /** /session/status 全量解析成 会话ID → 是否在跑，侧边栏给每个 Forge 条目对齐运行标记用。 */
+    fun parseSessionStatuses(element: JsonElement): Map<String, Boolean> {
+        val root = element as? JsonObject ?: return emptyMap()
+        return root.entries.mapNotNull { (id, value) ->
+            val type = (value as? JsonObject)?.stringOrNull("type") ?: return@mapNotNull null
+            id to (type != "idle")
+        }.toMap()
+    }
+
     fun parseMessages(element: JsonElement): List<ForgeChatMessage> =
         (element as? JsonArray).orEmpty()
             .mapNotNull { parseMessageEntry(it) }
@@ -240,8 +264,21 @@ internal object ForgeProtocol {
                 id = info.stringOrNull("id") ?: parts.firstOrNull()?.messageId ?: return@mapNotNull null,
                 role = info.role(),
                 parts = parts,
+                contextTokens = contextTokensOf(info),
             )
         }.filter { it.parts.isNotEmpty() }
+    }
+
+    /** 助手消息 info.tokens 折算上下文占用：input + cache.read + cache.write（本步提示词总量）。 */
+    private fun contextTokensOf(info: JsonObject): Long? {
+        val tokens = info["tokens"] as? JsonObject ?: return null
+        fun num(key: String): Long =
+            ((tokens[key] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()) ?: 0L
+        val cache = tokens["cache"] as? JsonObject
+        fun cacheNum(key: String): Long =
+            ((cache?.get(key) as? JsonPrimitive)?.contentOrNull?.toLongOrNull()) ?: 0L
+        val total = num("input") + cacheNum("read") + cacheNum("write")
+        return total.takeIf { it > 0 }
     }
 
     private fun parseMessageEntry(element: JsonElement): ForgeChatMessage? {
@@ -270,6 +307,13 @@ internal object ForgeProtocol {
                 messageId = messageId,
                 text = obj.stringOrNull("text").orEmpty(),
                 ended = ended,
+            )
+
+            "file" -> ForgePart.Attachment(
+                id = id,
+                messageId = messageId,
+                mime = obj.stringOrNull("mime"),
+                filename = obj.stringOrNull("filename"),
             )
 
             "tool" -> parseToolPart(obj, id, messageId)
@@ -399,7 +443,9 @@ internal object ForgeProtocol {
 
             "question.replied", "question.rejected", "question.v2.replied", "question.v2.rejected" ->
                 ForgeEvent.QuestionCleared(
-                    properties?.stringOrNull("requestID") ?: properties?.stringOrNull("id").orEmpty(),
+                    requestId = properties?.stringOrNull("requestID")
+                        ?: properties?.stringOrNull("id").orEmpty(),
+                    sessionId = sessionId,
                 )
 
             else -> ForgeEvent.Ignored(type)

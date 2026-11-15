@@ -9,6 +9,8 @@ data class ConversationPaneUiState(
     val conversations: List<ConversationSummaryUi>,
     val selectedConversationId: String?,
     val searchQuery: String,
+    /** Forge 会话列表没拉到时的说明（server 没在跑等）：面板在列表末尾摆一行，别让 Forge 条目无声消失。 */
+    val forgeListHint: String? = null,
 )
 
 @Immutable
@@ -45,7 +47,8 @@ internal fun ConversationPaneUiState.withForgeConversations(
     forgeOpen: Boolean,
     activeSessionId: String?,
     untitledTitle: String,
-    busySessionId: String? = null,
+    busySessionIds: Set<String> = emptySet(),
+    forgeListHint: String? = null,
 ): ConversationPaneUiState {
     val query = searchQuery.trim()
     val assistConversations = conversations.filterNot { it.forge }
@@ -54,7 +57,8 @@ internal fun ConversationPaneUiState.withForgeConversations(
         .map { session ->
             // 正在跑的会话顶到列表前部并显示运行圆点（与 Assist 的活跃会话同款处理），
             // 更新时间按当前时刻算，免得它被判进旧日期分组、把「今天」组从中间截断。
-            val isBusy = session.id == busySessionId
+            // 运行集合来自服务端状态对齐：后台还在跑的 Forge 会话不止打开着的那一条。
+            val isBusy = session.id in busySessionIds
             val effectiveUpdated = if (isBusy) {
                 maxOf(session.updatedAtMillis, System.currentTimeMillis())
             } else {
@@ -77,11 +81,14 @@ internal fun ConversationPaneUiState.withForgeConversations(
         .sortedByDescending { it.updatedAtMillis }
     return copy(
         conversations = pinned + rest,
+        // Forge 打开着且停在空白页（没有活动会话）时不许回落到 Assist 的选中项，
+        // 否则抽屉里会莫名其妙高亮着一条 Assist 会话。
         selectedConversationId = if (forgeOpen) {
-            activeSessionId?.let { forgeConversationId(it) } ?: selectedConversationId
+            activeSessionId?.let { forgeConversationId(it) }
         } else {
             selectedConversationId
         },
+        forgeListHint = if (sessions.isEmpty()) forgeListHint else null,
     )
 }
 

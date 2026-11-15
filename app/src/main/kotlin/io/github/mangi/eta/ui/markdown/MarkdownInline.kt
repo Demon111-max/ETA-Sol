@@ -41,6 +41,12 @@ internal data class MarkdownInlineStyle(
 }
 
 /**
+ * 行内代码区间的字符串标注名：构建侧只打标注不上底色，
+ * 渲染层（MarkdownContent）据此逐行画圆角底——SpanStyle 的 background 只能画直角方块。
+ */
+internal const val INLINE_CODE_ANNOTATION = "eta_inline_code"
+
+/**
  * 把一组行内节点转换为 AnnotatedString。
  *
  * 只处理聊天里实际出现的 GFM 行内语法；未识别的叶子按源码原样输出，确保任何内容
@@ -142,11 +148,19 @@ internal class MarkdownInlineBuilder(
         while (index < nodes.size) {
             val pair = pairs[index]
             if (pair != null) {
+                // kbd 这类带底色的配对（padSpaces 标记）与行内代码同路：
+                // 只打标注，圆角底由渲染层画，不用 SpanStyle 的直角 background。
+                val annotation = if (pair.padSpaces) {
+                    pushStringAnnotation(INLINE_CODE_ANNOTATION, "")
+                } else {
+                    null
+                }
                 withStyle(pair.style) {
                     if (pair.padSpaces) append(' ')
                     appendNodes(nodes.subList(pair.contentStart, pair.contentEnd), parent, state)
                     if (pair.padSpaces) append(' ')
                 }
+                if (annotation != null) pop(annotation)
                 index = pair.nextIndex
             } else {
                 appendNode(nodes[index], parent, state)
@@ -251,7 +265,6 @@ internal class MarkdownInlineBuilder(
                                 fontFamily = EtaMonospace,
                                 fontSize = 0.87.em,
                                 color = style.codeColor,
-                                background = style.codeBackground,
                             ),
                             padSpaces = true,
                         )
@@ -273,12 +286,13 @@ internal class MarkdownInlineBuilder(
     }
 
     private fun AnnotatedString.Builder.appendCode(code: String) {
+        // 底色不走 SpanStyle.background（只能直角）：只打标注，圆角底由渲染层逐行画。
+        val annotation = pushStringAnnotation(INLINE_CODE_ANNOTATION, "")
         withStyle(
             SpanStyle(
                 fontFamily = EtaMonospace,
                 fontSize = 0.87.em,
                 color = style.codeColor,
-                background = style.codeBackground,
             ),
         ) {
             // 前后窄空格让底色不紧贴字形边缘，读起来像独立的代码标记。
@@ -286,6 +300,7 @@ internal class MarkdownInlineBuilder(
             append(code)
             append(' ')
         }
+        pop(annotation)
     }
 
     private fun AnnotatedString.Builder.appendInlineLink(node: ASTNode, state: LineState) {

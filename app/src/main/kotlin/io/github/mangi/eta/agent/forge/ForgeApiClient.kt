@@ -88,6 +88,18 @@ internal class ForgeApiClient(
         }
     }
 
+    /** 全部会话的运行状态（会话ID → 是否在跑）：侧边栏刷新时给每个 Forge 条目对齐运行标记，不依赖哪个面板开着。 */
+    suspend fun sessionStatuses(): Result<Map<String, Boolean>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder().url("$baseUrl/session/status").get().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                val body = response.body.string().orEmpty()
+                ForgeProtocol.parseSessionStatuses(Json.parseToJsonElement(body))
+            }
+        }
+    }
+
     /** 新建一个 opencode 会话（Forge 新建对话用）。 */
     suspend fun createSession(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
@@ -157,47 +169,55 @@ internal class ForgeApiClient(
         pending: ForgeQuestionRequest,
         answers: List<List<String>>,
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            val payload = buildJsonObject {
-                putJsonArray("answers") {
-                    answers.forEach { group ->
-                        addJsonArray { group.forEach { add(it) } }
-                    }
+        val payload = buildJsonObject {
+            putJsonArray("answers") {
+                answers.forEach { group ->
+                    addJsonArray { group.forEach { add(it) } }
                 }
             }
-            val request = Request.Builder()
-                .url(questionUrl(pending, "reply"))
-                .post(payload.toString().toRequestBody(JsonMediaType))
-                .build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-                response.body.close()
-                Unit
-            }
         }
+        postQuestionAction(pending, "reply", payload.toString())
     }
 
     /** 拒绝 question（用户点跳过）：模型会收到拒绝结果、自己决定下一步。 */
     suspend fun rejectQuestion(pending: ForgeQuestionRequest): Result<Unit> =
         withContext(Dispatchers.IO) {
-            runCatching {
-                val request = Request.Builder()
-                    .url(questionUrl(pending, "reject"))
-                    .post("{}".toRequestBody(JsonMediaType))
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-                    response.body.close()
-                    Unit
-                }
-            }
+            postQuestionAction(pending, "reject", "{}")
         }
 
-    private fun questionUrl(pending: ForgeQuestionRequest, action: String): String =
-        if (pending.v2) {
-            "$baseUrl/api/session/${pending.sessionId}/question/${pending.id}/$action"
+    /**
+     * question 的 reply/reject 有 v1（/question/...）与 v2（/api/session/...）两套端点。
+     * 经列表恢复的请求 v2 标记不可靠（解析时拿不到），首选端点 404 时自动回退另一套重试一次，
+     * 免得提问卡还在、答案却永远发不出去、整轮挂死。
+     */
+    private fun postQuestionAction(
+        pending: ForgeQuestionRequest,
+        action: String,
+        body: String,
+    ): Result<Unit> = runCatching {
+        fun attempt(v2: Boolean) {
+            val request = Request.Builder()
+                .url(questionUrl(pending.sessionId, pending.id, action, v2))
+                .post(body.toRequestBody(JsonMediaType))
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                response.body.close()
+            }
+        }
+        try {
+            attempt(pending.v2)
+        } catch (failure: IOException) {
+            if (failure.hasHttpCode(404)) attempt(!pending.v2) else throw failure
+        }
+        Unit
+    }
+
+    private fun questionUrl(sessionId: String, requestId: String, action: String, v2: Boolean): String =
+        if (v2) {
+            "$baseUrl/api/session/$sessionId/question/$requestId/$action"
         } else {
-            "$baseUrl/question/${pending.id}/$action"
+            "$baseUrl/question/$requestId/$action"
         }
 
     /** 拉全量消息：首次进入与 SSE 断线对齐都用它。 */
@@ -216,12 +236,19 @@ internal class ForgeApiClient(
             }
         }
 
+    /**
+     * 发送一条消息。走异步端点 /prompt_async（官方文档：body 与 /message 相同、立即返回 204）：
+     * 同步端点要等整轮跑完才返回，长轮次必然撞上共享客户端的读超时、误报「发送失败：timeout」，
+     * 其实服务端还在跑。发送成功只代表已提交，本轮的生灭由 SSE 的 Idle/Failed 事件驱动。
+     * attachments 是已复制进工作区的附件，以 file part 随消息发出（url 是 Linux 侧 file:// 路径）。
+     */
     suspend fun sendMessage(
         sessionId: String,
         text: String,
         providerId: String,
         modelId: String,
         variant: String? = null,
+        attachments: List<ForgeOutgoingAttachment> = emptyList(),
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val payload = buildJsonObject {
@@ -232,21 +259,32 @@ internal class ForgeApiClient(
                 // 思考档位：opencode 按 variant 名套用配置里该模型的 variants 定义。
                 if (variant != null) put("variant", variant)
                 putJsonArray("parts") {
-                    add(
-                        buildJsonObject {
-                            put("type", "text")
-                            put("text", text)
-                        },
-                    )
+                    if (text.isNotBlank()) {
+                        add(
+                            buildJsonObject {
+                                put("type", "text")
+                                put("text", text)
+                            },
+                        )
+                    }
+                    attachments.forEach { attachment ->
+                        add(
+                            buildJsonObject {
+                                put("type", "file")
+                                put("mime", attachment.mime)
+                                put("filename", attachment.filename)
+                                put("url", "file://${attachment.linuxPath}")
+                            },
+                        )
+                    }
                 }
             }
             val request = Request.Builder()
-                .url("$baseUrl/session/$sessionId/message")
+                .url("$baseUrl/session/$sessionId/prompt_async")
                 .post(payload.toString().toRequestBody(JsonMediaType))
                 .build()
             val call = client.newCall(request)
-            // 发送的 POST 要等整轮跑完才返回：协程取消时必须连它一起掐断，
-            // 否则点停止后请求还挂着，会话也被 busy 卡住再也发不出去。
+            // 异步端点立即返回，取消钩子保留：协程被取消（如用户点停止）时不留悬挂请求。
             currentCoroutineContext().job.invokeOnCompletion { cause ->
                 if (cause != null) call.cancel()
             }
@@ -322,3 +360,10 @@ internal class ForgeApiClient(
 /** 本客户端的 HTTP 失败都以 "HTTP <状态码>" 开头，据此判断错误种类（如 404 = 会话已不存在）。 */
 internal fun Throwable?.hasHttpCode(code: Int): Boolean =
     (this as? IOException)?.message?.startsWith("HTTP $code") == true
+
+/** 一条要随消息发出的附件：已复制进当前工作区，[linuxPath] 是环境内的绝对路径。 */
+internal data class ForgeOutgoingAttachment(
+    val mime: String,
+    val filename: String,
+    val linuxPath: String,
+)

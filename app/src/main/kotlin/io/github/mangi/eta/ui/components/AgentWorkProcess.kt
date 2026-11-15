@@ -17,6 +17,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -185,7 +186,12 @@ private fun AgentWorkHeader(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(24.dp)
-                .clickable(onClick = onClick),
+                // 汇总头整行可点，不给按压底色（与对话区其他行同一口径）。
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick,
+                ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ShimmerText(
@@ -411,7 +417,9 @@ internal fun ShimmerText(
     modifier: Modifier = Modifier,
 ) {
     val shimmerModifier = if (active) {
-        val highlight = MiuixTheme.colorScheme.onSurface
+        // 高光收一档：以前是纯 onSurface 全强度 + 35% 宽的光带，扫过去像反光板；
+        // 压到 0.55 透明、22% 宽，只留一点「活着」的感觉。
+        val highlight = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.55f)
         val transition = rememberInfiniteTransition(label = "work_shimmer")
         val progress = transition.animateFloat(
             initialValue = 0f,
@@ -425,7 +433,7 @@ internal fun ShimmerText(
             .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
             .drawWithContent {
                 drawContent()
-                val band = maxOf(size.width * 0.35f, 72.dp.toPx())
+                val band = maxOf(size.width * 0.22f, 48.dp.toPx())
                 val center = -band + (size.width + band * 2f) * progress.value
                 drawRect(
                     brush = Brush.horizontalGradient(

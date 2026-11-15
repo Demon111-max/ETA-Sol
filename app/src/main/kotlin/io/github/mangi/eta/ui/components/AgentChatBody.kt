@@ -1327,7 +1327,11 @@ private fun SuggestionCard(
         Modifier
             .squircleSurface(color = fill, cornerRadius = 15.dp)
             .squircleBorder(width = 0.5.dp, color = border, cornerRadius = 15.dp)
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            )
     }
     Row(
         modifier = modifier

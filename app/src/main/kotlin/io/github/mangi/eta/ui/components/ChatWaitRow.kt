@@ -1,14 +1,22 @@
 package io.github.mangi.eta.ui.components
 
 import android.os.SystemClock
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -30,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -39,22 +48,23 @@ import io.github.mangi.eta.R
 import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import kotlin.math.abs
+import kotlin.math.PI
 import kotlin.math.sin
 
 /**
- * 一轮正在进行时的等待行（仿 dsh + dsh-claude-style 的 chat-wait 行）：
- * 三点 loader（按活动在三种点阵间切换）+ 带扫光的活动词 + 从发送起算的秒数 +
+ * 一轮正在进行时的等待行：潮汐三点 loader + 带扫光的活动词 + 从发送起算的秒数 +
  * 迟迟没有新内容时弹出的「暂未响应」徽章。Assist 与 Forge 共用。
  *
- * 计时口径：时钟从本轮发出消息起连续走（用户明确要的口径）；徽章按插件的
+ * 计时口径：时钟从本轮发出消息起连续走（用户明确要的口径）；徽章按
  * WAIT_OVERTIME_MS——距上次有新内容到达超过 10 秒就出现，有新内容就收起。
+ *
+ * loader 的形态与参数是先用逐帧渲染原型验过再落的代码（潮汐三点）：
+ * 三个点像潮水一样依次涨落——直径、纵向位置、透明度同相位呼吸；
+ * 以前的弹跳点阵大部分时间被压扁成一条横线，织线/轨道两套又花哨，
+ * 统一收成这一套，并改由帧时钟驱动（以前 50ms 轮询只有 20 帧，天花板就卡）。
  */
 
-/** 等待行左侧 loader 的三种点阵（插件 chat-wait 的三条 lane）。 */
-internal enum class WaitLoaderMotion { Bounce, Line, Orbit }
-
-/** 当前活动：决定等待行的词与 loader 点阵。 */
+/** 当前活动：只决定等待行的词，loader 形态只有一套。 */
 internal enum class ChatWaitActivity { Thinking, PreparingTool, RunningTool, Writing }
 
 private const val WAIT_OVERTIME_MS = 10_000L
@@ -69,10 +79,11 @@ internal fun ChatWaitRow(
 ) {
     val colors = MiuixTheme.colorScheme
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    // 秒数与徽章只需要 250ms 粒度；loader 的顺滑由它自己的帧时钟负责，不共用这个循环。
     LaunchedEffect(Unit) {
         while (true) {
             now = SystemClock.elapsedRealtime()
-            delay(200)
+            delay(250)
         }
     }
     // 起点缺失（对齐路径漏网）时按当下起算，绝不拿开机时长冒充本轮耗时。
@@ -88,26 +99,33 @@ internal fun ChatWaitRow(
             ChatWaitActivity.Writing -> R.string.chat_wait_writing
         },
     )
+    val labelSlidePx = with(LocalDensity.current) { 4.dp.roundToPx() }
     Row(
-        modifier = modifier.height(24.dp),
+        modifier = modifier.height(28.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        WaitDotsLoader(
-            motion = when (activity) {
-                ChatWaitActivity.Thinking -> WaitLoaderMotion.Line
-                ChatWaitActivity.PreparingTool, ChatWaitActivity.RunningTool -> WaitLoaderMotion.Bounce
-                ChatWaitActivity.Writing -> WaitLoaderMotion.Orbit
-            },
-            color = colors.primary,
-        )
+        TideDotsLoader(color = colors.primary)
         Spacer(modifier = Modifier.width(6.dp))
-        ShimmerText(
-            text = label,
-            active = true,
-            style = MiuixTheme.textStyles.body2.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
-            color = colors.onSurface,
-        )
+        // 活动词是这一行的主信息：15sp 半粗 + 扫光；切换时上滑 4dp 淡入淡出，别硬跳。
+        AnimatedContent(
+            targetState = label,
+            transitionSpec = {
+                (slideInVertically(animationSpec = tween(160)) { labelSlidePx } +
+                    fadeIn(animationSpec = tween(160))) togetherWith
+                    (slideOutVertically(animationSpec = tween(160)) { -labelSlidePx } +
+                        fadeOut(animationSpec = tween(160)))
+            },
+            label = "chatWaitLabel",
+        ) { text ->
+            ShimmerText(
+                text = text,
+                active = true,
+                style = MiuixTheme.textStyles.body2.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold),
+                color = colors.onSurface,
+            )
+        }
         Spacer(modifier = Modifier.width(8.dp))
+        // 秒数是次要信息：12sp 弱色，别和活动词抢视觉重量。
         Text(
             text = if (elapsedSeconds < 60) {
                 stringResource(R.string.chat_wait_elapsed_seconds, elapsedSeconds)
@@ -118,7 +136,7 @@ internal fun ChatWaitRow(
                     elapsedSeconds % 60,
                 )
             },
-            style = TextStyle(fontSize = 13.sp, fontFeatureSettings = "tnum"),
+            style = TextStyle(fontSize = 12.sp, fontFeatureSettings = "tnum"),
             color = dshTertiaryColor(),
         )
         AnimatedVisibility(
@@ -148,98 +166,35 @@ internal fun ChatWaitRow(
 }
 
 /**
- * 三点（轨道阵为四点）loader，数值按插件 tokens：点 4dp、跳跃行程 8dp、
- * 弹跳周期 500ms 单程、织线周期 1250ms、轨道周期 2400ms。
- * 时间由一台 50ms 步进的时钟驱动，点位逐帧按各 lane 的公式算——插件是 CSS
- * 关键帧，这里用等价的三角/正弦/分段缓动复现，观感一致即可。
+ * 潮汐三点：盒 26×22dp，三点中心 x = 5/13/21dp、基线 cy = 13dp；
+ * phase_i = 2π(t / 1100ms − 0.16i)，直径 = 5.2 + 1.3·sin(phase_i) dp（3.9–6.5），
+ * y = cy − 1.8·sin(phase_i) dp，alpha = 0.55 + 0.45·(0.5 + 0.5·sin(phase_i))。
+ * 由 rememberInfiniteTransition 的帧时钟驱动，刷新率给到多少就有多顺。
  */
 @Composable
-private fun WaitDotsLoader(motion: WaitLoaderMotion, color: Color) {
-    var tickMs by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(motion) {
-        val start = SystemClock.elapsedRealtime()
-        while (true) {
-            tickMs = SystemClock.elapsedRealtime() - start
-            delay(50)
-        }
-    }
-    Canvas(modifier = Modifier.size(width = 20.dp, height = 16.dp)) {
-        val t = tickMs / 1000f
-        val cx = size.width / 2f
-        val cy = size.height / 2f
-        val dotR = 2.dp.toPx()
-        val travel = 8.dp.toPx()
-        when (motion) {
-            WaitLoaderMotion.Bounce -> {
-                // 三点沿地面弹跳：相位错开 0 / 0.3 / 0.2 个全周期（插件的负延迟口径），
-                // 落地时压扁（scale 1.7 × 0.25），升空恢复圆形。
-                val xs = listOf(2.dp.toPx(), 9.dp.toPx(), 16.dp.toPx())
-                val shifts = listOf(0f, 0.3f, 0.2f)
-                xs.forEachIndexed { index, x ->
-                    val u = ((t / 1.0f) + shifts[index]) % 1f
-                    val h = 1f - abs(1f - 2f * u)
-                    val squash = 1f - h
-                    val rx = dotR * (1f + 0.7f * squash * squash)
-                    val ry = dotR * (1f - 0.75f * squash * squash)
-                    // 底边始终贴着画布底（地面），升空时整颗点上移 travel。
-                    drawOval(
-                        color = color,
-                        topLeft = Offset(x - rx, size.height - h * travel - 2 * ry),
-                        size = androidx.compose.ui.geometry.Size(rx * 2, ry * 2),
-                    )
-                }
-            }
-
-            WaitLoaderMotion.Line -> {
-                // 三点沿互成 120° 的线穿过中心来回织行，过中心时缩到 0.55。
-                val period = 1.25f
-                val radius = 4.5.dp.toPx()
-                for (i in 0..2) {
-                    val angle = Math.toRadians(-90.0 + i * 120.0)
-                    val s = sin(2f * Math.PI.toFloat() * (t / period + i / 3f))
-                    val dx = (kotlin.math.cos(angle) * radius * s).toFloat()
-                    val dy = (sin(angle) * radius * s).toFloat()
-                    val scale = 1f - 0.45f * (1f - abs(s))
-                    drawCircle(
-                        color = color,
-                        radius = dotR * scale,
-                        center = Offset(cx + dx, cy + dy),
-                    )
-                }
-            }
-
-            WaitLoaderMotion.Orbit -> {
-                // 四点在 9.5 × 11.6 的矩形对角间两两交换：动 1/6 周期、停 1/3 周期，
-                // 两组对角错开半个周期（插件 orbit 关键帧的节奏）。
-                val period = 2.4f
-                val hx = 4.75.dp.toPx()
-                val hy = 5.8.dp.toPx()
-                val corners = listOf(
-                    Offset(cx - hx, cy - hy),
-                    Offset(cx + hx, cy - hy),
-                    Offset(cx + hx, cy + hy),
-                    Offset(cx - hx, cy + hy),
-                )
-                fun swapPosition(from: Offset, to: Offset, phase: Float): Offset {
-                    val u = ((phase % 1f) + 1f) % 1f
-                    val k = when {
-                        u < 1f / 6f -> easeOutCubic(u * 6f)
-                        u < 0.5f -> 1f
-                        u < 2f / 3f -> 1f - easeOutCubic((u - 0.5f) * 6f)
-                        else -> 0f
-                    }
-                    return Offset(from.x + (to.x - from.x) * k, from.y + (to.y - from.y) * k)
-                }
-                val p = t / period
-                drawCircle(color, dotR, swapPosition(corners[0], corners[2], p))
-                drawCircle(color, dotR, swapPosition(corners[2], corners[0], p))
-                drawCircle(color, dotR, swapPosition(corners[1], corners[3], p + 0.25f))
-                drawCircle(color, dotR, swapPosition(corners[3], corners[1], p + 0.25f))
-            }
+private fun TideDotsLoader(color: Color) {
+    val transition = rememberInfiniteTransition(label = "tideDots")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2.0 * PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+        ),
+        label = "tidePhase",
+    )
+    Canvas(modifier = Modifier.size(width = 26.dp, height = 22.dp)) {
+        val baselineY = 13.dp.toPx()
+        val centersX = listOf(5.dp.toPx(), 13.dp.toPx(), 21.dp.toPx())
+        centersX.forEachIndexed { index, centerX ->
+            val s = sin(phase - (2.0 * PI * 0.16 * index).toFloat())
+            val radius = ((5.2f + 1.3f * s) / 2f).dp.toPx()
+            val centerY = baselineY - (1.8f * s).dp.toPx()
+            val alpha = 0.55f + 0.45f * (0.5f + 0.5f * s)
+            drawCircle(
+                color = color.copy(alpha = alpha),
+                radius = radius,
+                center = Offset(centerX, centerY),
+            )
         }
     }
 }
-
-private val EaseOutQuint = CubicBezierEasing(0.16f, 0.75f, 0.29f, 0.97f)
-
-private fun easeOutCubic(u: Float): Float = EaseOutQuint.transform(u.coerceIn(0f, 1f))

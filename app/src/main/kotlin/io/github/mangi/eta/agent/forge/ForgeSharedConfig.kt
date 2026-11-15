@@ -54,6 +54,12 @@ internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
         is CustomProviderSetting -> provider.endpointMode
         else -> OpenAiEndpointMode.CHAT_COMPLETIONS
     }
+    // 自定义请求头：服务商级 + 模型级合并，模型级同名覆盖（与 Assist 的请求口径一致）。
+    val mergedHeaders = (provider.customHeaders + model.customHeaders)
+        .filter { it.name.isNotBlank() }
+        .associateBy { it.name.trim().lowercase() }
+        .values
+        .toList()
     return ForgeSharedConfig.Ready(
         settings = ForgeSettings(
             baseUrl = baseUrl,
@@ -61,6 +67,8 @@ internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
             providerId = forgeProviderId(provider.name, provider.id),
             providerName = provider.name.trim().ifBlank { provider.id },
             endpointMode = endpointMode,
+            customHeaders = mergedHeaders,
+            contextWindow = model.effectiveContextWindow,
         ),
         credentials = ForgeCredentials(apiKey = apiKey),
     )

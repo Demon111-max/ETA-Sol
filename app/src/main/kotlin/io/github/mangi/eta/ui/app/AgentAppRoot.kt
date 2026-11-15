@@ -115,6 +115,7 @@ import io.github.mangi.eta.ui.voice.SpeechSettingsScreen
 import io.github.mangi.eta.ui.voice.SpeechSynthesisScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.TextField
@@ -209,8 +210,11 @@ fun AgentAppRoot(
     // Forge 的真实会话列表（来自 opencode，不进 Eta 数据库）：侧边栏按它一条会话生成一个条目。
     var forgeSessions by remember { mutableStateOf<List<ForgeSessionSummary>>(emptyList()) }
     var forgeActiveSessionId by remember { mutableStateOf<String?>(null) }
-    // 正在跑的那条 Forge 会话 id：侧边栏条目要给它显示运行圆点。
-    var forgeBusySessionId by remember { mutableStateOf<String?>(null) }
+    // 正在跑的 Forge 会话 id 集合：侧边栏条目据此显示运行圆点。后台可能有不止一条在跑
+    // （切走的会话在服务端继续），来源以列表刷新时向服务端查的状态为准，面板的实时回调做增量。
+    var forgeBusySessionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Forge 列表最近一次拉取是否失败：列表为空且失败时，抽屉里要有一行说明，别让条目无声消失。
+    var forgeListLoadFailed by remember { mutableStateOf(false) }
     // 侧边栏点开某个 Forge 会话的请求：会话 id + 序号，ForgeChatPane 收到新序号就切过去。
     var forgeOpenSessionRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
     // 这次进 Forge 是否必须落到新对话空白页：模式切换与「新建」进来=true（用户定：
@@ -219,31 +223,76 @@ fun AgentAppRoot(
     // 不留上一次的残值。ForgeChatPane 在创建状态时消费它（面板每次进入都是新建的）。
     var forgeStartBlank by remember { mutableStateOf(false) }
 
-    /** 向 opencode 拉一次会话列表刷新侧边栏；server 没在跑时静默失败、保留旧列表。 */
+    /**
+     * 向 opencode 拉一次会话列表刷新侧边栏，并按服务端状态对齐每条的运行标记
+     * （哪个面板开着都不影响，后台在跑的会话也有圆点）。server 没在跑时保留旧列表、
+     * 记下失败状态给抽屉里的说明行；列表为空时延迟重试一次，冷启动刚开抽屉别整批消失。
+     */
     fun refreshForgeSessions() {
         uiScope.launch {
-            ForgeApiClient().listSessions().onSuccess { forgeSessions = it }
+            val client = ForgeApiClient()
+            client.listSessions()
+                .onSuccess { sessions ->
+                    forgeSessions = sessions
+                    forgeListLoadFailed = false
+                    client.sessionStatuses().onSuccess { statuses ->
+                        forgeBusySessionIds = statuses.filterValues { it }.keys
+                            .filter { id -> sessions.any { it.id == id } }
+                            .toSet()
+                    }
+                }
+                .onFailure {
+                    forgeListLoadFailed = true
+                    if (forgeSessions.isEmpty()) {
+                        delay(1_200)
+                        ForgeApiClient().listSessions().onSuccess { sessions ->
+                            forgeSessions = sessions
+                            forgeListLoadFailed = false
+                        }
+                    }
+                }
         }
     }
 
-    /** Forge 条目的重命名走 opencode 接口改标题，改完刷新列表。 */
+    /** Forge 条目的重命名走 opencode 接口改标题：失败要让用户知道，别改不动还装作成功、条目又弹回来。 */
     fun renameForgeConversation(conversation: ConversationSummaryUi, newTitle: String) {
         val sessionId = forgeSessionIdOf(conversation.id) ?: return
         uiScope.launch {
             ForgeApiClient().renameSession(sessionId, newTitle.trim())
+                .onFailure {
+                    Toast.makeText(
+                        context,
+                        R.string.forge_rename_failed,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             refreshForgeSessions()
         }
     }
 
-    /** Forge 条目的删除走 opencode 接口删会话；删的正是打开着的那个时，Forge 页另起新会话。 */
+    /** Forge 条目的删除走 opencode 接口删会话：正在跑的先停再删（确认框就是这么写的）；失败要提示。 */
     fun deleteForgeConversation(conversation: ConversationSummaryUi) {
         val sessionId = forgeSessionIdOf(conversation.id) ?: return
         uiScope.launch {
-            ForgeApiClient().deleteSession(sessionId)
-            if (forgeActiveSessionId == sessionId) {
-                forgeActiveSessionId = null
-                if (forgeOpen) forgeNewConversationSignal++
+            val client = ForgeApiClient()
+            if (sessionId in forgeBusySessionIds) {
+                client.abort(sessionId)
             }
+            client.deleteSession(sessionId)
+                .onSuccess {
+                    forgeBusySessionIds = forgeBusySessionIds - sessionId
+                    if (forgeActiveSessionId == sessionId) {
+                        forgeActiveSessionId = null
+                        if (forgeOpen) forgeNewConversationSignal++
+                    }
+                }
+                .onFailure {
+                    Toast.makeText(
+                        context,
+                        R.string.forge_delete_failed,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             refreshForgeSessions()
         }
     }
@@ -315,7 +364,14 @@ fun AgentAppRoot(
 
     LaunchedEffect(requestedConversationId) {
         val conversationId = requestedConversationId ?: return@LaunchedEffect
-        agentState.selectConversation(conversationId)
+        // 通知/深链指向的会话可能已经被删了：没找到要明确告诉用户，别静默落到别的会话上。
+        if (!agentState.selectConversation(conversationId)) {
+            Toast.makeText(
+                context,
+                R.string.conversation_not_found,
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
         forgeOpen = false
         conversationPaneOpen = false
         navigator.popToHome()
@@ -394,7 +450,13 @@ fun AgentAppRoot(
             return
         }
         forgeOpen = false
-        agentState.selectConversation(conversationId)
+        if (!agentState.selectConversation(conversationId)) {
+            Toast.makeText(
+                context,
+                R.string.conversation_not_found,
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
         navigator.popToHome()
     }
 
@@ -421,10 +483,13 @@ fun AgentAppRoot(
         uiScope.launch { SettingsDataStore.setForgeChatMode(mode) }
         if (mode == chatMode) return
         if (mode == ForgeChatMode.Forge) {
-            // 切换到 Forge 必须先落到一个新的 Forge 对话，不回到上次停的那条。
+            // 切换到 Forge 必须先落到一个新的 Forge 对话，不回到上次停的那条：
+            // startBlank 之外再补一发新建信号——面板还活着时只靠 startBlank 它不会重建，
+            // 残留的打开请求就可能把界面拽回旧会话（面板侧还有消费序号守卫，三重保险）。
             focusManager.clearFocus()
             forgeStartBlank = true
             forgeOpen = true
+            forgeNewConversationSignal++
             navigator.popToHome()
             conversationPaneOpen = false
         } else {
@@ -454,6 +519,11 @@ fun AgentAppRoot(
                 (item.status == PermissionStatusUi.Missing || item.status == PermissionStatusUi.Warning)
         }
         val forgeTitle = stringResource(R.string.forge_conversation_title)
+        val forgeListHint = if (forgeListLoadFailed && forgeSessions.isEmpty()) {
+            stringResource(R.string.forge_list_unavailable)
+        } else {
+            null
+        }
         AgentAppShell(
             currentRoute = route,
             isCurrentRoute = backStack.lastOrNull() == route,
@@ -462,7 +532,8 @@ fun AgentAppRoot(
                 forgeOpen = forgeOpen,
                 activeSessionId = forgeActiveSessionId,
                 untitledTitle = forgeTitle,
-                busySessionId = forgeBusySessionId,
+                busySessionIds = forgeBusySessionIds,
+                forgeListHint = forgeListHint,
             ),
             isConversationPaneOpen = conversationPaneOpen,
             onBack = { popRoute() },
@@ -578,7 +649,15 @@ fun AgentAppRoot(
                                 refreshForgeSessions()
                             },
                             onBusyChanged = { busyId, busy ->
-                                forgeBusySessionId = if (busy) busyId else null
+                                // 面板销毁时回的是 (null, false)：服务端轮次不会因此停，
+                                // 不清集合，运行标记靠列表刷新向服务端对齐。
+                                if (busyId != null) {
+                                    forgeBusySessionIds = if (busy) {
+                                        forgeBusySessionIds + busyId
+                                    } else {
+                                        forgeBusySessionIds - busyId
+                                    }
+                                }
                             },
                         )
                         return@RoutedShell

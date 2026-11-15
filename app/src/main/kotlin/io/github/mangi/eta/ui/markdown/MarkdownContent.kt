@@ -59,6 +59,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -230,18 +231,78 @@ private fun MarkdownText(
     val reveal = scope.reveal
     // 空单元格没有可显现的文字，也不占用显现协调器的 key。
     if (reveal == null || block.text.isEmpty()) {
-        Text(text = block.text, style = style, softWrap = softWrap, modifier = modifier)
+        RoundedCodeText(
+            text = block.text,
+            style = style,
+            codeBackground = scope.style.codeBackground,
+            softWrap = softWrap,
+            modifier = modifier,
+        )
         return
     }
     val revealState = rememberSmoothTextRevealState(block.revealKey, reveal)
     // 显现裁剪按字素边界逐帧变化，关闭像素对齐可避免裁剪边缘抖动。
     val animatedStyle = remember(style) { style.copy(textMotion = TextMotion.Animated) }
-    Text(
+    RoundedCodeText(
         text = block.text,
         style = animatedStyle,
+        codeBackground = scope.style.codeBackground,
         softWrap = softWrap,
         modifier = modifier.smoothTextReveal(revealState),
         onTextLayout = { layout -> revealState.onTextLayout(block.text.text, layout) },
+    )
+}
+
+/**
+ * 行内代码的圆角底：SpanStyle.background 只能画直角方块（截图里代码标记四角尖得扎眼），
+ * 构建侧因此只给代码区间打 [INLINE_CODE_ANNOTATION] 标注、不再上底色；这里在拿到
+ * 布局后按标注区间逐行画圆角矩形（半径 4dp、左右各外扩 2dp、上下各收 1dp 不碰邻行）。
+ */
+@Composable
+private fun RoundedCodeText(
+    text: AnnotatedString,
+    style: TextStyle,
+    codeBackground: Color,
+    softWrap: Boolean,
+    modifier: Modifier = Modifier,
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null,
+) {
+    var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
+        text = text,
+        style = style,
+        softWrap = softWrap,
+        modifier = modifier.drawBehind {
+            val layout = layoutResult ?: return@drawBehind
+            val ranges = text.getStringAnnotations(INLINE_CODE_ANNOTATION, 0, text.length)
+            if (ranges.isEmpty()) return@drawBehind
+            val padX = 2.dp.toPx()
+            val radius = 4.dp.toPx()
+            val vInset = 1.dp.toPx()
+            for (range in ranges) {
+                for (line in 0 until layout.lineCount) {
+                    val segStart = maxOf(range.start, layout.getLineStart(line))
+                    val segEnd = minOf(range.end, layout.getLineEnd(line, visibleEnd = true))
+                    if (segStart >= segEnd) continue
+                    val bounds = layout.getPathForRange(segStart, segEnd).getBounds()
+                    if (bounds.isEmpty) continue
+                    val lineTop = layout.getLineTop(line)
+                    drawRoundRect(
+                        color = codeBackground,
+                        topLeft = Offset(bounds.left - padX, lineTop + vInset),
+                        size = Size(
+                            width = bounds.width + padX * 2f,
+                            height = layout.getLineBottom(line) - lineTop - vInset * 2f,
+                        ),
+                        cornerRadius = CornerRadius(radius, radius),
+                    )
+                }
+            }
+        },
+        onTextLayout = { result ->
+            layoutResult = result
+            onTextLayout?.invoke(result)
+        },
     )
 }
 

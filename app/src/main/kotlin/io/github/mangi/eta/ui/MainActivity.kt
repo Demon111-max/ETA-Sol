@@ -32,8 +32,36 @@ class MainActivity : ComponentActivity() {
     private var launchRequests by mutableStateOf(MainActivityLaunchRequests())
     private var appliedPredictiveBackEnabled = true
 
+    /**
+     * 主动向系统申请本机屏幕的最高刷新率：一加 Ace 5 是 120Hz 屏，但应用不申请时
+     * 系统可能按省电策略把窗口压在 60Hz，滚动与动画再顺也只有一半帧。
+     * 只在与当前模式同分辨率的模式里挑刷新率最高的，不改分辨率、不动系统设置。
+     */
+    private fun preferHighestRefreshRate() {
+        runCatching {
+            val display = windowManager.defaultDisplay ?: return
+            val current = display.mode ?: return
+            val best = display.supportedModes
+                .filter {
+                    it.physicalWidth == current.physicalWidth &&
+                        it.physicalHeight == current.physicalHeight
+                }
+                .maxByOrNull { it.refreshRate }
+                ?: return
+            if (best.modeId == current.modeId) return
+            val params = window.attributes
+            params.preferredDisplayModeId = best.modeId
+            params.preferredRefreshRate = best.refreshRate
+            window.attributes = params
+            AndroidAgentLogger.info(
+                "Preferred display mode set: ${best.physicalWidth}x${best.physicalHeight}@${best.refreshRate}",
+            )
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        preferHighestRefreshRate()
         AndroidAgentLogger.info("Agent UI created: task=$taskId restored=${savedInstanceState != null}")
         var contentReady = false
         installStartupSplash { contentReady }

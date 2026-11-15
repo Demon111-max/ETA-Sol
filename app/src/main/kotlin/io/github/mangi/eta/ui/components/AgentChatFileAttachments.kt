@@ -30,7 +30,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +67,7 @@ import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.coui.CouiInputDialog
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import top.yukonga.miuix.kmp.basic.DropdownImpl
+import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.ListPopupColumn
@@ -128,6 +131,13 @@ internal fun AgentAttachmentPickerButton(
         stringResource(R.string.attachment_folder),
         stringResource(R.string.attachment_enter_path),
     )
+    // 四项各配一个图标：以前纯文字四行分不清谁是谁，扫一眼图标就知道点哪个。
+    val optionIcons = listOf(
+        Icons.Rounded.Image,
+        Icons.Rounded.Description,
+        Icons.Rounded.FolderOpen,
+        Icons.Rounded.Edit,
+    )
     val onSelectOption: (Int) -> Unit = { index ->
         when (index) {
             0 -> photoPicker.launch(
@@ -159,7 +169,9 @@ internal fun AgentAttachmentPickerButton(
         when (LocalUiStyle.current) {
             AppearanceUiStyle.COUI -> {
                 val menuItems = remember(options) {
-                    options.mapIndexed { index, label -> CouiMenuItem(value = index, text = label) }
+                    options.mapIndexed { index, label ->
+                        CouiMenuItem(value = index, text = label, icon = optionIcons[index])
+                    }
                 }
                 Menu(
                     expanded = showPopup,
@@ -186,7 +198,16 @@ internal fun AgentAttachmentPickerButton(
                     ListPopupColumn {
                         options.forEachIndexed { index, option ->
                             DropdownImpl(
-                                text = option,
+                                item = DropdownItem(
+                                    text = option,
+                                    icon = { modifier ->
+                                        Icon(
+                                            imageVector = optionIcons[index],
+                                            contentDescription = null,
+                                            modifier = modifier.size(20.dp),
+                                        )
+                                    },
+                                ),
                                 optionSize = options.size,
                                 isSelected = false,
                                 index = index,

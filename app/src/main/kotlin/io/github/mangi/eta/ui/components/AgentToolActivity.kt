@@ -269,8 +269,8 @@ private fun ToolActivityDetail(
                         MiuixTheme.textStyles.footnote2
                     },
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    maxLines = MAX_RESULT_LINES,
-                    overflow = TextOverflow.Ellipsis,
+                    // 详情区本身只在展开时才出现：结果全文给全，别展开了还截 12 行、
+                    // 用户想看的后半段永远看不到。
                     modifier = Modifier
                         .fillMaxWidth()
                         .squircleSurface(
@@ -326,8 +326,6 @@ private fun ToolActivityStatusUi.dotColor() = when (this) {
     ToolActivityStatusUi.Failed -> StatusError
     ToolActivityStatusUi.Unknown -> MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.45f)
 }
-
-private const val MAX_RESULT_LINES = 12
 
 /**
  * 浏览器工具的实时页面预览：迷你地址条 + 当前视口截图。

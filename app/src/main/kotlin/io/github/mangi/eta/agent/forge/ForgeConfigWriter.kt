@@ -54,10 +54,22 @@ internal object ForgeConfigWriter {
                 put("name", settings.providerName.ifBlank { settings.providerId })
                 putJsonObject("options") {
                     put("baseURL", settings.baseUrl.trim())
+                    // 自定义请求头：需要请求头鉴权/路由的中转站，少了它 opencode 一直 401。
+                    val headers = settings.customHeaders
+                        .filter { it.name.isNotBlank() && it.value.isNotBlank() }
+                    if (headers.isNotEmpty()) {
+                        putJsonObject("headers") {
+                            headers.forEach { header -> put(header.name.trim(), header.value) }
+                        }
+                    }
                 }
                 putJsonObject("models") {
                     putJsonObject(settings.modelId.trim()) {
                         put("name", settings.modelId.trim())
+                        // 上下文上限：用户在模型设置里给的值，opencode 按它算上下文占用与截断。
+                        settings.contextWindow?.takeIf { it > 0 }?.let { limit ->
+                            putJsonObject("limit") { put("context", limit) }
+                        }
                         // 思考档位：variant 名与 Eta 的 ReasoningEffort wireValue 对齐，
                         // Forge 发送消息时按档位名选 variant（见 ForgeChatState）。
                         putJsonObject("variants") {

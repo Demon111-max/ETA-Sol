@@ -127,7 +127,9 @@ import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import io.github.mangi.eta.ui.voice.SpeechReadAloudButton
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.RichTooltip
@@ -146,17 +148,38 @@ private val chatImageBitmapCache = object : LruCache<String, ImageBitmap>(48 * 1
 }
 
 @Composable
-internal fun rememberDataUrlBitmap(dataUrl: String): ImageBitmap? = remember(dataUrl) {
-    chatImageBitmapCache.get(dataUrl)
-        ?: decodeDataUrlBitmap(dataUrl)?.also { chatImageBitmapCache.put(dataUrl, it) }
+internal fun rememberDataUrlBitmap(dataUrl: String): ImageBitmap? {
+    // 解码以前在组合里同步跑（主线程 Base64 + 全尺寸解码），长列表滚到图片就掉帧；
+    // 改成后台解码、先查缓存，解完再回填。首帧没有图时调用方本来就按空处理。
+    var bitmap by remember(dataUrl) { mutableStateOf(chatImageBitmapCache.get(dataUrl)) }
+    LaunchedEffect(dataUrl) {
+        if (bitmap == null) {
+            bitmap = withContext(Dispatchers.IO) {
+                decodeDataUrlBitmap(dataUrl)?.also { chatImageBitmapCache.put(dataUrl, it) }
+            }
+        }
+    }
+    return bitmap
 }
+
+/** 聊天里图片的显示上限：原图几千像素全尺寸解码纯属浪费内存，按这个上限采样。 */
+private const val MAX_CHAT_IMAGE_DIM_PX = 1280
 
 internal fun decodeDataUrlBitmap(dataUrl: String): ImageBitmap? {
     val base64 = dataUrl.substringAfter("base64,", "")
     if (base64.isBlank()) return null
     return runCatching {
         val bytes = Base64.decode(base64, Base64.NO_WRAP)
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sampleSize = 1
+        while (bounds.outWidth / (sampleSize * 2) >= MAX_CHAT_IMAGE_DIM_PX ||
+            bounds.outHeight / (sampleSize * 2) >= MAX_CHAT_IMAGE_DIM_PX
+        ) {
+            sampleSize *= 2
+        }
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
     }.getOrNull()
 }
 
@@ -616,7 +639,8 @@ private fun UserMessageBubble(
 }
 
 /** 全胶囊：四角统一按短边 50% 取圆角，单行是完整药丸形，多行也保持大圆角（仿 DSHA 的用户气泡）。 */
-private val UserBubbleShape = RoundedCornerShape(percent = 50)
+// 用户气泡固定 22dp 圆角：全胶囊（percent=50）在多行长消息上两头过圆、显肿，已否决。
+private val UserBubbleShape = RoundedCornerShape(22.dp)
 
 private val OverlayUserBubbleShape = RoundedCornerShape(
     topStart = 14.dp,
@@ -784,7 +808,11 @@ private fun UserMessageImageCard(
             onClick = { onClick?.invoke() },
             onLongClick = onLongClick,
         )
-        onClick != null -> Modifier.clickable(onClick = onClick)
+        onClick != null -> Modifier.clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            onClick = onClick,
+        )
         else -> Modifier
     }
     Box(
@@ -854,7 +882,11 @@ private fun MessageTooltipAction(
 ) {
     Column(
         modifier = Modifier
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1328,7 +1360,10 @@ internal fun ThinkingRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .clickable {
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) {
                     // 尾部窗口下点击视为要看全文，保持展开并放开高度限制。
                     manualExpanded = (tailWindow && expanded) || !expanded
                 }
@@ -1467,7 +1502,11 @@ private fun DshThinkingHeader(
             // 等内容到达又突然展开，反馈对不上（Forge 思考刚开始时必现）。
             .then(
                 if (message.content.isNotBlank()) {
-                    Modifier.clickable(onClick = onClick)
+                    Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onClick,
+                    )
                 } else {
                     Modifier
                 },
@@ -1593,7 +1632,11 @@ private fun RunTraceRow(
                 color = MiuixTheme.colorScheme.outline.copy(alpha = ChatCardOutlineAlpha),
                 cornerRadius = ChatCardCorner,
             )
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1691,7 +1734,10 @@ private fun SuggestionChipsRow(
                         MiuixTheme.colorScheme.outline.copy(alpha = 0.55f),
                         RoundedCornerShape(10.dp),
                     )
-                    .clickable { onSuggestionClick(prompt) }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onSuggestionClick(prompt) }
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {

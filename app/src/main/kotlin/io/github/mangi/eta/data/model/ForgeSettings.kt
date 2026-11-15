@@ -18,6 +18,10 @@ internal data class ForgeSettings(
     val providerName: String = "Relay",
     /** 服务商的接口协议（OpenAiEndpointMode）：决定 opencode 配置里选哪个 AI SDK 包。 */
     val endpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,
+    /** 服务商 + 模型两级的自定义请求头（模型级同名覆盖服务商级）：Assist 每个请求都带，Forge 也要带进 opencode 配置，否则需要请求头的中转站会在 Forge 里 401。 */
+    val customHeaders: List<CustomHeader> = emptyList(),
+    /** 模型的有效上下文上限（用户显式覆盖优先）：写进 opencode 的 limit，并供 Forge 输入栏的用量显示。 */
+    val contextWindow: Int? = null,
 ) {
     companion object {
         const val DEFAULT_MODEL_ID = "deepseek-v4.1-flash"

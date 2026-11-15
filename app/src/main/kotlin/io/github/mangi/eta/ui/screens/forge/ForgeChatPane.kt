@@ -11,6 +11,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,7 +33,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -42,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,14 +65,33 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.Base64
+import android.webkit.MimeTypeMap
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.device.AgentFileReferenceGateway
 import io.github.mangi.eta.agent.forge.ForgeChatMessage
 import io.github.mangi.eta.agent.forge.ForgePart
 import io.github.mangi.eta.agent.forge.ForgeProtocol
 import io.github.mangi.eta.agent.forge.ForgeQuestionRequest
 import io.github.mangi.eta.agent.forge.ForgeRole
 import io.github.mangi.eta.agent.forge.ForgeToolStatus
+import io.github.mangi.eta.agent.forge.ForgeWorkspace
+import io.github.mangi.eta.agent.forge.ForgeWorkspaces
+import io.github.mangi.eta.agent.model.AgentFileReference
+import io.github.mangi.eta.agent.model.AgentFileReferenceKind
+import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.ui.model.PendingFileReferenceUi
+import io.github.mangi.eta.ui.model.PendingImageUi
+import io.github.mangi.eta.ui.model.QueuedMessageUi
+import java.io.File
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import io.github.mangi.eta.ui.components.AgentChatInputBar
 import io.github.mangi.eta.ui.components.AgentWorkProcess
 import io.github.mangi.eta.ui.components.ChatMessageItem
@@ -93,6 +117,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -121,6 +146,7 @@ internal fun ForgeChatPane(
             if (startBlank) created.requestBlankOnStart()
         }
     }
+    var workspaceDialogOpen by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { state.start() }
     // 「新建对话」信号递增时才另起新对话；面板重建时带着旧信号值进来不能重复触发，
     // 否则从侧边栏点开某个会话、面板一重组就会被拽回空白页。
@@ -131,10 +157,23 @@ internal fun ForgeChatPane(
             state.newConversation()
         }
     }
-    // 侧边栏点开某个 Forge 会话：请求序号变化就切到目标会话。
+    // 「打开会话」请求同样要消费守卫：面板以 startBlank 创建时（切模式进来），
+    // 上层残留的旧请求绝不能再把界面拽回某个旧会话——创建时带着的请求序号一律视为已消费；
+    // 不是空白进场时（从列表点开会话创建的面板），初始请求要照常生效一次。
+    var consumedOpenSessionSeq by remember {
+        mutableStateOf(if (startBlank) openSessionRequest?.second ?: 0 else 0)
+    }
     LaunchedEffect(openSessionRequest) {
         val request = openSessionRequest ?: return@LaunchedEffect
+        if (request.second == consumedOpenSessionSeq) return@LaunchedEffect
+        consumedOpenSessionSeq = request.second
         state.openSession(request.first)
+    }
+    // 空白进场且已就绪后又收到 startBlank（如上层重组）：强制回空白页，不落回任何会话。
+    LaunchedEffect(startBlank, state.startup) {
+        if (startBlank && state.startup is ForgeStartup.Ready && state.sessionId != null) {
+            state.newConversation()
+        }
     }
     // 运行状态同步给上层：侧边栏要在正在跑的 Forge 会话条目上显示运行圆点。
     LaunchedEffect(state.busy, state.sessionId) { onBusyChanged(state.sessionId, state.busy) }
@@ -178,13 +217,17 @@ internal fun ForgeChatPane(
                         )
                     }
 
-                    ForgeStartup.Ready -> ForgeTranscript(state = state, topInset = topInset)
+                    ForgeStartup.Ready -> ForgeTranscript(
+                        state = state,
+                        topInset = topInset,
+                        onOpenWorkspaces = { workspaceDialogOpen = true },
+                    )
                 }
             }
         }
         if (state.startup is ForgeStartup.Ready) {
             state.notice?.let { notice ->
-                ForgeCaption(
+                ForgeNoticeBar(
                     text = notice,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                 )
@@ -196,14 +239,385 @@ internal fun ForgeChatPane(
                     onSkip = { state.dismissQuestion() },
                 )
             }
+            ForgeWorkspaceBar(
+                workspace = state.workspace,
+                onClick = { workspaceDialogOpen = true },
+            )
             ForgeComposer(
-                isStreaming = state.busy,
-                reasoningEffort = state.reasoningEffort,
-                onReasoningEffortChange = { state.reasoningEffort = it },
+                state = state,
                 onSend = { text -> state.send(text) },
                 onStop = { state.stop() },
             )
         }
+    }
+    if (workspaceDialogOpen && state.startup is ForgeStartup.Ready) {
+        ForgeWorkspaceDialog(
+            state = state,
+            onDismiss = { workspaceDialogOpen = false },
+        )
+    }
+}
+
+/**
+ * 工作区管理弹窗（DSH 式）：列出全部工作区（名字 + 安卓路径），点行切换；
+ * 可新建（填一个安卓文件夹路径）、改名、移除（只删记录、不删文件）。
+ * 正在跑任务时切换/结构变更先确认——切换会重启 server、停掉当前任务。
+ */
+@Composable
+private fun ForgeWorkspaceDialog(state: ForgeChatState, onDismiss: () -> Unit) {
+    var inputRequest by remember { mutableStateOf<ForgeWorkspaceInput?>(null) }
+    var pendingSwitch by remember { mutableStateOf<String?>(null) }
+    var pendingRemove by remember { mutableStateOf<ForgeWorkspace?>(null) }
+    val currentName = state.workspace?.name
+    // 失败文案先在组合期取好：点击回调里不能再调 stringResource。
+    val addFailedText = stringResource(R.string.forge_workspace_add_failed)
+    val renameFailedText = stringResource(R.string.forge_workspace_rename_failed)
+
+    fun requestSwitch(name: String) {
+        if (name == currentName) {
+            onDismiss()
+            return
+        }
+        if (state.busy) {
+            pendingSwitch = name
+        } else {
+            state.switchWorkspace(name)
+            onDismiss()
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(20.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.forge_workspace_title),
+                style = MiuixTheme.textStyles.title4,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            state.workspaces.forEach { workspace ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { requestSwitch(workspace.name) }
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (workspace.name == currentName) {
+                        Icon(
+                            imageVector = Icons.Rounded.Check,
+                            contentDescription = null,
+                            tint = MiuixTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.width(16.dp))
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = workspace.name,
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = workspace.sourcePath,
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = dshTertiaryColor(),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    TextButton(
+                        text = stringResource(R.string.forge_workspace_rename),
+                        onClick = { inputRequest = ForgeWorkspaceInput.Rename(workspace) },
+                    )
+                    TextButton(
+                        text = stringResource(R.string.forge_workspace_remove),
+                        onClick = { pendingRemove = workspace },
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(
+                    text = stringResource(R.string.forge_workspace_add),
+                    onClick = { inputRequest = ForgeWorkspaceInput.Add },
+                )
+                TextButton(
+                    text = stringResource(R.string.forge_dialog_close),
+                    onClick = onDismiss,
+                )
+            }
+        }
+    }
+
+    when (val request = inputRequest) {
+        ForgeWorkspaceInput.Add -> ForgeTextInputDialog(
+            title = stringResource(R.string.forge_workspace_add_title),
+            initial = "/sdcard/Download/",
+            hint = stringResource(R.string.forge_workspace_add_hint),
+            confirmText = stringResource(R.string.forge_workspace_add),
+            onConfirm = { path ->
+                inputRequest = null
+                ForgeWorkspaces.add(path)
+                    .onSuccess { created ->
+                        state.refreshWorkspaces()
+                        requestSwitch(created.name)
+                    }
+                    .onFailure {
+                        state.notify(addFailedText)
+                    }
+            },
+            onDismiss = { inputRequest = null },
+        )
+
+        is ForgeWorkspaceInput.Rename -> ForgeTextInputDialog(
+            title = stringResource(R.string.forge_workspace_rename_title),
+            initial = request.workspace.name,
+            hint = stringResource(R.string.forge_workspace_rename_hint),
+            confirmText = stringResource(R.string.forge_workspace_rename),
+            onConfirm = { newName ->
+                inputRequest = null
+                val wasCurrent = request.workspace.name == currentName
+                ForgeWorkspaces.rename(request.workspace.name, newName)
+                    .onSuccess {
+                        if (wasCurrent) {
+                            state.restartAfterWorkspaceStructureChange()
+                        } else {
+                            state.refreshWorkspaces()
+                        }
+                    }
+                    .onFailure {
+                        state.notify(renameFailedText)
+                    }
+            },
+            onDismiss = { inputRequest = null },
+        )
+
+        null -> Unit
+    }
+
+    pendingSwitch?.let { name ->
+        ForgeConfirmDialog(
+            title = stringResource(R.string.forge_workspace_switch_confirm_title),
+            body = stringResource(R.string.forge_workspace_switch_confirm_body),
+            confirmText = stringResource(R.string.forge_workspace_switch),
+            onConfirm = {
+                pendingSwitch = null
+                state.switchWorkspace(name)
+                onDismiss()
+            },
+            onDismiss = { pendingSwitch = null },
+        )
+    }
+    pendingRemove?.let { workspace ->
+        ForgeConfirmDialog(
+            title = stringResource(R.string.forge_workspace_remove_confirm_title),
+            body = stringResource(R.string.forge_workspace_remove_confirm_body, workspace.name),
+            confirmText = stringResource(R.string.forge_workspace_remove),
+            onConfirm = {
+                pendingRemove = null
+                val wasCurrent = workspace.name == currentName
+                if (ForgeWorkspaces.remove(workspace.name)) {
+                    if (wasCurrent) {
+                        state.restartAfterWorkspaceStructureChange()
+                    } else {
+                        state.refreshWorkspaces()
+                    }
+                }
+            },
+            onDismiss = { pendingRemove = null },
+        )
+    }
+}
+
+private sealed interface ForgeWorkspaceInput {
+    data object Add : ForgeWorkspaceInput
+
+    data class Rename(val workspace: ForgeWorkspace) : ForgeWorkspaceInput
+}
+
+/** Forge 自己的小文本输入弹窗（工作区新建/改名共用）：一行输入 + 取消/确定。 */
+@Composable
+private fun ForgeTextInputDialog(
+    title: String,
+    initial: String,
+    hint: String,
+    confirmText: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var value by remember { mutableStateOf(initial) }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(20.dp))
+                .padding(18.dp),
+        ) {
+            Text(
+                text = title,
+                style = MiuixTheme.textStyles.title4,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            BasicTextField(
+                value = value,
+                onValueChange = { value = it },
+                textStyle = MiuixTheme.textStyles.body2.copy(
+                    color = MiuixTheme.colorScheme.onSurface,
+                ),
+                cursorBrush = SolidColor(MiuixTheme.colorScheme.primary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MiuixTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                decorationBox = { innerTextField ->
+                    Box {
+                        if (value.isEmpty()) {
+                            Text(
+                                text = hint,
+                                style = MiuixTheme.textStyles.body2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            )
+                        }
+                        innerTextField()
+                    }
+                },
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(
+                    text = stringResource(R.string.forge_dialog_cancel),
+                    onClick = onDismiss,
+                )
+                TextButton(
+                    text = confirmText,
+                    onClick = { onConfirm(value) },
+                    enabled = value.isNotBlank(),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        }
+    }
+}
+
+/** Forge 自己的小确认弹窗（切工作区/移除工作区共用）。 */
+@Composable
+private fun ForgeConfirmDialog(
+    title: String,
+    body: String,
+    confirmText: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(20.dp))
+                .padding(18.dp),
+        ) {
+            Text(
+                text = title,
+                style = MiuixTheme.textStyles.title4,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = body,
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(
+                    text = stringResource(R.string.forge_dialog_cancel),
+                    onClick = onDismiss,
+                )
+                TextButton(
+                    text = confirmText,
+                    onClick = onConfirm,
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        }
+    }
+}
+
+/** 错误提示条：错误色 + 图标，别再用一行弱色灰字——用户看漏了就以为「没反应」。 */
+@Composable
+private fun ForgeNoticeBar(text: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.ErrorOutline,
+            contentDescription = null,
+            tint = StatusError,
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = text,
+            style = MiuixTheme.textStyles.footnote1,
+            color = StatusError,
+        )
+    }
+}
+
+/** 输入栏上方的工作区条：随时能看到当前在哪个文件夹干活、产出落在哪；点开切换/管理。 */
+@Composable
+private fun ForgeWorkspaceBar(workspace: ForgeWorkspace?, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(horizontal = 16.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.FolderOpen,
+            contentDescription = null,
+            tint = dshTertiaryColor(),
+            modifier = Modifier.size(13.dp),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = if (workspace != null) {
+                stringResource(R.string.forge_workspace_bar, workspace.name, workspace.sourcePath)
+            } else {
+                stringResource(R.string.forge_workspace_bar_fallback)
+            },
+            style = MiuixTheme.textStyles.footnote1,
+            color = dshTertiaryColor(),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -305,7 +719,11 @@ private fun ForgeStartupSplash(stage: ForgeStartupStage, modifier: Modifier = Mo
 }
 
 @Composable
-private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
+private fun ForgeTranscript(
+    state: ForgeChatState,
+    topInset: Dp = 0.dp,
+    onOpenWorkspaces: () -> Unit = {},
+) {
     val messages = state.messages
     if (messages.isEmpty()) {
         if (state.busy) {
@@ -324,12 +742,39 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
                 )
             }
         } else {
+            // 空页要把工作区说清楚：这是哪个文件夹、产出的文件去哪拿（DSH 式工作区的门面）。
             Column(
-                modifier = Modifier.fillMaxSize().padding(top = topInset),
+                modifier = Modifier.fillMaxSize().padding(top = topInset, start = 24.dp, end = 24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                Text(
+                    text = stringResource(R.string.forge_empty_title),
+                    style = MiuixTheme.textStyles.title4,
+                    color = MiuixTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                val workspace = state.workspace
+                Text(
+                    text = if (workspace != null) {
+                        stringResource(
+                            R.string.forge_workspace_hint,
+                            workspace.name,
+                            workspace.sourcePath,
+                        )
+                    } else {
+                        stringResource(R.string.forge_workspace_unavailable)
+                    },
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = dshTertiaryColor(),
+                )
+                Spacer(modifier = Modifier.height(6.dp))
                 ForgeCaption(text = stringResource(R.string.forge_empty_hint))
+                Spacer(modifier = Modifier.height(14.dp))
+                TextButton(
+                    text = stringResource(R.string.forge_workspace_switch),
+                    onClick = onOpenWorkspaces,
+                )
             }
         }
         return
@@ -350,48 +795,105 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
         }
         "${message.id}:${message.parts.size}:${message.parts.lastOrNull()?.id}:$tail"
     }
+    // 跟底锚定（与 Assist 同口径）：用户没往上翻时流式追加贴住底部；一旦上滑看前文，
+    // 新内容不许抢屏，改出一个回到底部的按钮。以前是每个 delta 无条件 scrollToItem，
+    // 流式期间根本没法往上看。
+    var followBottom by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.layoutInfo }
+            .collect { info ->
+                val total = info.totalItemsCount
+                if (total > 0) {
+                    val lastVisible = info.visibleItemsInfo.lastOrNull()?.index
+                    if (lastVisible != null) followBottom = lastVisible >= total - 1
+                }
+            }
+    }
+    LaunchedEffect(state.busy) { if (state.busy) followBottom = true }
     LaunchedEffect(lastSignature, state.busy) {
-        // 流式追加时贴住底部；等待行出现时目标是它那一行。用无动画的 scrollToItem，
-        // 不引入新的滚动效果。
-        listState.scrollToItem(if (state.busy) turns.size else turns.lastIndex)
+        if (followBottom) {
+            listState.scrollToItem(if (state.busy) turns.size else turns.lastIndex)
+        }
     }
     val lastAssistantTurn = turns.filterIsInstance<ForgeTurn.Assistant>().lastOrNull()
     val turnError = state.turnError
     val errorAnchorFound = turnError != null && turns.filterIsInstance<ForgeTurn.Assistant>()
         .any { turn -> turn.messages.any { it.id == turnError.anchorMessageId } }
-    // 与 Assist 同款：列表整屏铺到顶栏底下，顶部留白走 contentPadding，顶栏才有内容可模糊。
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = topInset + 12.dp, bottom = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        items(turns, key = { it.key }) { turn ->
-            when (turn) {
-                is ForgeTurn.User -> ForgeUserRow(message = turn.message)
+    val coroutineScope = rememberCoroutineScope()
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 与 Assist 同款：列表整屏铺到顶栏底下，顶部留白走 contentPadding，顶栏才有内容可模糊。
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = topInset + 12.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(turns, key = { it.key }) { turn ->
+                when (turn) {
+                    is ForgeTurn.User -> ForgeUserRow(message = turn.message)
 
-                is ForgeTurn.Assistant -> ForgeAssistantTurnRow(
-                    messages = turn.messages,
-                    active = state.busy &&
-                        turn.messages.lastOrNull()?.id == messages.lastOrNull()?.id,
-                    error = turnError?.takeIf { err ->
-                        turn === lastAssistantTurn &&
-                            (err.anchorMessageId == null ||
-                                turn.messages.any { it.id == err.anchorMessageId } ||
-                                !errorAnchorFound)
-                    },
-                )
+                    is ForgeTurn.Assistant -> ForgeAssistantTurnRow(
+                        messages = turn.messages,
+                        // 提问挂起时这一轮也没结束：保持展开，不许提前收起出汇总头。
+                        active = (state.busy || state.pendingQuestion != null) &&
+                            turn.messages.lastOrNull()?.id == messages.lastOrNull()?.id,
+                        error = turnError?.takeIf { err ->
+                            turn === lastAssistantTurn &&
+                                (err.anchorMessageId == null ||
+                                    turn.messages.any { it.id == err.anchorMessageId } ||
+                                    !errorAnchorFound)
+                        },
+                    )
+                }
+            }
+            if (state.busy) {
+                // 等待行钉在转录末尾：loader + 当前活动词 + 从发送起算的秒数 + 超时徽章。
+                item(key = "forge_wait_row") {
+                    ChatWaitRow(
+                        activity = deriveWaitActivity(messages),
+                        startedAtMs = state.turnStartedAtMs,
+                        lastActivityAtMs = state.lastActivityAtMs,
+                        overtimeEnabled = state.pendingQuestion == null,
+                        modifier = Modifier.padding(horizontal = 20.dp),
+                    )
+                }
             }
         }
-        if (state.busy) {
-            // 等待行钉在转录末尾：loader + 当前活动词 + 从发送起算的秒数 + 超时徽章。
-            item(key = "forge_wait_row") {
-                ChatWaitRow(
-                    activity = deriveWaitActivity(messages),
-                    startedAtMs = state.turnStartedAtMs,
-                    lastActivityAtMs = state.lastActivityAtMs,
-                    overtimeEnabled = state.pendingQuestion == null,
-                    modifier = Modifier.padding(horizontal = 20.dp),
+        // 顶部渐隐（与输入区底部渐隐同一套语言）：内容滑到顶栏下时柔和淡入底色，
+        // 不再被白色实心顶栏齐根切断一行字。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(topInset + 10.dp)
+                .background(
+                    Brush.verticalGradient(
+                        0.0f to MiuixTheme.colorScheme.surface,
+                        0.75f to MiuixTheme.colorScheme.surface.copy(alpha = 0.92f),
+                        1.0f to Color.Transparent,
+                    ),
+                ),
+        )
+        if (!followBottom) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 12.dp)
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(MiuixTheme.colorScheme.surfaceContainerHigh)
+                    .clickable {
+                        followBottom = true
+                        coroutineScope.launch {
+                            listState.scrollToItem(if (state.busy) turns.size else turns.lastIndex)
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = stringResource(R.string.forge_back_to_bottom),
+                    tint = MiuixTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(20.dp),
                 )
             }
         }
@@ -453,18 +955,24 @@ private fun List<ForgeChatMessage>.groupIntoTurns(): List<ForgeTurn> {
 
 @Composable
 private fun ForgeUserRow(message: ForgeChatMessage) {
+    // 只有附件没有文字的消息也要有可见内容：把附件名逐行摆进气泡，别渲染成一个空气泡。
+    val text = message.parts
+        .filterIsInstance<ForgePart.Text>()
+        .joinToString("\n") { it.text }
+    val attachmentNames = message.parts
+        .filterIsInstance<ForgePart.Attachment>()
+        .map { it.filename?.takeIf(String::isNotBlank) ?: it.mime ?: "file" }
+    val content = listOf(text) + attachmentNames
     ChatMessageItem(
         message = UserMessageUi(
             id = message.id,
-            content = message.parts
-                .filterIsInstance<ForgePart.Text>()
-                .joinToString("\n") { it.text },
+            content = content.filter { it.isNotBlank() }.joinToString("\n"),
         ),
         onSuggestionClick = {},
         onRunTraceClick = {},
         onOpenBrowser = {},
         showBrowserShortcut = false,
-        showCopyAction = false,
+        showCopyAction = true,
         modifier = Modifier.fillMaxWidth(),
     )
 }
@@ -506,7 +1014,7 @@ private fun ForgeAssistantTurnRow(
                     onRunTraceClick = {},
                     onOpenBrowser = {},
                     showBrowserShortcut = false,
-                    showCopyAction = false,
+                    showCopyAction = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -617,13 +1125,40 @@ private fun ForgeTurnErrorRow(error: ForgeTurnError) {
 
 @Composable
 private fun ForgeComposer(
-    isStreaming: Boolean,
-    reasoningEffort: ReasoningEffort,
-    onReasoningEffortChange: (ReasoningEffort) -> Unit,
+    state: ForgeChatState,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val surface = MiuixTheme.colorScheme.surface
+    val attachments = state.pendingAttachments
+    // 输入栏的待发模型是 Assist 的形状：图片走图片条、其余走文件引用条，这里做一次映射。
+    val pendingImages = attachments.filter { it.isImage }.map { attachment ->
+        PendingImageUi(
+            id = attachment.id,
+            uri = attachment.source,
+            dataUrl = attachment.previewDataUrl.orEmpty(),
+            mimeType = attachment.mime,
+        )
+    }
+    val pendingFiles = attachments.filter { !it.isImage }.map { attachment ->
+        PendingFileReferenceUi(
+            id = attachment.id,
+            reference = AgentFileReference(
+                displayName = attachment.displayName,
+                absolutePath = attachment.source,
+                kind = if (attachment.isFolder) {
+                    AgentFileReferenceKind.Directory
+                } else {
+                    AgentFileReferenceKind.File
+                },
+            ),
+        )
+    }
+    val queuedMessages = state.queuedTexts.mapIndexed { index, text ->
+        QueuedMessageUi(id = "forge-queue-$index", content = text)
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -651,29 +1186,62 @@ private fun ForgeComposer(
             AgentChatInputBar(
                 input = "",
                 isCompacting = false,
-                contextUsage = AgentContextUsageUi(contextTokens = null, contextWindow = null),
-                showContextUsage = false,
-                isStreaming = isStreaming,
-                reasoningEffort = reasoningEffort,
+                contextUsage = AgentContextUsageUi(
+                    contextTokens = state.contextUsageTokens
+                        ?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt(),
+                    contextWindow = state.contextWindowLimit,
+                ),
+                showContextUsage = true,
+                isStreaming = state.busy,
+                reasoningEffort = state.reasoningEffort,
                 availableReasoningEfforts = ForgeReasoningEfforts,
-                pendingImages = emptyList(),
-                pendingFileReferences = emptyList(),
+                pendingImages = pendingImages,
+                pendingFileReferences = pendingFiles,
+                queuedMessages = queuedMessages,
                 isEditingMessage = false,
                 editHasLaterTurns = false,
                 preserveFollowingMessages = false,
-                onReasoningEffortChange = onReasoningEffortChange,
+                onReasoningEffortChange = { state.reasoningEffort = it },
                 onCompactContext = {},
                 canCompactContext = false,
                 onSubmit = onSend,
+                onRemoveQueuedMessage = { id ->
+                    id.removePrefix("forge-queue-").toIntOrNull()
+                        ?.let { index -> state.removeQueuedMessage(index) }
+                },
                 onStop = onStop,
-                onAttachImage = {},
-                onRemoveImage = {},
-                onAttachFiles = {},
-                onAttachFolder = {},
-                onAttachFilePath = {},
-                onRemoveFileReference = {},
+                onAttachImage = { uri ->
+                    scope.launch {
+                        materializePickedImage(context, uri)?.let { state.addAttachment(it) }
+                            ?: state.notify(context.getString(R.string.forge_attachment_add_failed))
+                    }
+                },
+                onRemoveImage = { id -> state.removeAttachment(id) },
+                onAttachFiles = { uris ->
+                    scope.launch {
+                        var failed = false
+                        uris.forEach { uri ->
+                            val attachment = materializePickedFile(context, uri)
+                            if (attachment != null) state.addAttachment(attachment) else failed = true
+                        }
+                        if (failed) {
+                            state.notify(context.getString(R.string.forge_attachment_add_failed))
+                        }
+                    }
+                },
+                onAttachFolder = { uri ->
+                    scope.launch {
+                        materializePickedFolder(context, uri)?.let { state.addAttachment(it) }
+                            ?: state.notify(context.getString(R.string.forge_attachment_add_failed))
+                    }
+                },
+                onAttachFilePath = { path ->
+                    materializePathEntry(context, path)?.let { state.addAttachment(it) }
+                        ?: state.notify(context.getString(R.string.forge_attachment_add_failed))
+                },
+                onRemoveFileReference = { id -> state.removeAttachment(id) },
                 onCancelMessageEdit = {},
-                showAttach = false,
+                showAttach = true,
                 hintText = stringResource(R.string.forge_input_hint),
                 workingText = stringResource(R.string.forge_working),
                 modifier = Modifier.fillMaxWidth(),
@@ -681,6 +1249,151 @@ private fun ForgeComposer(
         }
     }
 }
+
+/** 附件在添加时就落到本地暂存目录：选择器的 URI 授权寿命不可靠，等发送时再读可能已经失效。 */
+private fun forgeStageDir(context: Context): File =
+    File(context.cacheDir, "forge-stage").apply { mkdirs() }
+
+/** 查选择器给的文件名（OpenableColumns），查不到返回 null。 */
+private fun queryDisplayName(context: Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        ?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getString(0)?.takeIf { it.isNotBlank() }
+            } else {
+                null
+            }
+        }
+}.getOrNull()
+
+/** 把选择器给的内容流复制进暂存目录，返回暂存文件；超限或读不到返回 null。 */
+private fun copyToStage(context: Context, uri: Uri, name: String, maxBytes: Long): File? {
+    val target = File(forgeStageDir(context), "${UUID.randomUUID()}-$name")
+    return runCatching {
+        val input = context.contentResolver.openInputStream(uri) ?: return null
+        var total = 0L
+        input.use { stream ->
+            target.outputStream().use { out ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = stream.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    if (total > maxBytes) error("attachment too large")
+                    out.write(buffer, 0, read)
+                }
+            }
+        }
+        target
+    }.getOrElse {
+        target.delete()
+        null
+    }
+}
+
+private suspend fun materializePickedImage(context: Context, uriString: String): ForgePendingAttachment? =
+    withContext(Dispatchers.IO) {
+        val uri = Uri.parse(uriString)
+        val mime = context.contentResolver.getType(uri)
+            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                MimeTypeMap.getFileExtensionFromUrl(uriString),
+            )
+            ?: "image/jpeg"
+        val name = queryDisplayName(context, uri)
+            ?: "image-${System.currentTimeMillis()}.${MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "jpg"}"
+        val staged = copyToStage(context, uri, name, MAX_STAGED_ATTACHMENT_BYTES) ?: return@withContext null
+        // 小图顺手做一张预览（输入栏图片条要的 dataUrl）；大图跳过，条上只显示占位框。
+        val preview = runCatching {
+            val bytes = staged.readBytes()
+            if (bytes.size <= MAX_PREVIEW_BYTES) {
+                "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+            } else {
+                null
+            }
+        }.getOrNull()
+        ForgePendingAttachment(
+            id = "att-${UUID.randomUUID()}",
+            displayName = name,
+            mime = mime,
+            source = staged.absolutePath,
+            isImage = true,
+            previewDataUrl = preview,
+        )
+    }
+
+private suspend fun materializePickedFile(context: Context, uriString: String): ForgePendingAttachment? =
+    withContext(Dispatchers.IO) {
+        val uri = Uri.parse(uriString)
+        val name = queryDisplayName(context, uri)
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: "file-${System.currentTimeMillis()}"
+        val mime = context.contentResolver.getType(uri)
+            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                name.substringAfterLast('.', ""),
+            )
+            ?: "application/octet-stream"
+        val staged = copyToStage(context, uri, name, MAX_STAGED_ATTACHMENT_BYTES)
+        ForgePendingAttachment(
+            id = "att-${UUID.randomUUID()}",
+            displayName = name,
+            mime = mime,
+            // 太大没复制成：保留原始 URI，发送时再试一次（失败会按名字报出来）。
+            source = staged?.absolutePath ?: uriString,
+            isImage = false,
+        )
+    }
+
+private suspend fun materializePickedFolder(context: Context, uriString: String): ForgePendingAttachment? =
+    withContext(Dispatchers.IO) {
+        // 文件夹走与 Assist 同一个网关把树 URI 解析成真实路径，发送时整夹复制进工作区。
+        val gateway = AgentFileReferenceGateway(context.applicationContext, AndroidAgentLogger)
+        when (val resolution = gateway.resolveDocumentUri(Uri.parse(uriString), AgentFileReferenceKind.Directory)) {
+            is AgentFileReferenceGateway.Resolution.Success -> ForgePendingAttachment(
+                id = "att-${UUID.randomUUID()}",
+                displayName = resolution.reference.displayName,
+                mime = "application/x-directory",
+                source = resolution.reference.absolutePath,
+                isImage = false,
+                isFolder = true,
+            )
+
+            is AgentFileReferenceGateway.Resolution.Failure -> null
+        }
+    }
+
+/** 「输入路径」入口：路径真实存在才收，文件/文件夹按实际类型登记，不复制（发送时再落工作区）。 */
+private fun materializePathEntry(context: Context, rawPath: String): ForgePendingAttachment? {
+    val file = File(rawPath.trim())
+    if (!file.exists()) return null
+    return when {
+        file.isDirectory -> ForgePendingAttachment(
+            id = "att-${UUID.randomUUID()}",
+            displayName = file.name.ifBlank { file.absolutePath },
+            mime = "application/x-directory",
+            source = file.absolutePath,
+            isImage = false,
+            isFolder = true,
+        )
+
+        file.isFile -> {
+            val extension = file.extension.lowercase()
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                ?: "application/octet-stream"
+            ForgePendingAttachment(
+                id = "att-${UUID.randomUUID()}",
+                displayName = file.name,
+                mime = mime,
+                source = file.absolutePath,
+                isImage = mime.startsWith("image/"),
+            )
+        }
+
+        else -> null
+    }
+}
+
+private const val MAX_STAGED_ATTACHMENT_BYTES = 64L * 1024 * 1024
+private const val MAX_PREVIEW_BYTES = 1_500_000
 
 /**
  * question 工具的提问卡：模型问了问题、整轮正挂起等回答。
@@ -732,7 +1445,10 @@ private fun ForgeQuestionCard(
                             },
                             RoundedCornerShape(12.dp),
                         )
-                        .clickable {
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
                             val current = selections[index].orEmpty()
                             val next = when {
                                 question.multiple ->
@@ -856,7 +1572,9 @@ private fun List<ForgePart>.toSegments(): List<ForgeSegment> {
     val work = mutableListOf<AgentChatMessageUi>()
     fun flushWork() {
         if (work.isEmpty()) return
-        segments += ForgeSegment.Work(key = "work-${work.first().id}-${segments.size}", items = work.toList())
+        // key 只用首条 part 的 id：以前还拼段数，流式期间段数一变 key 就变，
+        // 工作块的展开状态（rememberSaveable 按 key 存）被重置、自己收起又展开。
+        segments += ForgeSegment.Work(key = "work-${work.first().id}", items = work.toList())
         work.clear()
     }
     forEach { part ->
@@ -898,6 +1616,9 @@ private fun List<ForgePart>.toSegments(): List<ForgeSegment> {
                     )
                 }
             }
+
+            // 助手侧的附件 part 不单独成行（上下文文件由工具行体现），用户侧在 ForgeUserRow 处理。
+            is ForgePart.Attachment -> Unit
 
             is ForgePart.Other -> Unit
         }
