@@ -1023,6 +1023,7 @@
   <string name="forge_question_skip">跳过</string>
   <string name="forge_question_custom_hint">也可以自己写答案</string>
   <string name="forge_question_failed">回答发送失败：%1$s</string>
+  <string name="forge_session_gone">这个会话已不存在</string>
   <string name="forge_settings_title">Forge（opencode）</string>
   <string name="forge_relay_group">中转站</string>
   <string name="forge_base_url">中转站地址（Base URL）</string>

@@ -15,6 +15,7 @@ import io.github.mangi.eta.agent.forge.ForgeQuestionRequest
 import io.github.mangi.eta.agent.forge.ForgeRole
 import io.github.mangi.eta.agent.forge.ForgeServerManager
 import io.github.mangi.eta.agent.forge.ForgeServerStartResult
+import io.github.mangi.eta.agent.forge.hasHttpCode
 import io.github.mangi.eta.agent.forge.ForgeSharedConfig
 import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
 import io.github.mangi.eta.data.model.ReasoningEffort
@@ -139,8 +140,19 @@ internal class ForgeChatState(
                 )
                 return@launch
             }
+            val loaded = api.loadMessages(id)
+            if (loaded.isFailure && loaded.exceptionOrNull().hasHttpCode(404)) {
+                // 刚拿到的会话立刻就 404（server 在启动间隙被换过）：退回空白页，
+                // 会话等第一条消息发送时再建。
+                sessionId = null
+                messages = emptyList()
+                busy = false
+                startup = ForgeStartup.Ready
+                onSessionsChanged(null)
+                return@launch
+            }
             sessionId = id
-            messages = api.loadMessages(id).getOrDefault(emptyList())
+            messages = loaded.getOrDefault(emptyList())
             api.sessionBusy(id).onSuccess { busy = it }
             startup = ForgeStartup.Ready
             subscribe(id)
@@ -160,8 +172,7 @@ internal class ForgeChatState(
         busy = true
         notice = null
         scope.launch {
-            // 空白新对话还没有会话：发送时才建，免得列表里堆空会话。
-            val id = sessionId ?: api.createSession().getOrElse { error ->
+            var id = sessionId ?: api.createSession().getOrElse { error ->
                 busy = false
                 notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
                 return@launch
@@ -171,13 +182,38 @@ internal class ForgeChatState(
                 subscribe(id)
                 onSessionsChanged(id)
             }
-            api.sendMessage(
+            val firstTry = api.sendMessage(
                 id,
                 text,
                 providerId,
                 modelId,
                 variant = reasoningEffort.forgeVariant(),
-            ).onFailure { error ->
+            )
+            if (firstTry.isFailure && firstTry.exceptionOrNull().hasHttpCode(404)) {
+                // 手里的会话在服务端已不存在（server 被重启换掉、或列表过期点进了已删的会话）：
+                // 新建一个会话把这条消息重发一次，不要把 404 直接甩给用户。
+                val fresh = api.createSession().getOrElse { error ->
+                    busy = false
+                    notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
+                    return@launch
+                }
+                sessionId = fresh
+                subscribe(fresh)
+                onSessionsChanged(fresh)
+                id = fresh
+                api.sendMessage(
+                    id,
+                    text,
+                    providerId,
+                    modelId,
+                    variant = reasoningEffort.forgeVariant(),
+                ).onFailure { error ->
+                    busy = false
+                    notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
+                }
+                return@launch
+            }
+            firstTry.onFailure { error ->
                 busy = false
                 notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
             }
@@ -217,9 +253,21 @@ internal class ForgeChatState(
         }
         if (id == sessionId) return
         scope.launch {
+            val loaded = api.loadMessages(id)
+            if (loaded.isFailure && loaded.exceptionOrNull().hasHttpCode(404)) {
+                // 侧边栏列表可能过期：这个会话在服务端已经没了。退回空白页并刷新列表，
+                // 别把死会话留在手里——接下来发什么都是 404。
+                sessionId = null
+                pendingQuestion = null
+                messages = emptyList()
+                busy = false
+                notice = context.getString(R.string.forge_session_gone)
+                onSessionsChanged(null)
+                return@launch
+            }
             sessionId = id
             pendingQuestion = null
-            messages = api.loadMessages(id).getOrDefault(emptyList())
+            messages = loaded.getOrDefault(emptyList())
             busy = false
             api.sessionBusy(id).onSuccess { busy = it }
             notice = null
@@ -305,7 +353,20 @@ internal class ForgeChatState(
      * 已切到别的会话时不回写（sessionId 已变）。
      */
     private suspend fun alignAfterReconnect(id: String) {
-        api.loadMessages(id).onSuccess { if (sessionId == id) messages = it }
+        val loaded = api.loadMessages(id)
+        if (loaded.isFailure && loaded.exceptionOrNull().hasHttpCode(404)) {
+            // 断线期间 server 被换过，这个会话已经不存在了：清掉死状态，
+            // 别让它一直挂在手里、之后每次发送都 404。
+            if (sessionId == id) {
+                sessionId = null
+                messages = emptyList()
+                busy = false
+                pendingQuestion = null
+                onSessionsChanged(null)
+            }
+            return
+        }
+        loaded.onSuccess { if (sessionId == id) messages = it }
         api.sessionBusy(id).onSuccess { if (sessionId == id) busy = it }
         refreshPendingQuestion(id)
     }

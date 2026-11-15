@@ -12,6 +12,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -236,13 +239,22 @@ internal class ForgeApiClient(
                 .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val detail = response.body.string().orEmpty().take(400)
+                    val detail = response.body.string().orEmpty().let(::serverErrorDetail)
                     throw IOException("HTTP ${response.code} $detail".trim())
                 }
                 response.body.close()
                 Unit
             }
         }
+    }
+
+    /** opencode 的错误体是 {"name":…,"data":{"message":…}}，只取那句 message，别整段 JSON 甩给用户。 */
+    private fun serverErrorDetail(body: String): String {
+        val message = runCatching {
+            val root = Json.parseToJsonElement(body) as? JsonObject
+            ((root?.get("data") as? JsonObject)?.get("message") as? JsonPrimitive)?.contentOrNull
+        }.getOrNull()
+        return message ?: body.take(200)
     }
 
     suspend fun abort(sessionId: String) {
@@ -285,3 +297,7 @@ internal class ForgeApiClient(
         val JsonMediaType = "application/json; charset=utf-8".toMediaType()
     }
 }
+
+/** 本客户端的 HTTP 失败都以 "HTTP <状态码>" 开头，据此判断错误种类（如 404 = 会话已不存在）。 */
+internal fun Throwable?.hasHttpCode(code: Int): Boolean =
+    (this as? IOException)?.message?.startsWith("HTTP $code") == true
