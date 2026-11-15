@@ -64,6 +64,7 @@ internal fun ForgeScreen(
     topInset: Dp = 0.dp,
     newConversationSignal: Int = 0,
     openSessionRequest: Pair<String, Int>? = null,
+    startBlank: Boolean = false,
     onSessionsChanged: (String?) -> Unit = {},
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
 ) {
@@ -81,6 +82,7 @@ internal fun ForgeScreen(
             topInset = topInset,
             newConversationSignal = newConversationSignal,
             openSessionRequest = openSessionRequest,
+            startBlank = startBlank,
             onSessionsChanged = onSessionsChanged,
             onBusyChanged = onBusyChanged,
         )

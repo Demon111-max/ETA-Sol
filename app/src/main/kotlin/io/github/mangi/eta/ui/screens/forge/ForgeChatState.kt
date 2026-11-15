@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.screens.forge
 import android.content.Context
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.mangi.eta.R
@@ -44,6 +45,13 @@ internal enum class ForgeStartupStage {
     StartingServer,
     Connecting,
 }
+
+/** 一轮运行失败的落点：错误行画在 anchorMessageId 所在的那一轮末尾，新开一轮不顶掉它。 */
+internal data class ForgeTurnError(
+    val message: String,
+    val statusCode: Int?,
+    val anchorMessageId: String?,
+)
 
 /** 遮罩最短展示时长（毫秒）：动画本身约 0.7 秒画完，这个时长保证它每次都完整播完再进对话。 */
 private const val FORGE_SPLASH_MIN_DURATION_MS = 1_250L
@@ -101,6 +109,18 @@ internal class ForgeChatState(
 
     /** 启动遮罩显示的当前阶段，随 start() 的真实进度推进（仿 DSHA 启动屏的阶段文字）。 */
     var startupStage by mutableStateOf(ForgeStartupStage.Preparing)
+
+    /** 本轮开始时刻（elapsedRealtime）：等待行从发送那一刻起算秒数。 */
+    var turnStartedAtMs by mutableLongStateOf(0L)
+        private set
+
+    /** 最近一次有新内容到达的时刻：等待行据此判定「暂未响应」。 */
+    var lastActivityAtMs by mutableLongStateOf(0L)
+        private set
+
+    /** 最近一轮的运行失败（错误行画进对话区，不再只飘一句通知）。 */
+    var turnError by mutableStateOf<ForgeTurnError?>(null)
+        private set
     var messages by mutableStateOf<List<ForgeChatMessage>>(emptyList())
     var busy by mutableStateOf(false)
     var notice by mutableStateOf<String?>(null)
@@ -203,7 +223,7 @@ internal class ForgeChatState(
             }
             sessionId = id
             messages = loaded.getOrDefault(emptyList())
-            api.sessionBusy(id).onSuccess { busy = it }
+            api.sessionBusy(id).onSuccess { busy = it; if (it) markBusyObserved() }
             awaitSplashMinDuration(splashStartedAt)
             startup = ForgeStartup.Ready
             subscribe(id)
@@ -264,6 +284,12 @@ internal class ForgeChatState(
         if (text.isBlank() || busy) return
         busy = true
         notice = null
+        turnError = null
+        // 计时从用户点发送这一刻起算：哪怕消息还没在对话区回显，等待行也要立刻开始走秒。
+        SystemClock.elapsedRealtime().let {
+            turnStartedAtMs = it
+            lastActivityAtMs = it
+        }
         sendJob = scope.launch {
             // 发送前先对齐配置：换过 Key/服务商/模型时，这一步会把新配置写好并重启 server，
             // 再往下建会话/发消息就都走新配置。server 重启后当前会话的事件订阅会断线重连对齐。
@@ -342,6 +368,14 @@ internal class ForgeChatState(
     }
 
     /**
+     * 进入时直接落到新对话空白页（模式切换的既定行为）：start() 会优先处理它，
+     * 但排在「打开指定会话」之后——列表点开某条会话时那个请求说了算。
+     */
+    fun requestBlankOnStart() {
+        pendingBlank = true
+    }
+
+    /**
      * 新建对话：回到空白页，**不立刻建会话**——会话等第一条消息发送时才建。
      * 否则每点一次新建，列表里就多一条空的「New session - …」，
      * 删除当前会话时也会立刻冒出一条新的，看起来像删不掉。
@@ -358,6 +392,8 @@ internal class ForgeChatState(
         messages = emptyList()
         busy = false
         notice = null
+        turnError = null
+        turnStartedAtMs = 0L
         pendingQuestion = null
         onSessionsChanged(null)
     }
@@ -390,7 +426,9 @@ internal class ForgeChatState(
             pendingQuestion = null
             messages = loaded.getOrDefault(emptyList())
             busy = false
-            api.sessionBusy(id).onSuccess { busy = it }
+            turnError = null
+            turnStartedAtMs = 0L
+            api.sessionBusy(id).onSuccess { busy = it; if (it) markBusyObserved() }
             notice = null
             subscribe(id)
             refreshPendingQuestion(id)
@@ -512,22 +550,41 @@ internal class ForgeChatState(
             return
         }
         loaded.onSuccess { if (sessionId == id) messages = it }
-        api.sessionBusy(id).onSuccess { if (sessionId == id) busy = it }
+        api.sessionBusy(id).onSuccess { if (sessionId == id) { busy = it; if (it) markBusyObserved() } }
         refreshPendingQuestion(id)
+    }
+
+    /** 打开/重连到一条正在跑的会话时补上计时起点：发送不在本页发生，只能从观察到 busy 起算。 */
+    private fun markBusyObserved() {
+        if (turnStartedAtMs == 0L) {
+            SystemClock.elapsedRealtime().let {
+                turnStartedAtMs = it
+                lastActivityAtMs = it
+            }
+        }
     }
 
     private fun handle(session: String, event: ForgeEvent) {
         when (event) {
             is ForgeEvent.PartUpdated -> {
-                if (event.sessionId == session) upsertPart(event.part)
+                if (event.sessionId == session) {
+                    lastActivityAtMs = SystemClock.elapsedRealtime()
+                    upsertPart(event.part)
+                }
             }
 
             is ForgeEvent.PartDelta -> {
-                if (event.sessionId == session) appendDelta(event)
+                if (event.sessionId == session) {
+                    lastActivityAtMs = SystemClock.elapsedRealtime()
+                    appendDelta(event)
+                }
             }
 
             is ForgeEvent.MessageUpdated -> {
-                if (event.sessionId == session) ensureMessage(event.messageId, event.role)
+                if (event.sessionId == session) {
+                    lastActivityAtMs = SystemClock.elapsedRealtime()
+                    ensureMessage(event.messageId, event.role)
+                }
             }
 
             is ForgeEvent.Idle -> if (event.sessionId == session) {
@@ -539,10 +596,19 @@ internal class ForgeChatState(
 
             is ForgeEvent.Failed -> if (event.sessionId == session) {
                 busy = false
-                // 手动停止触发的 Aborted 不是故障，不弹错误提示。
+                // 手动停止触发的 Aborted 不是故障，不算失败。
+                // 真失败画进对话区：错误行钉在本轮末尾（红点 + 错误原文 + 状态码），
+                // 不再只在输入框上方飘一句转瞬即逝的通知；对话区还是空的时才退回通知。
                 if (!event.isAbort) {
-                    notice = event.message?.takeIf { it.isNotBlank() }?.let {
-                        context.getString(R.string.forge_run_failed, it)
+                    val text = event.message?.takeIf { it.isNotBlank() }
+                    if (text != null && messages.isNotEmpty()) {
+                        turnError = ForgeTurnError(
+                            message = text,
+                            statusCode = event.statusCode,
+                            anchorMessageId = messages.lastOrNull()?.id,
+                        )
+                    } else if (text != null) {
+                        notice = context.getString(R.string.forge_run_failed, text)
                     }
                 }
             }

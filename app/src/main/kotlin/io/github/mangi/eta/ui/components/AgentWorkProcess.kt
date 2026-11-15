@@ -93,6 +93,7 @@ internal fun AgentWorkProcess(
     retainedStreamingStates: Map<String, StreamingMarkdownState>,
     modifier: Modifier = Modifier,
     active: Boolean = false,
+    failed: Boolean = false,
 ) {
     val running = messages.any { message ->
         (message is ThinkingMessageUi && message.isStreaming) ||
@@ -102,10 +103,11 @@ internal fun AgentWorkProcess(
     // null 表示自动模式；用户点过之后只认手动选择。
     var manualExpanded by rememberSaveable(id) { mutableStateOf<Boolean?>(null) }
 
-    // 以“是否仍是本轮末尾的工作过程”判定收起，而不是 running：思考结束到工具开始之间
+    // 失败的轮次默认展开（dsh 的失败收尾就是摊开的：汇总头「处理失败」+ 过程行 + 错误行），
+    // 其余时候以“是否仍是本轮末尾的工作过程”判定收起，而不是 running：思考结束到工具开始之间
     // running 会短暂为 false，按它收起会造成反复开合。展开态在组合期同步推导，与正文
     // 条目插入落在同一帧，不经 LaunchedEffect 晚一帧收起。语音浮层空间有限，自动模式不展开。
-    val bodyVisible = manualExpanded ?: (active && !assistantOverlay)
+    val bodyVisible = manualExpanded ?: ((active || failed) && !assistantOverlay)
 
     Column(
         modifier = modifier
@@ -118,6 +120,7 @@ internal fun AgentWorkProcess(
             AgentWorkHeader(
                 messages = messages,
                 working = running,
+                failed = failed,
                 expanded = bodyVisible,
                 onClick = { manualExpanded = !bodyVisible },
             )
@@ -153,12 +156,15 @@ private fun AgentWorkHeader(
     working: Boolean,
     expanded: Boolean,
     onClick: () -> Unit,
+    failed: Boolean = false,
 ) {
     val runningTool = messages.lastOrNull { message ->
         message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running
     } as? ToolActivityMessageUi
     val summary = remember(messages) { messages.workSummary() }
+    val failedText = stringResource(R.string.forge_turn_failed_header)
     val text = when {
+        failed -> failedText
         runningTool != null -> pluralStringResource(
             R.plurals.work_processing_step,
             summary.toolCount,

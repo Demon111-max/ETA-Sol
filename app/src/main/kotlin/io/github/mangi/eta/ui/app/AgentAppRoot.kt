@@ -213,6 +213,11 @@ fun AgentAppRoot(
     var forgeBusySessionId by remember { mutableStateOf<String?>(null) }
     // 侧边栏点开某个 Forge 会话的请求：会话 id + 序号，ForgeChatPane 收到新序号就切过去。
     var forgeOpenSessionRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // 这次进 Forge 是否必须落到新对话空白页：模式切换与「新建」进来=true（用户定：
+    // 点切换到另一个模式，必须先新建一个该模式的新会话）；从列表点开 Forge 条目或
+    // 某个具体会话进来=false（恢复/打开目标会话）。每条打开 Forge 的路径都显式赋值，
+    // 不留上一次的残值。ForgeChatPane 在创建状态时消费它（面板每次进入都是新建的）。
+    var forgeStartBlank by remember { mutableStateOf(false) }
 
     /** 向 opencode 拉一次会话列表刷新侧边栏；server 没在跑时静默失败、保留旧列表。 */
     fun refreshForgeSessions() {
@@ -373,6 +378,7 @@ fun AgentAppRoot(
         val targetForgeSession = forgeSessionIdOf(conversationId)
         if (targetForgeSession != null) {
             // 打开某个具体的 Forge 会话：Forge 页切到那个 opencode 会话，Assist 状态不碰。
+            forgeStartBlank = false
             forgeOpen = true
             forgeActiveSessionId = targetForgeSession
             forgeOpenSessionRequest =
@@ -382,6 +388,7 @@ fun AgentAppRoot(
         }
         if (conversationId == FORGE_CONVERSATION_ID) {
             // 打开 Forge 对话：不碰 Assist 的会话状态，正在运行的 Assist 继续跑。
+            forgeStartBlank = false
             forgeOpen = true
             navigator.popToHome()
             return
@@ -395,6 +402,7 @@ fun AgentAppRoot(
         focusManager.clearFocus()
         conversationPaneOpen = false
         if (targetMode == ForgeChatMode.Forge) {
+            forgeStartBlank = true
             forgeOpen = true
             forgeNewConversationSignal++
             navigator.popToHome()
@@ -413,7 +421,9 @@ fun AgentAppRoot(
         uiScope.launch { SettingsDataStore.setForgeChatMode(mode) }
         if (mode == chatMode) return
         if (mode == ForgeChatMode.Forge) {
+            // 切换到 Forge 必须先落到一个新的 Forge 对话，不回到上次停的那条。
             focusManager.clearFocus()
+            forgeStartBlank = true
             forgeOpen = true
             navigator.popToHome()
             conversationPaneOpen = false
@@ -562,6 +572,7 @@ fun AgentAppRoot(
                             topInset = shellPadding.calculateTopPadding(),
                             newConversationSignal = forgeNewConversationSignal,
                             openSessionRequest = forgeOpenSessionRequest,
+                            startBlank = forgeStartBlank,
                             onSessionsChanged = { activeId ->
                                 forgeActiveSessionId = activeId
                                 refreshForgeSessions()

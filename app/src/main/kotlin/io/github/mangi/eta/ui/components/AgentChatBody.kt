@@ -50,6 +50,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -94,6 +95,7 @@ import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.markdown.StreamingMarkdownStateCache
 import io.github.mangi.eta.ui.model.ConversationHistoryLoadState
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
+import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.AgentContextUsageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.AgentModelPickerUiState
@@ -492,6 +494,37 @@ internal fun AgentConversationMessages(
     } else {
         null
     }
+    // 等待行（仿 dsh 的 chat-wait 行）的计时：isStreaming 翻到 true 的那一刻起算，
+    // 尾部消息每次变化都算一次「有新内容到达」，超过 10 秒没有新内容就亮「暂未响应」。
+    var waitStartedAtMs by remember { mutableLongStateOf(0L) }
+    var waitLastActivityAtMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(isStreaming) {
+        if (isStreaming) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (waitStartedAtMs == 0L) waitStartedAtMs = now
+            waitLastActivityAtMs = now
+        } else {
+            waitStartedAtMs = 0L
+        }
+    }
+    val waitTailSignature = visibleMessages.lastOrNull()?.let { "${it.id}:${it.hashCode()}" }
+    LaunchedEffect(waitTailSignature) {
+        if (isStreaming) {
+            waitLastActivityAtMs = android.os.SystemClock.elapsedRealtime()
+        }
+    }
+    val waitActivity = when (val last = visibleMessages.lastOrNull()) {
+        is ThinkingMessageUi -> ChatWaitActivity.Thinking
+        is ToolActivityMessageUi ->
+            if (last.status == ToolActivityStatusUi.Running) {
+                ChatWaitActivity.RunningTool
+            } else {
+                ChatWaitActivity.Thinking
+            }
+        is AgentMessageUi ->
+            if (last.isStreaming) ChatWaitActivity.Writing else ChatWaitActivity.Thinking
+        else -> ChatWaitActivity.Thinking
+    }
     // 复制按钮只出现在每轮对话的最终结果上，中间步骤的过渡文本不提供复制入口。
     // 流式进行中当前这一轮尚未收尾，此时的“最后一条正文”只是中间步骤，不标记。
     val finalResultMessageIds = remember(visibleMessages, isStreaming) {
@@ -824,6 +857,18 @@ internal fun AgentConversationMessages(
                         .fillMaxWidth()
                         .height(1.dp),
                 )
+            }
+            if (isStreaming && !assistantOverlay) {
+                // 等待行放在哨兵之后：不占既有条目下标，底部锚定逻辑不受影响；
+                // 视觉上它就是转录的最后一行（哨兵只有 1dp）。
+                item(key = "chat_wait_row") {
+                    ChatWaitRow(
+                        activity = waitActivity,
+                        startedAtMs = waitStartedAtMs,
+                        lastActivityAtMs = waitLastActivityAtMs,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp),
+                    )
+                }
             }
         }
 

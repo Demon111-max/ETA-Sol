@@ -57,6 +57,22 @@ internal sealed interface ForgePart {
             get() = status == ForgeToolStatus.Completed || status == ForgeToolStatus.Failed
     }
 
+    /**
+     * opencode 的重试记录：模型请求失败且可重试时它先落一条 retry part 再重发，
+     * attempt 从 1 递增；error 里带服务商返回的消息与 HTTP 状态码。
+     * 界面据此画「正在/已重试模型请求（第 N 次）」行——没有它，用户只能看到无声的等待。
+     */
+    data class Retry(
+        override val id: String,
+        override val messageId: String,
+        val attempt: Int,
+        val errorMessage: String?,
+        val statusCode: Int?,
+    ) : ForgePart {
+        override val ended: Boolean
+            get() = true
+    }
+
     data class Other(
         override val id: String,
         override val messageId: String,
@@ -131,7 +147,12 @@ internal sealed interface ForgeEvent {
 
     data class Idle(val sessionId: String) : ForgeEvent
 
-    data class Failed(val sessionId: String, val message: String?, val name: String? = null) : ForgeEvent {
+    data class Failed(
+        val sessionId: String,
+        val message: String?,
+        val name: String? = null,
+        val statusCode: Int? = null,
+    ) : ForgeEvent {
         /** 用户手动停止也会以 session.error 到达（MessageAbortedError / Aborted），那不是故障。 */
         val isAbort: Boolean
             get() = name == "MessageAbortedError" || message.equals("Aborted", ignoreCase = true)
@@ -253,6 +274,14 @@ internal object ForgeProtocol {
 
             "tool" -> parseToolPart(obj, id, messageId)
 
+            "retry" -> ForgePart.Retry(
+                id = id,
+                messageId = messageId,
+                attempt = (obj["attempt"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 1,
+                errorMessage = retryErrorMessage(obj),
+                statusCode = retryStatusCode(obj),
+            )
+
             else -> ForgePart.Other(
                 id = id,
                 messageId = messageId,
@@ -260,6 +289,17 @@ internal object ForgeProtocol {
             )
         }
     }
+
+    /** retry part 的 error 形状与 session.error 相同：{name, data:{message, statusCode}}。 */
+    private fun retryErrorObject(obj: JsonObject): JsonObject? =
+        (obj["error"] as? JsonObject)?.get("data") as? JsonObject
+
+    private fun retryErrorMessage(obj: JsonObject): String? =
+        retryErrorObject(obj)?.stringOrNull("message")
+            ?: (obj["error"] as? JsonObject)?.stringOrNull("message")
+
+    private fun retryStatusCode(obj: JsonObject): Int? =
+        retryErrorObject(obj)?.stringOrNull("statusCode")?.toIntOrNull()
 
     private fun parseToolPart(obj: JsonObject, id: String, messageId: String): ForgePart.Tool {
         val state = obj["state"] as? JsonObject
@@ -336,13 +376,15 @@ internal object ForgeProtocol {
             "session.error" -> {
                 // opencode 的错误在 properties.error.data.message 里，顶层没有 message 字段。
                 val error = properties?.get("error") as? JsonObject
-                val message = (error?.get("data") as? JsonObject)?.stringOrNull("message")
+                val data = error?.get("data") as? JsonObject
+                val message = data?.stringOrNull("message")
                     ?: error?.stringOrNull("message")
                     ?: properties?.stringOrNull("message")
                 ForgeEvent.Failed(
                     sessionId.orEmpty(),
                     message,
                     name = error?.stringOrNull("name"),
+                    statusCode = data?.stringOrNull("statusCode")?.toIntOrNull(),
                 )
             }
 

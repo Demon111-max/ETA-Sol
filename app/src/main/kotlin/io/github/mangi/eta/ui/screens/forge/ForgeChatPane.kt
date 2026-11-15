@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.screens.forge
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -32,16 +33,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -52,6 +56,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,7 +71,14 @@ import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.components.AgentChatInputBar
 import io.github.mangi.eta.ui.components.AgentWorkProcess
 import io.github.mangi.eta.ui.components.ChatMessageItem
+import io.github.mangi.eta.ui.components.ChatWaitActivity
+import io.github.mangi.eta.ui.components.ChatWaitRow
+import io.github.mangi.eta.ui.components.DshRowHeader
 import io.github.mangi.eta.ui.components.ListEmptyState
+import io.github.mangi.eta.ui.components.StatusError
+import io.github.mangi.eta.ui.components.dshFoldEnter
+import io.github.mangi.eta.ui.components.dshFoldExit
+import io.github.mangi.eta.ui.components.dshTertiaryColor
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentContextUsageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
@@ -96,12 +108,19 @@ internal fun ForgeChatPane(
     topInset: Dp = 0.dp,
     newConversationSignal: Int = 0,
     openSessionRequest: Pair<String, Int>? = null,
+    startBlank: Boolean = false,
     onSessionsChanged: (String?) -> Unit = {},
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val state = remember { ForgeChatState(context.applicationContext, scope, onSessionsChanged) }
+    // 模式切换进来时 startBlank=true：状态一创建就记下「落到新对话」，start() 读到
+    // pendingBlank 会跳过恢复最近会话。面板每次进入 Forge 都是新建的，记在这里最稳。
+    val state = remember {
+        ForgeChatState(context.applicationContext, scope, onSessionsChanged).also { created ->
+            if (startBlank) created.requestBlankOnStart()
+        }
+    }
     LaunchedEffect(Unit) { state.start() }
     // 「新建对话」信号递增时才另起新对话；面板重建时带着旧信号值进来不能重复触发，
     // 否则从侧边栏点开某个会话、面板一重组就会被拽回空白页。
@@ -289,12 +308,29 @@ private fun ForgeStartupSplash(stage: ForgeStartupStage, modifier: Modifier = Mo
 private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
     val messages = state.messages
     if (messages.isEmpty()) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(top = topInset),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            ForgeCaption(text = stringResource(R.string.forge_empty_hint))
+        if (state.busy) {
+            // 第一句话刚发出去、服务端还没回显：先把等待行摆出来开始走秒，
+            // 用户要能立刻确认「请求已经发出去了」，而不是对着一句空提示干等。
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = topInset + 12.dp, start = 34.dp, end = 14.dp),
+            ) {
+                ChatWaitRow(
+                    activity = ChatWaitActivity.Thinking,
+                    startedAtMs = state.turnStartedAtMs,
+                    lastActivityAtMs = state.lastActivityAtMs,
+                    overtimeEnabled = state.pendingQuestion == null,
+                )
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                ForgeCaption(text = stringResource(R.string.forge_empty_hint))
+            }
         }
         return
     }
@@ -309,14 +345,20 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
             is ForgePart.Text -> "t${last.text.length}"
             is ForgePart.Reasoning -> "r${last.text.length}"
             is ForgePart.Tool -> "tool${last.status}"
+            is ForgePart.Retry -> "retry${last.attempt}"
             else -> ""
         }
         "${message.id}:${message.parts.size}:${message.parts.lastOrNull()?.id}:$tail"
     }
-    LaunchedEffect(lastSignature) {
-        // 流式追加时贴住底部；用无动画的 scrollToItem，不引入新的滚动效果。
-        listState.scrollToItem(turns.lastIndex)
+    LaunchedEffect(lastSignature, state.busy) {
+        // 流式追加时贴住底部；等待行出现时目标是它那一行。用无动画的 scrollToItem，
+        // 不引入新的滚动效果。
+        listState.scrollToItem(if (state.busy) turns.size else turns.lastIndex)
     }
+    val lastAssistantTurn = turns.filterIsInstance<ForgeTurn.Assistant>().lastOrNull()
+    val turnError = state.turnError
+    val errorAnchorFound = turnError != null && turns.filterIsInstance<ForgeTurn.Assistant>()
+        .any { turn -> turn.messages.any { it.id == turnError.anchorMessageId } }
     // 与 Assist 同款：列表整屏铺到顶栏底下，顶部留白走 contentPadding，顶栏才有内容可模糊。
     LazyColumn(
         state = listState,
@@ -332,9 +374,44 @@ private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
                     messages = turn.messages,
                     active = state.busy &&
                         turn.messages.lastOrNull()?.id == messages.lastOrNull()?.id,
+                    error = turnError?.takeIf { err ->
+                        turn === lastAssistantTurn &&
+                            (err.anchorMessageId == null ||
+                                turn.messages.any { it.id == err.anchorMessageId } ||
+                                !errorAnchorFound)
+                    },
                 )
             }
         }
+        if (state.busy) {
+            // 等待行钉在转录末尾：loader + 当前活动词 + 从发送起算的秒数 + 超时徽章。
+            item(key = "forge_wait_row") {
+                ChatWaitRow(
+                    activity = deriveWaitActivity(messages),
+                    startedAtMs = state.turnStartedAtMs,
+                    lastActivityAtMs = state.lastActivityAtMs,
+                    overtimeEnabled = state.pendingQuestion == null,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 等待行的活动词：看最后一轮最后一个非重试 part 在干什么（重试不算活动，词留在思考上）。 */
+private fun deriveWaitActivity(messages: List<ForgeChatMessage>): ChatWaitActivity {
+    val parts = messages.lastOrNull { it.role == ForgeRole.Assistant }?.parts.orEmpty()
+    return when (val last = parts.lastOrNull { it !is ForgePart.Retry }) {
+        is ForgePart.Text ->
+            if (last.ended) ChatWaitActivity.Thinking else ChatWaitActivity.Writing
+
+        is ForgePart.Tool -> when (last.status) {
+            ForgeToolStatus.Pending -> ChatWaitActivity.PreparingTool
+            ForgeToolStatus.Running -> ChatWaitActivity.RunningTool
+            else -> ChatWaitActivity.Thinking
+        }
+
+        else -> ChatWaitActivity.Thinking
     }
 }
 
@@ -393,15 +470,20 @@ private fun ForgeUserRow(message: ForgeChatMessage) {
 }
 
 @Composable
-private fun ForgeAssistantTurnRow(messages: List<ForgeChatMessage>, active: Boolean) {
+private fun ForgeAssistantTurnRow(
+    messages: List<ForgeChatMessage>,
+    active: Boolean,
+    error: ForgeTurnError? = null,
+) {
     // 整轮的 parts 按顺序摊平再切段：相邻的思考/工具（哪怕跨消息）连成同一个工作过程块，
     // 汇总头只在整轮结束时出现一次，轮次进行中不提前收起。
     val segments = remember(messages) { messages.flatMap { it.parts }.toSegments() }
+    val lastWorkSegment = segments.filterIsInstance<ForgeSegment.Work>().lastOrNull()
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        segments.forEach { segment ->
+        segments.forEachIndexed { index, segment ->
             when (segment) {
                 is ForgeSegment.Work -> AgentWorkProcess(
                     id = segment.key,
@@ -410,6 +492,7 @@ private fun ForgeAssistantTurnRow(messages: List<ForgeChatMessage>, active: Bool
                     currentBrowserMessageId = null,
                     retainedStreamingStates = emptyMap<String, StreamingMarkdownState>(),
                     active = active,
+                    failed = error != null && segment === lastWorkSegment,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -425,6 +508,107 @@ private fun ForgeAssistantTurnRow(messages: List<ForgeChatMessage>, active: Bool
                     showBrowserShortcut = false,
                     showCopyAction = false,
                     modifier = Modifier.fillMaxWidth(),
+                )
+
+                is ForgeSegment.Retry -> ForgeRetryRow(
+                    segment = segment,
+                    running = active && index == segments.lastIndex,
+                )
+            }
+        }
+        if (error != null) {
+            ForgeTurnErrorRow(error = error)
+        }
+    }
+}
+
+/**
+ * 重试行（dsh 行形态）：[刷新图标] 正在/已重试模型请求 · 第 N 次，
+ * 展开看这次失败的错误原文——重试对用户必须可见，不能只剩无声的等待。
+ */
+@Composable
+private fun ForgeRetryRow(segment: ForgeSegment.Retry, running: Boolean) {
+    var expanded by rememberSaveable(segment.id) { mutableStateOf(false) }
+    val detail = segment.errorMessage?.takeIf { it.isNotBlank() }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp),
+    ) {
+        DshRowHeader(
+            icon = Icons.Rounded.Refresh,
+            title = stringResource(
+                if (running) R.string.forge_retry_running else R.string.forge_retry_done,
+            ),
+            summary = stringResource(R.string.forge_retry_attempt, segment.attempt),
+            running = running,
+            expanded = expanded,
+            expandable = detail != null,
+            onClick = { expanded = !expanded },
+        )
+        AnimatedVisibility(
+            visible = expanded && detail != null,
+            enter = dshFoldEnter(),
+            exit = dshFoldExit(),
+        ) {
+            Text(
+                text = detail.orEmpty(),
+                style = MiuixTheme.textStyles.body2.copy(fontSize = 12.sp),
+                color = dshTertiaryColor(),
+                modifier = Modifier.padding(start = 22.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
+            )
+        }
+    }
+}
+
+/** 本轮失败行：红点 + 红字标题 + 错误原文 + 右侧状态码片（仿 DSHA 超时收尾那一行）。 */
+@Composable
+private fun ForgeTurnErrorRow(error: ForgeTurnError) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 5.dp)
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(StatusError),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.forge_turn_failed_row),
+            style = MiuixTheme.textStyles.body2.copy(
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            ),
+            color = StatusError,
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = error.message,
+            style = MiuixTheme.textStyles.body2.copy(fontSize = 13.sp),
+            color = dshTertiaryColor(),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        error.statusCode?.let { code ->
+            Spacer(modifier = Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .background(
+                        MiuixTheme.colorScheme.surfaceContainerHigh,
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            ) {
+                Text(
+                    text = code.toString(),
+                    style = TextStyle(fontSize = 10.sp, fontFeatureSettings = "tnum"),
+                    color = dshTertiaryColor(),
                 )
             }
         }
@@ -653,6 +837,14 @@ private sealed interface ForgeSegment {
     data class Work(val key: String, val items: List<AgentChatMessageUi>) : ForgeSegment
 
     data class Body(val id: String, val text: String, val streaming: Boolean) : ForgeSegment
+
+    /** 连续的重试记录合并成一行：attempt 取最大，错误原文取最近一次的。 */
+    data class Retry(
+        val id: String,
+        val attempt: Int,
+        val errorMessage: String?,
+        val statusCode: Int?,
+    ) : ForgeSegment
 }
 
 /**
@@ -684,6 +876,27 @@ private fun List<ForgePart>.toSegments(): List<ForgeSegment> {
                     text = part.text,
                     streaming = !part.ended,
                 )
+            }
+
+            is ForgePart.Retry -> {
+                // 紧挨着的重试并成一行（次数取最大）；中间隔了思考/工具就另起一行，
+                // 保持重试在时间线上的真实位置。
+                val lastSegment = segments.lastOrNull()
+                if (work.isEmpty() && lastSegment is ForgeSegment.Retry) {
+                    segments[segments.lastIndex] = lastSegment.copy(
+                        attempt = maxOf(lastSegment.attempt, part.attempt),
+                        errorMessage = part.errorMessage ?: lastSegment.errorMessage,
+                        statusCode = part.statusCode ?: lastSegment.statusCode,
+                    )
+                } else {
+                    flushWork()
+                    segments += ForgeSegment.Retry(
+                        id = part.id,
+                        attempt = part.attempt,
+                        errorMessage = part.errorMessage,
+                        statusCode = part.statusCode,
+                    )
+                }
             }
 
             is ForgePart.Other -> Unit
