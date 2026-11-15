@@ -12,6 +12,10 @@ import kotlinx.serialization.Serializable
 internal data class ForgeSettings(
     val baseUrl: String = "",
     val modelId: String = DEFAULT_MODEL_ID,
+    /** opencode 侧的 provider ID：由共用配置里服务商的名字生成，不再写死 relay。 */
+    val providerId: String = "relay",
+    /** opencode 侧的 provider 显示名，与 Assist 里看到的服务商名一致。 */
+    val providerName: String = "Relay",
 ) {
     companion object {
         const val DEFAULT_MODEL_ID = "deepseek-v4.1-flash"

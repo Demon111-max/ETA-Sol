@@ -26,7 +26,8 @@ internal sealed interface ForgeConfigWriteResult {
 
 /**
  * 把 Forge 配置写进 Linux 环境里的 opencode 约定位置：
- * `~/.config/opencode/opencode.json`（provider relay）与 `~/.local/share/opencode/auth.json`（API Key）。
+ * `~/.config/opencode/opencode.json`（provider ID 由共用配置的服务商名生成）与
+ * `~/.local/share/opencode/auth.json`（API Key）。
  * 两个文件都要求 0600；写入走既有的终端通道（proot/chroot 各按当前后端），不新造通道。
  */
 internal object ForgeConfigWriter {
@@ -38,32 +39,43 @@ internal object ForgeConfigWriter {
     internal fun opencodeConfigJson(settings: ForgeSettings): JsonObject = buildJsonObject {
         put("\$schema", "https://opencode.ai/config.json")
         putJsonObject("provider") {
-            putJsonObject(PROVIDER_ID) {
+            putJsonObject(settings.providerId) {
                 put("npm", "@ai-sdk/openai-compatible")
-                put("name", "Relay")
+                put("name", settings.providerName.ifBlank { settings.providerId })
                 putJsonObject("options") {
                     put("baseURL", settings.baseUrl.trim())
                 }
                 putJsonObject("models") {
                     putJsonObject(settings.modelId.trim()) {
                         put("name", settings.modelId.trim())
+                        // 思考档位：variant 名与 Eta 的 ReasoningEffort wireValue 对齐，
+                        // Forge 发送消息时按档位名选 variant（见 ForgeChatState）。
+                        putJsonObject("variants") {
+                            putJsonObject("minimal") { put("reasoningEffort", "minimal") }
+                            putJsonObject("low") { put("reasoningEffort", "low") }
+                            putJsonObject("medium") { put("reasoningEffort", "medium") }
+                            putJsonObject("high") { put("reasoningEffort", "high") }
+                            putJsonObject("xhigh") { put("reasoningEffort", "xhigh") }
+                            putJsonObject("max") { put("reasoningEffort", "xhigh") }
+                        }
                     }
                 }
             }
         }
-        put("model", "$PROVIDER_ID/${settings.modelId.trim()}")
+        put("model", "${settings.providerId}/${settings.modelId.trim()}")
         putJsonObject("permission") {
             put("edit", "allow")
             put("bash", "allow")
         }
     }
 
-    internal fun authJson(credentials: ForgeCredentials): JsonObject = buildJsonObject {
-        putJsonObject(PROVIDER_ID) {
-            put("type", "api")
-            put("key", credentials.apiKey.trim())
+    internal fun authJson(settings: ForgeSettings, credentials: ForgeCredentials): JsonObject =
+        buildJsonObject {
+            putJsonObject(settings.providerId) {
+                put("type", "api")
+                put("key", credentials.apiKey.trim())
+            }
         }
-    }
 
     suspend fun write(
         context: Context,
@@ -79,7 +91,7 @@ internal object ForgeConfigWriter {
         }
         val command = writeCommand(
             configJson = opencodeConfigJson(settings).toString(),
-            authJson = authJson(credentials).toString(),
+            authJson = authJson(settings, credentials).toString(),
         )
         val supervisor = ShellProcessSupervisor()
         try {

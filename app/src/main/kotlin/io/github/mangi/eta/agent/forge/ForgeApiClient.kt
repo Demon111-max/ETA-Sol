@@ -95,6 +95,7 @@ internal class ForgeApiClient(
         text: String,
         providerId: String,
         modelId: String,
+        variant: String? = null,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val payload = buildJsonObject {
@@ -102,6 +103,8 @@ internal class ForgeApiClient(
                     put("providerID", providerId)
                     put("modelID", modelId)
                 }
+                // 思考档位：opencode 按 variant 名套用配置里该模型的 variants 定义。
+                if (variant != null) put("variant", variant)
                 putJsonArray("parts") {
                     add(
                         buildJsonObject {

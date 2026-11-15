@@ -104,6 +104,8 @@ internal fun ForgeChatPane(modifier: Modifier = Modifier, topInset: Dp = 0.dp) {
             }
             ForgeComposer(
                 isStreaming = state.busy,
+                reasoningEffort = state.reasoningEffort,
+                onReasoningEffortChange = { state.reasoningEffort = it },
                 onSend = { text -> state.send(text) },
                 onStop = { state.stop() },
             )
@@ -207,6 +209,8 @@ private fun ForgeMessageRow(message: ForgeChatMessage, active: Boolean) {
 @Composable
 private fun ForgeComposer(
     isStreaming: Boolean,
+    reasoningEffort: ReasoningEffort,
+    onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
 ) {
@@ -241,14 +245,14 @@ private fun ForgeComposer(
                 contextUsage = AgentContextUsageUi(contextTokens = null, contextWindow = null),
                 showContextUsage = false,
                 isStreaming = isStreaming,
-                reasoningEffort = ReasoningEffort.OFF,
-                availableReasoningEfforts = emptyList(),
+                reasoningEffort = reasoningEffort,
+                availableReasoningEfforts = ForgeReasoningEfforts,
                 pendingImages = emptyList(),
                 pendingFileReferences = emptyList(),
                 isEditingMessage = false,
                 editHasLaterTurns = false,
                 preserveFollowingMessages = false,
-                onReasoningEffortChange = {},
+                onReasoningEffortChange = onReasoningEffortChange,
                 onCompactContext = {},
                 canCompactContext = false,
                 onSubmit = onSend,
@@ -358,5 +362,19 @@ private fun summarizeInput(input: String?): String? {
     }
     return raw.lineSequence().firstOrNull()?.take(MAX_SUMMARY_CHARS)
 }
+
+/**
+ * Forge 可选的思考档位：opencode 侧靠 variant 落地（配置写入时预置），
+ * OFF 在这条链路上关不掉思考，不提供；DEFAULT 不发 variant、用上游默认。
+ */
+private val ForgeReasoningEfforts = listOf(
+    ReasoningEffort.DEFAULT,
+    ReasoningEffort.MINIMAL,
+    ReasoningEffort.LOW,
+    ReasoningEffort.MEDIUM,
+    ReasoningEffort.HIGH,
+    ReasoningEffort.XHIGH,
+    ReasoningEffort.MAX,
+)
 
 private const val MAX_SUMMARY_CHARS = 120

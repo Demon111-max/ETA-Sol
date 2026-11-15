@@ -16,6 +16,7 @@ import io.github.mangi.eta.agent.forge.ForgeServerManager
 import io.github.mangi.eta.agent.forge.ForgeServerStartResult
 import io.github.mangi.eta.agent.forge.ForgeSharedConfig
 import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
+import io.github.mangi.eta.data.model.ReasoningEffort
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -46,7 +47,11 @@ internal class ForgeChatState(
     var busy by mutableStateOf(false)
     var notice by mutableStateOf<String?>(null)
 
+    /** Forge 的思考档位：发送时按档位名选 opencode 配置里预置的 variant。 */
+    var reasoningEffort by mutableStateOf(ReasoningEffort.DEFAULT)
+
     private var sessionId: String? = null
+    private var providerId: String = ForgeConfigWriter.PROVIDER_ID
     private var modelId: String = ""
     private var eventJob: Job? = null
     private var startJob: Job? = null
@@ -66,9 +71,10 @@ internal class ForgeChatState(
                 return@launch
             }
             modelId = shared.settings.modelId
+            providerId = shared.settings.providerId
             val environment = server.environment()
-            val fingerprint = shared.settings.baseUrl + "\n" + shared.settings.modelId +
-                "\n" + shared.credentials.apiKey
+            val fingerprint = shared.settings.providerId + "\n" + shared.settings.baseUrl +
+                "\n" + shared.settings.modelId + "\n" + shared.credentials.apiKey
             if (fingerprint != appliedConfigFingerprint) {
                 when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
                     ForgeConfigWriteResult.Written -> {
@@ -121,7 +127,13 @@ internal class ForgeChatState(
         busy = true
         notice = null
         scope.launch {
-            api.sendMessage(id, text, PROVIDER_ID, modelId).onFailure { error ->
+            api.sendMessage(
+                id,
+                text,
+                providerId,
+                modelId,
+                variant = reasoningEffort.forgeVariant(),
+            ).onFailure { error ->
                 busy = false
                 notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
             }
@@ -262,8 +274,13 @@ internal class ForgeChatState(
         messages = current
     }
 
+    /** DEFAULT / OFF 不发 variant（用上游默认）；其余档位按 wireValue 选 variant。 */
+    private fun ReasoningEffort.forgeVariant(): String? = when (this) {
+        ReasoningEffort.DEFAULT, ReasoningEffort.OFF -> null
+        else -> wireValue
+    }
+
     private companion object {
-        const val PROVIDER_ID = "relay"
         const val RECONNECT_DELAY_MS = 1_000L
 
         /** 上次成功写入 Linux 环境的共用配置指纹；没变就不重写、不重启 server。 */

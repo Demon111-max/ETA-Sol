@@ -12,7 +12,7 @@ import io.github.mangi.eta.data.repository.ProviderRepository
  * Forge 与 Assist 共用同一套服务商配置：从模型提供商里当前选中的服务商与模型
  * 解析出 opencode 需要的三项（Base URL、API Key、模型 ID），不再有 Forge 专属设置。
  *
- * opencode 侧的 relay 是 OpenAI 兼容协议，所以只有 OpenAI 兼容（含自定义）且用
+ * opencode 侧走 OpenAI 兼容协议，所以只有 OpenAI 兼容（含自定义）且用
  * API Key 的服务商能喂给 Forge；选中 Anthropic / Gemini 或 OAuth 服务商时视为未配置，
  * 由 Forge 门禁提示去模型提供商里换一个。
  */
@@ -44,7 +44,28 @@ internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
         return ForgeSharedConfig.NotConfigured
     }
     return ForgeSharedConfig.Ready(
-        settings = ForgeSettings(baseUrl = baseUrl, modelId = modelId),
+        settings = ForgeSettings(
+            baseUrl = baseUrl,
+            modelId = modelId,
+            providerId = forgeProviderId(provider.name, provider.id),
+            providerName = provider.name.trim().ifBlank { provider.id },
+        ),
         credentials = ForgeCredentials(apiKey = apiKey),
     )
+}
+
+/**
+ * opencode 的 provider ID 只认小写字母/数字/连字符：取服务商名字里的可读部分生成，
+ * 让 Forge 里模型的身份与 Assist 里选的服务商对得上，不再是写死的 relay；
+ * 名字里没有拉丁字符时回落到服务商自身的 ID，再不行才用 relay。
+ */
+internal fun forgeProviderId(name: String, fallbackId: String): String {
+    val slug = name.trim().lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
+        .take(40)
+        .trim('-')
+    if (slug.isNotEmpty()) return slug
+    val id = fallbackId.trim().lowercase()
+    return if (id.matches(Regex("[a-z0-9][a-z0-9_-]*"))) id else "relay"
 }
