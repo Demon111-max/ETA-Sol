@@ -99,6 +99,35 @@ internal class ForgeApiClient(
         }
     }
 
+    /** 改会话标题（侧边栏 Forge 条目重命名走它）。 */
+    suspend fun renameSession(sessionId: String, title: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val payload = buildJsonObject { put("title", title) }
+                val request = Request.Builder()
+                    .url("$baseUrl/session/$sessionId")
+                    .patch(payload.toString().toRequestBody(JsonMediaType))
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    response.body.close()
+                    Unit
+                }
+            }
+        }
+
+    /** 删会话（侧边栏 Forge 条目删除走它）。 */
+    suspend fun deleteSession(sessionId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder().url("$baseUrl/session/$sessionId").delete().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                response.body.close()
+                Unit
+            }
+        }
+    }
+
     /** 拉全量消息：首次进入与 SSE 断线对齐都用它。 */
     suspend fun loadMessages(sessionId: String): Result<List<ForgeChatMessage>> =
         withContext(Dispatchers.IO) {

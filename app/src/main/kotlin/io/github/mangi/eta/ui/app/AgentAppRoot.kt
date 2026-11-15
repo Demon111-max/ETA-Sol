@@ -215,6 +215,28 @@ fun AgentAppRoot(
             ForgeApiClient().listSessions().onSuccess { forgeSessions = it }
         }
     }
+
+    /** Forge 条目的重命名走 opencode 接口改标题，改完刷新列表。 */
+    fun renameForgeConversation(conversation: ConversationSummaryUi, newTitle: String) {
+        val sessionId = forgeSessionIdOf(conversation.id) ?: return
+        uiScope.launch {
+            ForgeApiClient().renameSession(sessionId, newTitle.trim())
+            refreshForgeSessions()
+        }
+    }
+
+    /** Forge 条目的删除走 opencode 接口删会话；删的正是打开着的那个时，Forge 页另起新会话。 */
+    fun deleteForgeConversation(conversation: ConversationSummaryUi) {
+        val sessionId = forgeSessionIdOf(conversation.id) ?: return
+        uiScope.launch {
+            ForgeApiClient().deleteSession(sessionId)
+            if (forgeActiveSessionId == sessionId) {
+                forgeActiveSessionId = null
+                if (forgeOpen) forgeNewConversationSignal++
+            }
+            refreshForgeSessions()
+        }
+    }
     // 记住模式存 wireValue 字符串走 rememberSaveable：进程被杀重建后也保持，
     // 不会闪回 Assist 让新建对话开错模式（枚举本身不保证能被 rememberSaveable 保存）。
     var forgeNewConversationModeWire by rememberSaveable { mutableStateOf(ForgeChatMode.Assist.wireValue) }
@@ -451,19 +473,23 @@ fun AgentAppRoot(
             onOpenBrowser = { openConversationBrowser() },
             onSelectConversation = { conversationId -> selectConversation(conversationId) },
             onConversationTogglePin = { conversation ->
-                agentState.toggleConversationPin(conversation.id)
+                // Forge 条目没有置顶概念，菜单里也不给这个动作。
+                if (!conversation.forge) agentState.toggleConversationPin(conversation.id)
             },
             onConversationRename = { conversation ->
                 conversationRenameTarget = conversation
             },
             onConversationExport = { conversation ->
-                conversationExportTarget = conversation
-                conversationExportLauncher.launch(
-                    ConversationMarkdownExporter.defaultFileName(
-                        title = conversation.title.ifBlank { conversation.preview },
-                        fallback = resources.getString(R.string.conversation_export_default_name),
-                    ),
-                )
+                // Forge 条目暂不提供导出，菜单里也不给这个动作。
+                if (!conversation.forge) {
+                    conversationExportTarget = conversation
+                    conversationExportLauncher.launch(
+                        ConversationMarkdownExporter.defaultFileName(
+                            title = conversation.title.ifBlank { conversation.preview },
+                            fallback = resources.getString(R.string.conversation_export_default_name),
+                        ),
+                    )
+                }
             },
             onConversationDelete = { conversation ->
                 conversationDeleteTarget = conversation
@@ -999,7 +1025,11 @@ fun AgentAppRoot(
                     confirmText = stringResource(R.string.action_save),
                     confirmEnabled = renameInput.isNotBlank(),
                     onConfirm = {
-                        agentState.renameConversation(conversation.id, renameInput)
+                        if (conversation.forge) {
+                            renameForgeConversation(conversation, renameInput)
+                        } else {
+                            agentState.renameConversation(conversation.id, renameInput)
+                        }
                         conversationRenameTarget = null
                     },
                     onDismissRequest = { conversationRenameTarget = null },
@@ -1025,7 +1055,11 @@ fun AgentAppRoot(
                             confirmEnabled = renameInput.isNotBlank(),
                             onCancel = { conversationRenameTarget = null },
                             onConfirm = {
-                                agentState.renameConversation(conversation.id, renameInput)
+                                if (conversation.forge) {
+                                    renameForgeConversation(conversation, renameInput)
+                                } else {
+                                    agentState.renameConversation(conversation.id, renameInput)
+                                }
                                 conversationRenameTarget = null
                             },
                             modifier = Modifier.padding(top = 16.dp),
@@ -1044,11 +1078,16 @@ fun AgentAppRoot(
             if (conversation.isActiveRun) R.string.conversation_stop_and_delete else R.string.action_delete,
         )
         val onConfirmDelete: () -> Unit = {
-            if ((backStack.lastOrNull() as? AppRoute.Browser)?.sessionKey == conversation.id) {
-                navigator.popToHome()
+            if (conversation.forge) {
+                deleteForgeConversation(conversation)
+                conversationDeleteTarget = null
+            } else {
+                if ((backStack.lastOrNull() as? AppRoute.Browser)?.sessionKey == conversation.id) {
+                    navigator.popToHome()
+                }
+                agentState.deleteConversation(conversation.id)
+                conversationDeleteTarget = null
             }
-            agentState.deleteConversation(conversation.id)
-            conversationDeleteTarget = null
         }
         when (LocalUiStyle.current) {
             AppearanceUiStyle.COUI -> {

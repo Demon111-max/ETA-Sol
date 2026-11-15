@@ -666,11 +666,8 @@ private fun ConversationHistoryRow(
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = {
-                        // Forge 本期只有单会话，没有重命名/导出/删除可做。
-                        if (!conversation.forge) {
-                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                            anchor.open { showActionMenu = true }
-                        }
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                        anchor.open { showActionMenu = true }
                     },
                 )
                 .padding(
@@ -761,9 +758,8 @@ private fun ConversationHistoryRow(
                 )
             }
 
-            // Forge 合成条目没有对应的数据库会话，置顶/重命名/导出/删除都无从谈起，不给「…」菜单
-            // （长按路径已有同样守卫）。
-            if (selected && !conversation.forge) {
+            // Forge 条目只有重命名/删除（走 opencode 接口），没有置顶/导出，菜单里按 forge 裁剪。
+            if (selected) {
                 val moreLabel = stringResource(R.string.action_more)
                 Box(
                     modifier = Modifier
@@ -814,19 +810,32 @@ private fun ConversationHistoryRow(
         when (LocalUiStyle.current) {
             AppearanceUiStyle.COUI -> {
                 val destructiveColor = CouiDialogDefaults.themeColors().destructive
-                val menuItems = remember(pinText, renameText, exportText, deleteText, destructiveColor) {
-                    listOf(
-                        CouiMenuItem(value = 0, text = pinText, icon = Icons.Outlined.PushPin),
-                        CouiMenuItem(value = 1, text = renameText, icon = Icons.Outlined.Edit),
-                        CouiMenuItem(value = 2, text = exportText, icon = Icons.Outlined.Download),
-                        CouiMenuItem(
-                            value = 3,
-                            text = deleteText,
-                            icon = Icons.Outlined.Delete,
-                            iconTint = destructiveColor,
-                            dividerBefore = true,
-                        ),
-                    )
+                val menuItems = remember(pinText, renameText, exportText, deleteText, destructiveColor, conversation.forge) {
+                    if (conversation.forge) {
+                        listOf(
+                            CouiMenuItem(value = 1, text = renameText, icon = Icons.Outlined.Edit),
+                            CouiMenuItem(
+                                value = 3,
+                                text = deleteText,
+                                icon = Icons.Outlined.Delete,
+                                iconTint = destructiveColor,
+                                dividerBefore = true,
+                            ),
+                        )
+                    } else {
+                        listOf(
+                            CouiMenuItem(value = 0, text = pinText, icon = Icons.Outlined.PushPin),
+                            CouiMenuItem(value = 1, text = renameText, icon = Icons.Outlined.Edit),
+                            CouiMenuItem(value = 2, text = exportText, icon = Icons.Outlined.Download),
+                            CouiMenuItem(
+                                value = 3,
+                                text = deleteText,
+                                icon = Icons.Outlined.Delete,
+                                iconTint = destructiveColor,
+                                dividerBefore = true,
+                            ),
+                        )
+                    }
                 }
                 Menu(
                     expanded = showActionMenu,
@@ -906,41 +915,45 @@ private fun ConversationHistoryRow(
                         selectedIndicatorColor = MiuixTheme.colorScheme.error,
                     )
                     ListPopupColumn {
-                        DropdownImpl(
-                            item = pinItem,
-                            optionSize = 4,
-                            isSelected = false,
-                            index = 0,
-                            onSelectedIndexChange = {
-                                showActionMenu = false
-                                onTogglePin()
-                            },
-                        )
+                        if (!conversation.forge) {
+                            DropdownImpl(
+                                item = pinItem,
+                                optionSize = 4,
+                                isSelected = false,
+                                index = 0,
+                                onSelectedIndexChange = {
+                                    showActionMenu = false
+                                    onTogglePin()
+                                },
+                            )
+                        }
                         DropdownImpl(
                             item = renameItem,
-                            optionSize = 4,
+                            optionSize = if (conversation.forge) 2 else 4,
                             isSelected = false,
-                            index = 1,
+                            index = if (conversation.forge) 0 else 1,
                             onSelectedIndexChange = {
                                 showActionMenu = false
                                 onRename()
                             },
                         )
-                        DropdownImpl(
-                            item = exportItem,
-                            optionSize = 4,
-                            isSelected = false,
-                            index = 2,
-                            onSelectedIndexChange = {
-                                showActionMenu = false
-                                onExport()
-                            },
-                        )
+                        if (!conversation.forge) {
+                            DropdownImpl(
+                                item = exportItem,
+                                optionSize = 4,
+                                isSelected = false,
+                                index = 2,
+                                onSelectedIndexChange = {
+                                    showActionMenu = false
+                                    onExport()
+                                },
+                            )
+                        }
                         DropdownImpl(
                             item = deleteItem,
-                            optionSize = 4,
+                            optionSize = if (conversation.forge) 2 else 4,
                             isSelected = false,
-                            index = 3,
+                            index = if (conversation.forge) 1 else 3,
                             dropdownColors = deleteColors,
                             onSelectedIndexChange = {
                                 showActionMenu = false
