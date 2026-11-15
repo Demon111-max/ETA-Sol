@@ -76,6 +76,18 @@ internal data class ForgeChatMessage(
 internal sealed interface ForgeEvent {
     data class PartUpdated(val sessionId: String, val part: ForgePart) : ForgeEvent
 
+    /**
+     * 正文/思考的增量文本（message.part.delta）。opencode 流式期间只发这种事件，
+     * part.updated 只在一段开始（text 为空）与结束（text 为全文）时发；
+     * 不接 delta，流式期间界面上的思考与正文就一直是空的。
+     */
+    data class PartDelta(
+        val sessionId: String,
+        val messageId: String?,
+        val partId: String,
+        val delta: String,
+    ) : ForgeEvent
+
     data class MessageUpdated(
         val sessionId: String,
         val messageId: String,
@@ -196,6 +208,23 @@ internal object ForgeProtocol {
                 val part = properties?.get("part")?.let(::parsePart)
                 if (part != null && sessionId != null) {
                     ForgeEvent.PartUpdated(sessionId, part)
+                } else {
+                    ForgeEvent.Ignored(type)
+                }
+            }
+
+            "message.part.delta" -> {
+                val partId = properties?.stringOrNull("partID")
+                val delta = properties?.stringOrNull("delta")
+                if (sessionId != null && partId != null && delta != null &&
+                    properties.stringOrNull("field") == "text"
+                ) {
+                    ForgeEvent.PartDelta(
+                        sessionId = sessionId,
+                        messageId = properties.stringOrNull("messageID"),
+                        partId = partId,
+                        delta = delta,
+                    )
                 } else {
                     ForgeEvent.Ignored(type)
                 }

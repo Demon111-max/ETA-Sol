@@ -167,6 +167,10 @@ internal class ForgeChatState(
                 if (event.sessionId == session) upsertPart(event.part)
             }
 
+            is ForgeEvent.PartDelta -> {
+                if (event.sessionId == session) appendDelta(event)
+            }
+
             is ForgeEvent.MessageUpdated -> {
                 if (event.sessionId == session) ensureMessage(event.messageId, event.role)
             }
@@ -196,7 +200,11 @@ internal class ForgeChatState(
             val message = current[messageIndex]
             val parts = message.parts.toMutableList()
             val partIndex = parts.indexOfFirst { it.id == part.id }
-            if (partIndex >= 0) parts[partIndex] = part else parts.add(part)
+            if (partIndex >= 0) {
+                parts[partIndex] = mergePartText(parts[partIndex], part)
+            } else {
+                parts.add(part)
+            }
             current[messageIndex] = message.copy(parts = parts)
         } else {
             current.add(
@@ -207,6 +215,50 @@ internal class ForgeChatState(
                 ),
             )
         }
+        messages = current
+    }
+
+    /**
+     * part.updated 的开始快照 text 为空，不能把 delta 已攒出的文本冲掉；
+     * 未结束的文本/思考段只接受不比现有短的全文，结束快照的全文照单全收。
+     */
+    private fun mergePartText(existing: ForgePart, incoming: ForgePart): ForgePart = when {
+        existing is ForgePart.Text && incoming is ForgePart.Text ->
+            if (!incoming.ended && incoming.text.length < existing.text.length) {
+                incoming.copy(text = existing.text)
+            } else {
+                incoming
+            }
+
+        existing is ForgePart.Reasoning && incoming is ForgePart.Reasoning ->
+            if (!incoming.ended && incoming.text.length < existing.text.length) {
+                incoming.copy(text = existing.text)
+            } else {
+                incoming
+            }
+
+        else -> incoming
+    }
+
+    /** 把增量文本接到对应 part 末尾；part 还没出现时忽略，后续 part.updated / 全量拉取会补齐。 */
+    private fun appendDelta(event: ForgeEvent.PartDelta) {
+        val current = messages.toMutableList()
+        val messageIndex = if (event.messageId != null) {
+            current.indexOfFirst { it.id == event.messageId }
+        } else {
+            current.indexOfFirst { message -> message.parts.any { it.id == event.partId } }
+        }
+        if (messageIndex < 0) return
+        val message = current[messageIndex]
+        val parts = message.parts.toMutableList()
+        val partIndex = parts.indexOfFirst { it.id == event.partId }
+        if (partIndex < 0) return
+        parts[partIndex] = when (val part = parts[partIndex]) {
+            is ForgePart.Text -> part.copy(text = part.text + event.delta)
+            is ForgePart.Reasoning -> part.copy(text = part.text + event.delta)
+            else -> return
+        }
+        current[messageIndex] = message.copy(parts = parts)
         messages = current
     }
 
