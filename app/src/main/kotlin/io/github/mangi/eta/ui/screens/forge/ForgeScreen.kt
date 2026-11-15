@@ -65,7 +65,7 @@ internal fun ForgeScreen(
     newConversationSignal: Int = 0,
     openSessionRequest: Pair<String, Int>? = null,
     onSessionsChanged: (String?) -> Unit = {},
-    onBusyChanged: (String?, Boolean) -> Unit = {},
+    onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
