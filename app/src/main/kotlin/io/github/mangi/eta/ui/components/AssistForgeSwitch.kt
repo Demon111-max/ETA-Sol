@@ -1,19 +1,23 @@
 package io.github.mangi.eta.ui.components
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,7 +36,8 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 顶栏 Assist / Forge 分段控件。纯静态呈现：切换时选中段直接换位，不做滑动动画。
+ * 侧栏 Assist / Forge 分段控件。选中段是一块白色药丸，切换时用弹簧滑动到另一段，
+ * 不是直接换位。宽度由调用方通过 [modifier] 给定（侧栏里占满整行）。
  */
 @Composable
 internal fun AssistForgeSwitch(
@@ -42,74 +47,79 @@ internal fun AssistForgeSwitch(
 ) {
     val dark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
     val containerColor = if (dark) MiuixTheme.colorScheme.secondaryContainer else AssistForgeSwitchColors.Container
-    Row(
+    val modes = ForgeChatMode.entries
+    val selectedIndex = modes.indexOf(mode).coerceAtLeast(0)
+    BoxWithConstraints(
         modifier = modifier
-            .size(width = AssistForgeSwitchColors.Width, height = AssistForgeSwitchColors.Height)
+            .height(AssistForgeSwitchColors.Height)
             .clip(CircleShape)
             .background(containerColor, CircleShape)
             .padding(AssistForgeSwitchColors.ContainerInset)
             .selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(0.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        ForgeChatMode.entries.forEach { item ->
-            val selected = item == mode
-            val label = stringResource(
-                when (item) {
-                    ForgeChatMode.Assist -> R.string.forge_mode_assist
-                    ForgeChatMode.Forge -> R.string.forge_mode_forge
-                },
-            )
-            val source = remember { MutableInteractionSource() }
-            Box(
-                modifier = Modifier
-                    .width(AssistForgeSwitchColors.SegmentWidth)
-                    .fillMaxHeight()
-                    .then(
-                        if (selected) {
-                            Modifier
-                                .shadow(
-                                    elevation = AssistForgeSwitchColors.SelectedElevation,
-                                    shape = CircleShape,
-                                    clip = false,
-                                    ambientColor = AssistForgeSwitchColors.Shadow,
-                                    spotColor = AssistForgeSwitchColors.Shadow,
-                                )
-                                .background(AssistForgeSwitchColors.SelectedBackground, CircleShape)
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .selectable(
-                        selected = selected,
-                        interactionSource = source,
-                        indication = null,
-                        role = Role.Tab,
-                        onClick = { if (!selected) onModeSelected(item) },
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = label,
-                    style = MiuixTheme.textStyles.footnote1.copy(fontSize = 13.sp),
-                    maxLines = 1,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (selected) {
-                        AssistForgeSwitchColors.SelectedContent
-                    } else {
-                        AssistForgeSwitchColors.UnselectedContent
+        val segmentWidth = maxWidth / modes.size
+        val pillOffset by animateDpAsState(
+            targetValue = segmentWidth * selectedIndex,
+            animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f),
+            label = "assistForgeSwitchPill",
+        )
+        Box(
+            modifier = Modifier
+                .offset(x = pillOffset)
+                .width(segmentWidth)
+                .fillMaxHeight()
+                .shadow(
+                    elevation = AssistForgeSwitchColors.SelectedElevation,
+                    shape = CircleShape,
+                    clip = false,
+                    ambientColor = AssistForgeSwitchColors.Shadow,
+                    spotColor = AssistForgeSwitchColors.Shadow,
+                )
+                .background(AssistForgeSwitchColors.SelectedBackground, CircleShape),
+        )
+        Row(modifier = Modifier.fillMaxSize()) {
+            modes.forEach { item ->
+                val selected = item == mode
+                val label = stringResource(
+                    when (item) {
+                        ForgeChatMode.Assist -> R.string.forge_mode_assist
+                        ForgeChatMode.Forge -> R.string.forge_mode_forge
                     },
                 )
+                val source = remember { MutableInteractionSource() }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .selectable(
+                            selected = selected,
+                            interactionSource = source,
+                            indication = null,
+                            role = Role.Tab,
+                            onClick = { if (!selected) onModeSelected(item) },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = label,
+                        style = MiuixTheme.textStyles.footnote1.copy(fontSize = 13.sp),
+                        maxLines = 1,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (selected) {
+                            AssistForgeSwitchColors.SelectedContent
+                        } else {
+                            AssistForgeSwitchColors.UnselectedContent
+                        },
+                    )
+                }
             }
         }
     }
 }
 
 private object AssistForgeSwitchColors {
-    val Width = 136.dp
     val Height = 36.dp
     val ContainerInset = 3.dp
-    val SegmentWidth = 65.dp
     val SelectedElevation = 1.dp
 
     /** 浅色模式下的容器灰，取值固定为 #EDEEF1；深色模式改用主题容器灰 token。 */

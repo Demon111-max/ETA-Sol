@@ -90,7 +90,6 @@ import io.github.mangi.eta.ui.screens.characters.CharacterMemoryScreen
 import io.github.mangi.eta.ui.screens.characters.CharacterPersonaScreen
 import io.github.mangi.eta.ui.screens.enhance.SystemEnhanceScreen
 import io.github.mangi.eta.ui.screens.home.AgentHomeScreen
-import io.github.mangi.eta.ui.screens.forge.ForgeSettingsScreen
 import io.github.mangi.eta.ui.screens.mcp.McpServerDetailScreen
 import io.github.mangi.eta.ui.screens.mcp.McpServersScreen
 import io.github.mangi.eta.ui.screens.memory.AgentMemoryScreen
@@ -479,7 +478,7 @@ fun AgentAppRoot(
                     if (forgeOpen) {
                         ForgeScreen(
                             onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
-                            onOpenForgeSettings = { pushRoute(AppRoute.ForgeSettings) },
+                            onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
                             modifier = Modifier.padding(top = shellPadding.calculateTopPadding()),
                         )
                         return@RoutedShell
@@ -580,9 +579,6 @@ fun AgentAppRoot(
             }
             entry<AppRoute.WebToolsSettings>(swipeDismiss = swipeDismiss) {
                 WebToolsSettingsScreen(onBack = ::popRoute)
-            }
-            entry<AppRoute.ForgeSettings>(swipeDismiss = swipeDismiss) {
-                ForgeSettingsScreen(onBack = ::popRoute)
             }
             entry<AppRoute.Subagents>(swipeDismiss = swipeDismiss) {
                 SubagentSettingsScreen(onBack = ::popRoute)

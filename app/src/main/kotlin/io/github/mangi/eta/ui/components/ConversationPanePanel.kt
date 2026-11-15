@@ -84,6 +84,7 @@ import com.itos.coui.text.Text as CouiText
 import com.itos.coui.theme.CouiTheme
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.AppearanceUiStyle
+import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.coui.CouiIcon
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
@@ -120,6 +121,8 @@ internal fun ConversationPanePanel(
     isRevealed: Boolean,
     activeModelLabel: String?,
     hasPermissionAttention: Boolean,
+    chatMode: ForgeChatMode,
+    onChatModeSelected: (ForgeChatMode) -> Unit,
     onSearchChange: (String) -> Unit,
     onNewConversation: () -> Unit,
     onConversationSelected: (String) -> Unit,
@@ -186,6 +189,15 @@ internal fun ConversationPanePanel(
                             overscrollEffect = null,
                         ) {
                             if (!isSearching) {
+                                item(key = "pane_mode_switch") {
+                                    AssistForgeSwitch(
+                                        mode = chatMode,
+                                        onModeSelected = onChatModeSelected,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = ConversationPanelMetrics.PaneHorizontalPadding),
+                                    )
+                                }
                                 item(key = "pane_workbench") {
                                     PaneWorkbenchSection(
                                         activeModelLabel = activeModelLabel,

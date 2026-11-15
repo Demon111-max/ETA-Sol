@@ -1021,9 +1021,9 @@
   <string name="forge_gate_opencode_missing">opencode is not installed yet</string>
   <string name="forge_gate_opencode_missing_summary">Install opencode under optional tools in Linux tools.</string>
   <string name="forge_gate_config_missing">Forge is not configured yet</string>
-  <string name="forge_gate_config_missing_summary">Fill in the relay base URL, API key and model ID.</string>
+  <string name="forge_gate_config_missing_summary">Forge shares Assist\'s provider. In Model providers, select an OpenAI-compatible provider with an API key and a model.</string>
   <string name="forge_gate_open_environment">Open Linux tools</string>
-  <string name="forge_gate_open_settings">Open Forge settings</string>
+  <string name="forge_gate_open_settings">Open model providers</string>
   <string name="forge_input_hint">Ask opencode to do it</string>
   <string name="forge_working">opencode is working…</string>
   <string name="forge_empty_hint">Describe the change; opencode will work inside the Linux environment</string>

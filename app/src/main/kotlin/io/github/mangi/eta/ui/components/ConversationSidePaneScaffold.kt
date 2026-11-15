@@ -48,6 +48,7 @@ import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.mangi.eta.R
+import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
 import kotlin.math.roundToInt
@@ -88,6 +89,8 @@ fun ConversationSidePaneScaffold(
     modifier: Modifier = Modifier,
     activeModelLabel: String? = null,
     hasPermissionAttention: Boolean = false,
+    chatMode: ForgeChatMode = ForgeChatMode.Assist,
+    onChatModeSelected: (ForgeChatMode) -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     val sceneLifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
@@ -231,6 +234,8 @@ fun ConversationSidePaneScaffold(
                         isRevealed = isRevealed,
                         activeModelLabel = activeModelLabel,
                         hasPermissionAttention = hasPermissionAttention,
+                        chatMode = chatMode,
+                        onChatModeSelected = onChatModeSelected,
                         onSearchChange = onSearchChange,
                         onNewConversation = onNewConversation,
                         onConversationSelected = onConversationSelected,

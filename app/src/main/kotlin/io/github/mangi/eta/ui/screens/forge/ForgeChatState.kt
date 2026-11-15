@@ -7,13 +7,15 @@ import androidx.compose.runtime.setValue
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.forge.ForgeApiClient
 import io.github.mangi.eta.agent.forge.ForgeChatMessage
+import io.github.mangi.eta.agent.forge.ForgeConfigWriteResult
+import io.github.mangi.eta.agent.forge.ForgeConfigWriter
 import io.github.mangi.eta.agent.forge.ForgeEvent
 import io.github.mangi.eta.agent.forge.ForgePart
 import io.github.mangi.eta.agent.forge.ForgeRole
 import io.github.mangi.eta.agent.forge.ForgeServerManager
 import io.github.mangi.eta.agent.forge.ForgeServerStartResult
-import io.github.mangi.eta.data.model.ForgeSettings
-import io.github.mangi.eta.data.repository.ForgeSettingsRepository
+import io.github.mangi.eta.agent.forge.ForgeSharedConfig
+import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -45,7 +47,7 @@ internal class ForgeChatState(
     var notice by mutableStateOf<String?>(null)
 
     private var sessionId: String? = null
-    private var modelId: String = ForgeSettings.DEFAULT_MODEL_ID
+    private var modelId: String = ""
     private var eventJob: Job? = null
     private var startJob: Job? = null
     private val server = ForgeServerManager.default(context)
@@ -57,7 +59,33 @@ internal class ForgeChatState(
         startJob = scope.launch {
             startup = ForgeStartup.Connecting
             notice = null
+            // 配置与 Assist 共用同一套服务商设置：进 Forge 时解析一次，变了才重写并重启 server。
+            val shared = resolveForgeSharedConfig()
+            if (shared !is ForgeSharedConfig.Ready) {
+                startup = ForgeStartup.Failed(context.getString(R.string.forge_gate_config_missing))
+                return@launch
+            }
+            modelId = shared.settings.modelId
             val environment = server.environment()
+            val fingerprint = shared.settings.baseUrl + "\n" + shared.settings.modelId +
+                "\n" + shared.credentials.apiKey
+            if (fingerprint != appliedConfigFingerprint) {
+                when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
+                    ForgeConfigWriteResult.Written -> {
+                        appliedConfigFingerprint = fingerprint
+                        server.restartIfRunning(environment)
+                    }
+
+                    ForgeConfigWriteResult.EnvironmentNotReady -> Unit
+
+                    is ForgeConfigWriteResult.Failed -> {
+                        startup = ForgeStartup.Failed(
+                            context.getString(R.string.forge_server_failed, written.output),
+                        )
+                        return@launch
+                    }
+                }
+            }
             when (val result = server.ensureRunning(environment)) {
                 is ForgeServerStartResult.Failed -> {
                     startup = ForgeStartup.Failed(
@@ -68,8 +96,6 @@ internal class ForgeChatState(
 
                 is ForgeServerStartResult.Running -> Unit
             }
-            modelId = ForgeSettingsRepository.settings().modelId
-                .ifBlank { ForgeSettings.DEFAULT_MODEL_ID }
             val id = api.ensureSession().getOrElse { error ->
                 startup = ForgeStartup.Failed(
                     context.getString(R.string.forge_server_failed, error.message.orEmpty()),
@@ -187,5 +213,8 @@ internal class ForgeChatState(
     private companion object {
         const val PROVIDER_ID = "relay"
         const val RECONNECT_DELAY_MS = 1_000L
+
+        /** 上次成功写入 Linux 环境的共用配置指纹；没变就不重写、不重启 server。 */
+        var appliedConfigFingerprint: String? = null
     }
 }

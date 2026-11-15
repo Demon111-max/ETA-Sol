@@ -22,8 +22,9 @@ import io.github.mangi.eta.agent.terminal.LinuxDistribution
 import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.LinuxPackageProfiles
 import io.github.mangi.eta.agent.terminal.linuxPackageProfileReady
+import io.github.mangi.eta.agent.forge.ForgeSharedConfig
+import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
 import io.github.mangi.eta.data.model.AppearanceUiStyle
-import io.github.mangi.eta.data.repository.ForgeSettingsRepository
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.ListEmptyState
 import io.github.mangi.eta.ui.components.coui.CouiButton
@@ -50,12 +51,12 @@ internal sealed interface ForgeGateState {
 
 /**
  * Forge 页面的未就绪门禁：只做静态说明 + 一个跳转按钮，不自动安装、不做进度动画。
- * 检查顺序：Debian 环境 → opencode 是否已装 → Forge 配置是否已填。
+ * 检查顺序：Debian 环境 → opencode 是否已装 → 共用服务商配置是否可用。
  */
 @Composable
 internal fun ForgeScreen(
     onOpenLinuxEnvironment: () -> Unit,
-    onOpenForgeSettings: () -> Unit,
+    onOpenModelProviders: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -75,7 +76,7 @@ internal fun ForgeScreen(
         is ForgeGateState.Missing -> ForgeGateMissing(
             prerequisite = state.prerequisite,
             onOpenLinuxEnvironment = onOpenLinuxEnvironment,
-            onOpenForgeSettings = onOpenForgeSettings,
+            onOpenModelProviders = onOpenModelProviders,
             modifier = modifier,
         )
     }
@@ -85,7 +86,7 @@ internal fun ForgeScreen(
 private fun ForgeGateMissing(
     prerequisite: ForgePrerequisite,
     onOpenLinuxEnvironment: () -> Unit,
-    onOpenForgeSettings: () -> Unit,
+    onOpenModelProviders: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val (titleRes, summaryRes) = when (prerequisite) {
@@ -117,7 +118,7 @@ private fun ForgeGateMissing(
                     text = stringResource(actionRes),
                     onClick = {
                         if (prerequisite == ForgePrerequisite.Config) {
-                            onOpenForgeSettings()
+                            onOpenModelProviders()
                         } else {
                             onOpenLinuxEnvironment()
                         }
@@ -155,15 +156,7 @@ private fun checkForgeGate(context: android.content.Context): ForgeGateState {
     if (!linuxPackageProfileReady(rootfs, LinuxPackageProfiles.OPENCODE)) {
         return ForgeGateState.Missing(ForgePrerequisite.Opencode)
     }
-    val configured = runBlockingGate {
-        val settings = ForgeSettingsRepository.settings()
-        val credentials = try {
-            ForgeSettingsRepository.credentials(context)
-        } catch (_: Exception) {
-            null
-        }
-        credentials != null && ForgeSettingsRepository.isConfigured(settings, credentials)
-    }
+    val configured = runBlockingGate { resolveForgeSharedConfig() is ForgeSharedConfig.Ready }
     if (!configured) return ForgeGateState.Missing(ForgePrerequisite.Config)
     return ForgeGateState.Ready
 }
