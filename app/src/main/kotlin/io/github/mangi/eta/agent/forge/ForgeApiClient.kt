@@ -59,6 +59,18 @@ internal class ForgeApiClient(
         }
     }
 
+    /** 拉全部会话给侧边栏列表用（标题、更新时间都在里面）。 */
+    suspend fun listSessions(): Result<List<ForgeSessionSummary>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder().url("$baseUrl/session").get().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                val body = response.body.string().orEmpty()
+                ForgeProtocol.parseSessionSummaries(Json.parseToJsonElement(body))
+            }
+        }
+    }
+
     /** 查会话当前是否还在跑：SSE 断线重连后用它对齐 busy，光靠事件会漏掉断线期间的 idle。 */
     suspend fun sessionBusy(sessionId: String): Result<Boolean> = withContext(Dispatchers.IO) {
         runCatching {

@@ -63,6 +63,8 @@ internal fun ForgeScreen(
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
     newConversationSignal: Int = 0,
+    openSessionRequest: Pair<String, Int>? = null,
+    onSessionsChanged: (String?) -> Unit = {},
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
@@ -77,6 +79,8 @@ internal fun ForgeScreen(
             modifier = modifier.fillMaxSize(),
             topInset = topInset,
             newConversationSignal = newConversationSignal,
+            openSessionRequest = openSessionRequest,
+            onSessionsChanged = onSessionsChanged,
         )
 
         // 检查中保持空白：不引入任何进度指示。

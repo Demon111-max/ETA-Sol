@@ -1,7 +1,8 @@
 package io.github.mangi.eta.ui.model
 
 import androidx.compose.runtime.Immutable
-import io.github.mangi.eta.data.model.FORGE_CONVERSATION_ID
+import io.github.mangi.eta.agent.forge.ForgeSessionSummary
+import io.github.mangi.eta.data.model.forgeConversationId
 
 @Immutable
 data class ConversationPaneUiState(
@@ -36,31 +37,54 @@ enum class ConversationModeUi {
 }
 
 /**
- * 会话列表里补一条 Forge 对话。Forge 本期只有单会话，条目是合成出来的，不进数据库。
+ * 会话列表里补上 Forge 的真实会话（来自 opencode 的会话列表，不进 Eta 数据库，一个会话一条）：
+ * 与 Assist 未置顶会话按更新时间混排，置顶的 Assist 会话仍排在最前；搜索时按标题过滤。
  */
-internal fun ConversationPaneUiState.withForgeConversation(
-    forgeTitle: String,
+internal fun ConversationPaneUiState.withForgeConversations(
+    sessions: List<ForgeSessionSummary>,
     forgeOpen: Boolean,
+    activeSessionId: String?,
+    untitledTitle: String,
 ): ConversationPaneUiState {
     val query = searchQuery.trim()
     val assistConversations = conversations.filterNot { it.forge }
-    val matches = query.isEmpty() || forgeTitle.contains(query, ignoreCase = true)
-    if (!matches) return copy(conversations = assistConversations)
-    val entry = ConversationSummaryUi(
-        id = FORGE_CONVERSATION_ID,
-        title = forgeTitle,
-        preview = forgeTitle,
-        timeLabel = "",
-        mode = ConversationModeUi.Chat,
-        forge = true,
-    )
-    // Forge 条目排在置顶会话之后、普通会话之前：它 updatedAtMillis=0 会被判进「今天」组，
-    // 放在最前面会与置顶组后面的真实「今天」组撞出两个同名分组标题。
-    val insertAt = assistConversations.indexOfFirst { !it.isPinned }
-        .let { if (it < 0) assistConversations.size else it }
-    val merged = assistConversations.toMutableList().apply { add(insertAt, entry) }
+    val forgeEntries = sessions
+        .filter { query.isEmpty() || it.title.contains(query, ignoreCase = true) }
+        .map { session ->
+            val label = session.title.ifBlank { untitledTitle }
+            ConversationSummaryUi(
+                id = forgeConversationId(session.id),
+                title = label,
+                preview = label,
+                timeLabel = forgeTimeLabel(session.updatedAtMillis),
+                updatedAtMillis = session.updatedAtMillis,
+                mode = ConversationModeUi.Chat,
+                forge = true,
+            )
+        }
+    val pinned = assistConversations.filter { it.isPinned }
+    val rest = (assistConversations.filterNot { it.isPinned } + forgeEntries)
+        .sortedByDescending { it.updatedAtMillis }
     return copy(
-        conversations = merged,
-        selectedConversationId = if (forgeOpen) FORGE_CONVERSATION_ID else selectedConversationId,
+        conversations = pinned + rest,
+        selectedConversationId = if (forgeOpen) {
+            activeSessionId?.let { forgeConversationId(it) } ?: selectedConversationId
+        } else {
+            selectedConversationId
+        },
     )
+}
+
+/** Forge 条目的时间小字：今天只显示时刻，更早显示月-日。 */
+private fun forgeTimeLabel(updatedAtMillis: Long): String {
+    if (updatedAtMillis <= 0L) return ""
+    val startOfToday = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    val pattern = if (updatedAtMillis >= startOfToday) "HH:mm" else "MM-dd"
+    return java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault())
+        .format(java.util.Date(updatedAtMillis))
 }

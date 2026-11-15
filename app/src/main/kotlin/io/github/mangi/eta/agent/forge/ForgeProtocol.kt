@@ -72,6 +72,13 @@ internal data class ForgeChatMessage(
     val parts: List<ForgePart>,
 )
 
+/** 侧边栏 Forge 会话列表的一项：会话 id / 标题 / 最近更新时间（毫秒）。 */
+internal data class ForgeSessionSummary(
+    val id: String,
+    val title: String,
+    val updatedAtMillis: Long,
+)
+
 /** /event 上与本页面有关的事件。 */
 internal sealed interface ForgeEvent {
     data class PartUpdated(val sessionId: String, val part: ForgePart) : ForgeEvent
@@ -140,6 +147,22 @@ internal object ForgeProtocol {
             }
         }
         return bestId
+    }
+
+    /** 侧边栏列表用的会话摘要：id / 标题 / 最近更新时间，按最近更新倒序。 */
+    fun parseSessionSummaries(element: JsonElement): List<ForgeSessionSummary> {
+        val array = element as? JsonArray ?: return emptyList()
+        return array.mapNotNull { entry ->
+            val obj = entry as? JsonObject ?: return@mapNotNull null
+            val id = obj.stringOrNull("id") ?: return@mapNotNull null
+            val updated = ((obj["time"] as? JsonObject)?.get("updated") as? JsonPrimitive)
+                ?.contentOrNull?.toLongOrNull() ?: 0L
+            ForgeSessionSummary(
+                id = id,
+                title = obj.stringOrNull("title").orEmpty(),
+                updatedAtMillis = updated,
+            )
+        }.sortedByDescending { it.updatedAtMillis }
     }
 
     /** /session/status 的形状是 { 会话ID: { type: idle|busy|retry } }；查不到按不忙处理。 */

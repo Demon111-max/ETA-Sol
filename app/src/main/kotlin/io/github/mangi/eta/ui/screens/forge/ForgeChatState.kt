@@ -41,6 +41,8 @@ internal sealed interface ForgeStartup {
 internal class ForgeChatState(
     private val context: Context,
     private val scope: CoroutineScope,
+    /** 会话集合或当前会话变化时回调（新建、切换、一轮结束标题生成后），上层据此刷新侧边栏列表。 */
+    private val onSessionsChanged: (activeSessionId: String?) -> Unit = {},
 ) {
     var startup by mutableStateOf<ForgeStartup>(ForgeStartup.Connecting)
     var messages by mutableStateOf<List<ForgeChatMessage>>(emptyList())
@@ -50,7 +52,12 @@ internal class ForgeChatState(
     /** Forge 的思考档位：发送时按档位名选 opencode 配置里预置的 variant。 */
     var reasoningEffort by mutableStateOf(ReasoningEffort.DEFAULT)
 
-    private var sessionId: String? = null
+    /** 当前打开的 opencode 会话 id；侧边栏高亮与列表刷新要读它，所以做成可观察状态。 */
+    var sessionId: String? by mutableStateOf(null)
+        private set
+
+    /** 还没启动完就被要求打开的会话（从侧边栏点进来），start() 拿到服务后优先打开它。 */
+    private var pendingOpenSessionId: String? = null
     private var providerId: String = ForgeConfigWriter.PROVIDER_ID
     private var modelId: String = ""
     private var eventJob: Job? = null
@@ -102,7 +109,9 @@ internal class ForgeChatState(
 
                 is ForgeServerStartResult.Running -> Unit
             }
-            val id = api.ensureSession().getOrElse { error ->
+            val pending = pendingOpenSessionId
+            pendingOpenSessionId = null
+            val id = pending ?: api.ensureSession().getOrElse { error ->
                 startup = ForgeStartup.Failed(
                     context.getString(R.string.forge_server_failed, error.message.orEmpty()),
                 )
@@ -113,6 +122,7 @@ internal class ForgeChatState(
             api.sessionBusy(id).onSuccess { busy = it }
             startup = ForgeStartup.Ready
             subscribe(id)
+            onSessionsChanged(id)
         }
     }
 
@@ -156,6 +166,7 @@ internal class ForgeChatState(
                     notice = null
                     // 事件订阅按会话 ID 过滤，切了会话必须重订，否则新会话的事件全被丢掉。
                     subscribe(id)
+                    onSessionsChanged(id)
                 }
                 .onFailure { error ->
                     notice = context.getString(
@@ -163,6 +174,28 @@ internal class ForgeChatState(
                         error.message.orEmpty(),
                     )
                 }
+        }
+    }
+
+    /**
+     * 从侧边栏打开指定的 Forge 会话：切过去、拉它的消息、重订事件。
+     * 还没启动完时先记下目标，start() 会优先打开它，而不是最近用的会话。
+     */
+    fun openSession(id: String) {
+        if (id.isBlank()) return
+        if (startup !is ForgeStartup.Ready) {
+            pendingOpenSessionId = id
+            return
+        }
+        if (id == sessionId) return
+        scope.launch {
+            sessionId = id
+            messages = api.loadMessages(id).getOrDefault(emptyList())
+            busy = false
+            api.sessionBusy(id).onSuccess { busy = it }
+            notice = null
+            subscribe(id)
+            onSessionsChanged(id)
         }
     }
 
@@ -223,7 +256,11 @@ internal class ForgeChatState(
                 if (event.sessionId == session) ensureMessage(event.messageId, event.role)
             }
 
-            is ForgeEvent.Idle -> if (event.sessionId == session) busy = false
+            is ForgeEvent.Idle -> if (event.sessionId == session) {
+                busy = false
+                // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
+                onSessionsChanged(session)
+            }
 
             is ForgeEvent.Failed -> if (event.sessionId == session) {
                 busy = false

@@ -63,14 +63,21 @@ internal fun ForgeChatPane(
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
     newConversationSignal: Int = 0,
+    openSessionRequest: Pair<String, Int>? = null,
+    onSessionsChanged: (String?) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val state = remember { ForgeChatState(context.applicationContext, scope) }
+    val state = remember { ForgeChatState(context.applicationContext, scope, onSessionsChanged) }
     LaunchedEffect(Unit) { state.start() }
     // 「新建对话」信号变化时另起一个 opencode 会话；初始值 0 不触发。
     LaunchedEffect(newConversationSignal) {
         if (newConversationSignal > 0) state.newConversation()
+    }
+    // 侧边栏点开某个 Forge 会话：请求序号变化就切到目标会话。
+    LaunchedEffect(openSessionRequest) {
+        val request = openSessionRequest ?: return@LaunchedEffect
+        state.openSession(request.first)
     }
     DisposableEffect(Unit) { onDispose { state.shutdown() } }
 

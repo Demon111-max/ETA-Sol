@@ -50,6 +50,9 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.model.FORGE_CONVERSATION_ID
+import io.github.mangi.eta.data.model.forgeSessionIdOf
+import io.github.mangi.eta.agent.forge.ForgeApiClient
+import io.github.mangi.eta.agent.forge.ForgeSessionSummary
 import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
@@ -68,7 +71,7 @@ import io.github.mangi.eta.ui.model.AgentSkillsAction
 import io.github.mangi.eta.ui.model.AgentSystemEnhanceAction
 import io.github.mangi.eta.ui.model.AgentToolsAction
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
-import io.github.mangi.eta.ui.model.withForgeConversation
+import io.github.mangi.eta.ui.model.withForgeConversations
 import io.github.mangi.eta.ui.screens.forge.ForgeScreen
 import io.github.mangi.eta.ui.model.LOCAL_NETWORK_PERMISSION_ITEM_ID
 import io.github.mangi.eta.ui.model.PermissionHealthAction
@@ -196,10 +199,22 @@ fun AgentAppRoot(
     }
 
     var conversationPaneOpen by rememberSaveable { mutableStateOf(false) }
-    // Forge 本期只有单会话：打开与否用独立状态，不塞进 AgentAppState，避免影响 Assist 的会话逻辑。
+    // Forge 打开与否用独立状态，不塞进 AgentAppState，避免影响 Assist 的会话逻辑。
     var forgeOpen by rememberSaveable { mutableStateOf(false) }
     // Forge 里点「新建对话」的信号：计数递增，ForgeChatPane 收到新值就另起一个 opencode 会话。
     var forgeNewConversationSignal by remember { mutableStateOf(0) }
+    // Forge 的真实会话列表（来自 opencode，不进 Eta 数据库）：侧边栏按它一条会话生成一个条目。
+    var forgeSessions by remember { mutableStateOf<List<ForgeSessionSummary>>(emptyList()) }
+    var forgeActiveSessionId by remember { mutableStateOf<String?>(null) }
+    // 侧边栏点开某个 Forge 会话的请求：会话 id + 序号，ForgeChatPane 收到新序号就切过去。
+    var forgeOpenSessionRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
+
+    /** 向 opencode 拉一次会话列表刷新侧边栏；server 没在跑时静默失败、保留旧列表。 */
+    fun refreshForgeSessions() {
+        uiScope.launch {
+            ForgeApiClient().listSessions().onSuccess { forgeSessions = it }
+        }
+    }
     // 记住模式存 wireValue 字符串走 rememberSaveable：进程被杀重建后也保持，
     // 不会闪回 Assist 让新建对话开错模式（枚举本身不保证能被 rememberSaveable 保存）。
     var forgeNewConversationModeWire by rememberSaveable { mutableStateOf(ForgeChatMode.Assist.wireValue) }
@@ -218,6 +233,10 @@ fun AgentAppRoot(
         }
     }
     val chatMode = if (forgeOpen) ForgeChatMode.Forge else ForgeChatMode.Assist
+    // 侧边栏每次打开都刷新一次 Forge 会话列表（server 在跑才拿得到，失败保留旧列表）。
+    LaunchedEffect(conversationPaneOpen) {
+        if (conversationPaneOpen) refreshForgeSessions()
+    }
     var conversationRenameTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationDeleteTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationExportTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
@@ -322,6 +341,16 @@ fun AgentAppRoot(
     fun selectConversation(conversationId: String) {
         focusManager.clearFocus()
         conversationPaneOpen = false
+        val targetForgeSession = forgeSessionIdOf(conversationId)
+        if (targetForgeSession != null) {
+            // 打开某个具体的 Forge 会话：Forge 页切到那个 opencode 会话，Assist 状态不碰。
+            forgeOpen = true
+            forgeActiveSessionId = targetForgeSession
+            forgeOpenSessionRequest =
+                targetForgeSession to ((forgeOpenSessionRequest?.second ?: 0) + 1)
+            navigator.popToHome()
+            return
+        }
         if (conversationId == FORGE_CONVERSATION_ID) {
             // 打开 Forge 对话：不碰 Assist 的会话状态，正在运行的 Assist 继续跑。
             forgeOpen = true
@@ -386,9 +415,11 @@ fun AgentAppRoot(
         AgentAppShell(
             currentRoute = route,
             isCurrentRoute = backStack.lastOrNull() == route,
-            conversationPaneState = agentState.conversationPaneState.withForgeConversation(
-                forgeTitle = forgeTitle,
+            conversationPaneState = agentState.conversationPaneState.withForgeConversations(
+                sessions = forgeSessions,
                 forgeOpen = forgeOpen,
+                activeSessionId = forgeActiveSessionId,
+                untitledTitle = forgeTitle,
             ),
             isConversationPaneOpen = conversationPaneOpen,
             onBack = { popRoute() },
@@ -493,6 +524,11 @@ fun AgentAppRoot(
                             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
                             topInset = shellPadding.calculateTopPadding(),
                             newConversationSignal = forgeNewConversationSignal,
+                            openSessionRequest = forgeOpenSessionRequest,
+                            onSessionsChanged = { activeId ->
+                                forgeActiveSessionId = activeId
+                                refreshForgeSessions()
+                            },
                         )
                         return@RoutedShell
                     }
