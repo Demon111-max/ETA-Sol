@@ -1028,6 +1028,9 @@
   <string name="forge_working">opencode is working…</string>
   <string name="forge_empty_hint">Describe the change; opencode will work inside the Linux environment</string>
   <string name="forge_server_starting">Starting opencode…</string>
+  <string name="forge_startup_stage_preparing">Preparing configuration…</string>
+  <string name="forge_startup_stage_starting_server">Starting opencode server…</string>
+  <string name="forge_startup_stage_connecting">Connecting to session…</string>
   <string name="forge_server_failed_title">opencode did not start</string>
   <string name="forge_server_failed">Failed to start: %1$s</string>
   <string name="forge_retry">Retry</string>

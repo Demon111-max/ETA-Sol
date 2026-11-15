@@ -37,6 +37,13 @@ internal sealed interface ForgeStartup {
     data class Failed(val message: String) : ForgeStartup
 }
 
+/** 启动遮罩上的阶段：和 start() 的真实步骤一一对应，文字走资源。 */
+internal enum class ForgeStartupStage {
+    Preparing,
+    StartingServer,
+    Connecting,
+}
+
 /** 一次共用配置对齐的结果：启动与发送共用同一套处理，只在失败呈现上不同。 */
 private sealed interface ConfigApply {
     data object Ready : ConfigApply
@@ -87,6 +94,9 @@ internal class ForgeChatState(
     private val onSessionsChanged: (activeSessionId: String?) -> Unit = {},
 ) {
     var startup by mutableStateOf<ForgeStartup>(ForgeStartup.Connecting)
+
+    /** 启动遮罩显示的当前阶段，随 start() 的真实进度推进（仿 DSHA 启动屏的阶段文字）。 */
+    var startupStage by mutableStateOf(ForgeStartupStage.Preparing)
     var messages by mutableStateOf<List<ForgeChatMessage>>(emptyList())
     var busy by mutableStateOf(false)
     var notice by mutableStateOf<String?>(null)
@@ -123,6 +133,7 @@ internal class ForgeChatState(
         if (startJob?.isActive == true) return
         startJob = scope.launch {
             startup = ForgeStartup.Connecting
+            startupStage = ForgeStartupStage.Preparing
             notice = null
             // 配置与 Assist 共用同一套服务商设置：解析并应用（变了才重写配置并重启 server）。
             when (val applied = applySharedConfig()) {
@@ -140,6 +151,7 @@ internal class ForgeChatState(
 
                 ConfigApply.Ready -> Unit
             }
+            startupStage = ForgeStartupStage.StartingServer
             val environment = server.environment()
             when (val result = server.ensureRunning(environment)) {
                 is ForgeServerStartResult.Failed -> {
@@ -164,6 +176,7 @@ internal class ForgeChatState(
                 onSessionsChanged(null)
                 return@launch
             }
+            startupStage = ForgeStartupStage.Connecting
             val id = pending ?: api.ensureSession().getOrElse { error ->
                 startup = ForgeStartup.Failed(
                     context.getString(R.string.forge_server_failed, error.message.orEmpty()),

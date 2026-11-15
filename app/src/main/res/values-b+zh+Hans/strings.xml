@@ -1013,6 +1013,9 @@
   <string name="forge_working">opencode 正在执行…</string>
   <string name="forge_empty_hint">直接说要改什么，opencode 会在 Linux 环境里动手</string>
   <string name="forge_server_starting">正在启动 opencode…</string>
+  <string name="forge_startup_stage_preparing">正在准备配置…</string>
+  <string name="forge_startup_stage_starting_server">正在启动 opencode 服务…</string>
+  <string name="forge_startup_stage_connecting">正在连接会话…</string>
   <string name="forge_server_failed_title">opencode 没有启动</string>
   <string name="forge_server_failed">启动失败：%1$s</string>
   <string name="forge_retry">重试</string>

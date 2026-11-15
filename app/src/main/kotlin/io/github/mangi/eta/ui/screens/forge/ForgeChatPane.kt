@@ -1,5 +1,13 @@
 package io.github.mangi.eta.ui.screens.forge
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -7,14 +15,19 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -29,13 +42,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.forge.ForgeChatMessage
 import io.github.mangi.eta.agent.forge.ForgePart
@@ -62,6 +81,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -112,27 +132,35 @@ internal fun ForgeChatPane(
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            when (val startup = state.startup) {
-                ForgeStartup.Connecting -> ForgeCaption(
-                    text = stringResource(R.string.forge_server_starting),
-                    modifier = Modifier.padding(top = topInset + 12.dp, start = 14.dp),
-                )
+            // 启动遮罩、失败页、对话三态之间走交叉淡入淡出，不硬切（仿 DSHA 启动屏的收尾）。
+            AnimatedContent(
+                targetState = state.startup,
+                transitionSpec = {
+                    fadeIn(animationSpec = tween(240)) togetherWith
+                        fadeOut(animationSpec = tween(160))
+                },
+                label = "forgeStartup",
+                modifier = Modifier.fillMaxSize(),
+            ) { startup ->
+                when (startup) {
+                    ForgeStartup.Connecting -> ForgeStartupSplash(stage = state.startupStage)
 
-                is ForgeStartup.Failed -> Box(modifier = Modifier.padding(top = topInset)) {
-                    ListEmptyState(
-                    title = stringResource(R.string.forge_server_failed_title),
-                    summary = startup.message,
-                    icon = Icons.Rounded.ErrorOutline,
-                    action = {
-                        ForgeGateAction(
-                            text = stringResource(R.string.forge_retry),
-                            onClick = { state.retry() },
+                    is ForgeStartup.Failed -> Box(modifier = Modifier.padding(top = topInset)) {
+                        ListEmptyState(
+                        title = stringResource(R.string.forge_server_failed_title),
+                        summary = startup.message,
+                        icon = Icons.Rounded.ErrorOutline,
+                        action = {
+                            ForgeGateAction(
+                                text = stringResource(R.string.forge_retry),
+                                onClick = { state.retry() },
+                            )
+                        },
                         )
-                    },
-                    )
-                }
+                    }
 
-                ForgeStartup.Ready -> ForgeTranscript(state = state, topInset = topInset)
+                    ForgeStartup.Ready -> ForgeTranscript(state = state, topInset = topInset)
+                }
             }
         }
         if (state.startup is ForgeStartup.Ready) {
@@ -156,6 +184,103 @@ internal fun ForgeChatPane(
                 onSend = { text -> state.send(text) },
                 onStop = { state.stop() },
             )
+        }
+    }
+}
+
+/**
+ * Forge 启动遮罩（仿 DSHA 的启动屏）：中心一团淡光晕，终端符号 >_ 一笔笔把自己画出来，
+ * 下面 FORGE 字标淡入，再下面是小转圈 + 随真实启动进度变化的阶段文字。
+ * 就绪后由外层 AnimatedContent 交叉淡出到对话，不留一句光秃秃的「正在启动」。
+ */
+@Composable
+private fun ForgeStartupSplash(stage: ForgeStartupStage, modifier: Modifier = Modifier) {
+    val colors = MiuixTheme.colorScheme
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { shown = true }
+    val drawProgress by animateFloatAsState(
+        targetValue = if (shown) 1f else 0f,
+        animationSpec = tween(durationMillis = 700, easing = FastOutSlowInEasing),
+        label = "forgeStartupGlyph",
+    )
+    val textAlpha by animateFloatAsState(
+        targetValue = if (shown) 1f else 0f,
+        animationSpec = tween(durationMillis = 420, delayMillis = 240, easing = FastOutSlowInEasing),
+        label = "forgeStartupText",
+    )
+    Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(300.dp)
+                .background(
+                    brush = Brush.radialGradient(
+                        colors = listOf(colors.primary.copy(alpha = 0.12f), Color.Transparent),
+                    ),
+                    shape = CircleShape,
+                ),
+        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Canvas(modifier = Modifier.size(72.dp)) {
+                val stroke = 5.dp.toPx()
+                val w = size.width
+                val h = size.height
+                val chevronTop = Offset(w * 0.26f, h * 0.28f)
+                val chevronMid = Offset(w * 0.60f, h * 0.52f)
+                val chevronBottom = Offset(w * 0.26f, h * 0.76f)
+                val underlineStart = Offset(w * 0.52f, h * 0.84f)
+                val underlineEnd = Offset(w * 0.82f, h * 0.84f)
+                fun drawPartial(from: Offset, to: Offset, progress: Float) {
+                    if (progress <= 0f) return
+                    val end = if (progress >= 1f) {
+                        to
+                    } else {
+                        Offset(
+                            from.x + (to.x - from.x) * progress,
+                            from.y + (to.y - from.y) * progress,
+                        )
+                    }
+                    drawLine(
+                        color = colors.primary,
+                        start = from,
+                        end = end,
+                        strokeWidth = stroke,
+                        cap = StrokeCap.Round,
+                    )
+                }
+                // 进度分配：0–0.38 画 > 的上斜笔，0.38–0.76 下斜笔，0.76–1 下划线。
+                drawPartial(chevronTop, chevronMid, (drawProgress / 0.38f).coerceIn(0f, 1f))
+                drawPartial(chevronMid, chevronBottom, ((drawProgress - 0.38f) / 0.38f).coerceIn(0f, 1f))
+                drawPartial(underlineStart, underlineEnd, ((drawProgress - 0.76f) / 0.24f).coerceIn(0f, 1f))
+            }
+            Spacer(modifier = Modifier.height(20.dp))
+            Text(
+                text = "FORGE",
+                style = TextStyle(
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 7.sp,
+                ),
+                color = colors.onBackground.copy(alpha = textAlpha),
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.graphicsLayer { alpha = textAlpha },
+            ) {
+                InfiniteProgressIndicator(size = 16.dp)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = stringResource(
+                        when (stage) {
+                            ForgeStartupStage.Preparing -> R.string.forge_startup_stage_preparing
+                            ForgeStartupStage.StartingServer -> R.string.forge_startup_stage_starting_server
+                            ForgeStartupStage.Connecting -> R.string.forge_startup_stage_connecting
+                        },
+                    ),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = colors.onSurfaceVariantSummary,
+                )
+            }
         }
     }
 }
