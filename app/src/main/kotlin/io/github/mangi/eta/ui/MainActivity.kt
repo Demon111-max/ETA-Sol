@@ -17,6 +17,7 @@ import androidx.lifecycle.lifecycleScope
 import io.github.mangi.eta.agent.runtime.AgentRuntimeService
 import io.github.mangi.eta.agent.voice.EtaAssistantOverlayService
 import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.model.AppearanceThemeMode
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
 import io.github.mangi.eta.ui.app.AgentAppRoot
@@ -39,7 +40,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         launchRequests = MainActivityLaunchRequests.restore(savedInstanceState, intent)
         lifecycleScope.launch {
-            val initialAppearance = AppearanceSettingsRepository.settings()
+            // 读取失败也不能让 setContent 永远不执行：外观回落默认值，启动画面靠 contentReady 正常放行。
+            val initialAppearance = runCatching { AppearanceSettingsRepository.settings() }
+                .getOrElse { AppearanceSettings() }
             appliedPredictiveBackEnabled = initialAppearance.predictiveBackEnabled
             setContent {
                 val appearance by AppearanceSettingsRepository.settingsFlow()

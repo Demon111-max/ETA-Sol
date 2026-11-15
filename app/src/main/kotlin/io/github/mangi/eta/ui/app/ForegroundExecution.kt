@@ -2,7 +2,9 @@ package io.github.mangi.eta.ui.app
 
 import android.content.Context
 import io.github.mangi.eta.agent.runtime.AgentExecutionService
+import io.github.mangi.eta.core.AndroidAgentLogger
 import java.util.UUID
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -15,7 +17,12 @@ internal fun CoroutineScope.launchForegroundExecution(
     block: suspend () -> Unit,
 ): Job? {
     val id = "foreground-ui:${UUID.randomUUID()}"
-    val job = launch(start = CoroutineStart.LAZY) { block() }
+    val job = launch(
+        context = CoroutineExceptionHandler { _, failure ->
+            AndroidAgentLogger.error("Foreground execution failed", failure)
+        },
+        start = CoroutineStart.LAZY,
+    ) { block() }
     if (!AgentExecutionService.acquire(context, id, onStop = { job.cancel() })) {
         job.cancel()
         onUnavailable()

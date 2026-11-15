@@ -111,6 +111,11 @@ fun AgentAppTheme(
         context.resources.displayMetrics.density = targetDensity
         @Suppress("DEPRECATION")
         context.resources.displayMetrics.scaledDensity = targetDensity * configuration.fontScale
+    } else {
+        // 关闭缩放时把宿主密度写回基准：只靠 DisposableEffect 在特定时序下会漏恢复，缩放值会残留给独立窗口。
+        context.resources.displayMetrics.density = baseDensity
+        @Suppress("DEPRECATION")
+        context.resources.displayMetrics.scaledDensity = baseDensity * configuration.fontScale
     }
     DisposableEffect(context, applyInterfaceScale, baseDensity, configuration.fontScale) {
         onDispose {

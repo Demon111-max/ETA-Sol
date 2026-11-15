@@ -11,6 +11,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
 import io.github.mangi.eta.agent.browser.BrowserSessionRegistry
+import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
 import io.github.mangi.eta.ui.app.AgentAppTheme
 import kotlinx.coroutines.launch
@@ -27,7 +28,9 @@ class AgentBrowserActivity : ComponentActivity() {
         enableEdgeToEdge()
         val session = BrowserSessionRegistry.get(sessionKey)
         lifecycleScope.launch {
-            val initialAppearance = AppearanceSettingsRepository.settings()
+            // 与 MainActivity 对齐：外观读取失败时回落默认值，不能让 setContent 永远不执行、白屏挂死。
+            val initialAppearance = runCatching { AppearanceSettingsRepository.settings() }
+                .getOrElse { AppearanceSettings() }
             setContent {
                 val appearance by AppearanceSettingsRepository.settingsFlow().collectAsState(initialAppearance)
                 AgentAppTheme(

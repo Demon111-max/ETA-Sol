@@ -1004,13 +1004,16 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             )
         }
         val glowLp = glowLayoutParams()
-        runCatching { wm.addView(glow, glowLp) }.onFailure { throwable ->
+        val glowAdded = runCatching { wm.addView(glow, glowLp) }.onFailure { throwable ->
             AndroidAgentLogger.warnThrottled("runtime_glow_add_view_failed") {
                 "Agent runtime glow addView failed: type=${throwable.safeLogType()}"
             }
+        }.isSuccess
+        // 挂载失败就不能登记 glowView：后续 removeView(未挂载视图) 会抛异常并中断整条拆卸链。
+        if (glowAdded) {
+            glowView = glow
+            glowParams = glowLp
         }
-        glowView = glow
-        glowParams = glowLp
 
         // ── 状态胶囊窗口：状态栏下方居中，收起时一句状态（含微缩镜），点击展开控制与画廊视窗 ─
         val capsule = createOverlayComposeView {

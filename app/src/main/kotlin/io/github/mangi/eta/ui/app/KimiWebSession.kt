@@ -33,15 +33,20 @@ internal class KimiWebSession(
                 is DaemonStartResult.Started -> started.task.id.also { createdTaskId = it }
                 is DaemonStartResult.Failed -> return KimiWebLaunchResult.Failed(started.code)
             }
-            repeat(waitAttempts) {
+            repeat(waitAttempts) { attempt ->
                 val status = tasks.list().firstOrNull { it.task.id == taskId }
-                if (status == null || !status.running) return KimiWebLaunchResult.Failed("KIMI_EXITED")
-                val logs = tasks.logs(taskId)
-                if (!logs.ok) return KimiWebLaunchResult.Failed(logs.code.ifBlank { "LOGS_UNAVAILABLE" })
-                val url = addressFromLogs(logs.text)
-                if (url != null) {
-                    opened = openUrl(url)
-                    return if (opened) KimiWebLaunchResult.Opened(url) else KimiWebLaunchResult.Failed("BROWSER_UNAVAILABLE")
+                if (status != null && !status.running) return KimiWebLaunchResult.Failed("KIMI_EXITED")
+                if (status == null) {
+                    // 刚 start 的任务可能还没出现在 list 里，给它留出重试窗口，最后一轮仍缺席才判退出。
+                    if (attempt == waitAttempts - 1) return KimiWebLaunchResult.Failed("KIMI_EXITED")
+                } else {
+                    val logs = tasks.logs(taskId)
+                    if (!logs.ok) return KimiWebLaunchResult.Failed(logs.code.ifBlank { "LOGS_UNAVAILABLE" })
+                    val url = addressFromLogs(logs.text)
+                    if (url != null) {
+                        opened = openUrl(url)
+                        return if (opened) KimiWebLaunchResult.Opened(url) else KimiWebLaunchResult.Failed("BROWSER_UNAVAILABLE")
+                    }
                 }
                 delay(waitIntervalMs)
             }

@@ -747,8 +747,10 @@ internal object VirtualDisplayController {
                     proc.outputStream.write(req.toByteArray(Charsets.UTF_8))
                     proc.outputStream.flush()
                     proc.outputStream.close()
-                    val out = proc.inputStream.bufferedReader().readText()
-                    proc.waitFor(4, TimeUnit.SECONDS)
+                    // 先等进程结束再读输出：readText() 读到 EOF 为止，子进程不退出时会把 Binder 线程永久挂住。
+                    // 该命令只回一行小 JSON，不会撑满管道缓冲；超时未结束则按失败处理，finally 会终止进程。
+                    val finished = proc.waitFor(4, TimeUnit.SECONDS)
+                    val out = if (finished) proc.inputStream.bufferedReader().readText() else ""
                     out.contains("\"ok\":true")
                 } catch (_: Throwable) {
                     false

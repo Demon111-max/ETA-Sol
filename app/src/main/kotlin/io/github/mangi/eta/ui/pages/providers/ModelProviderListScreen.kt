@@ -36,6 +36,8 @@ import com.itos.coui.text.CouiTextKind
 import com.itos.coui.text.Text as CouiText
 import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ProviderSourceTypes
@@ -54,6 +56,7 @@ import io.github.mangi.eta.ui.components.coui.CouiSearchBarBox
 import io.github.mangi.eta.ui.components.coui.CouiSettingsIcon
 import io.github.mangi.eta.ui.navigation.AppRoute
 import io.github.mangi.eta.ui.navigation.NewProviderType
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Checkbox
@@ -74,6 +77,7 @@ internal fun ModelProviderListScreen(
     val selectedProviderId by RuntimeConfigRepository.selectedProviderIdFlow().collectAsState(initial = null)
     var searchQuery by remember { mutableStateOf("") }
     var providerToDelete by remember { mutableStateOf<ProviderSetting?>(null) }
+    var deletingProvider by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         RuntimeConfigRepository.ensureDefaults(EtaApp.serviceInstance)
@@ -297,12 +301,22 @@ internal fun ModelProviderListScreen(
     if (providerToDelete != null) {
         val target = providerToDelete
         val onConfirmDelete: () -> Unit = {
-            scope.launch {
-                target?.let { provider ->
-                    ProviderRepository.deleteProvider(provider.id)
-                    RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+            if (!deletingProvider) {
+                deletingProvider = true
+                scope.launch {
+                    try {
+                        target?.let { provider ->
+                            ProviderRepository.deleteProvider(provider.id)
+                            RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                        }
+                    } catch (failure: Throwable) {
+                        if (failure is CancellationException) throw failure
+                        AndroidAgentLogger.error("Provider delete failed", failure)
+                    } finally {
+                        deletingProvider = false
+                        providerToDelete = null
+                    }
                 }
-                providerToDelete = null
             }
         }
         when (LocalUiStyle.current) {

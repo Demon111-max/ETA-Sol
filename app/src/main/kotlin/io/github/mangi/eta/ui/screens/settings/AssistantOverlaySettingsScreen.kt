@@ -121,20 +121,24 @@ internal fun AssistantOverlaySettingsScreen(
         val keepEffort = currentEffort != null &&
             nextCapabilities?.selectableEfforts?.contains(currentEffort) == true
         scope.launch {
-            RuntimeConfigRepository.setAssistantOverlaySettings(
-                overlaySettings.copy(
-                    modelId = modelId,
-                    reasoningEffort = if (keepEffort) currentEffort.wireValue else null,
-                ),
-            )
+            runCatching {
+                RuntimeConfigRepository.setAssistantOverlaySettings(
+                    overlaySettings.copy(
+                        modelId = modelId,
+                        reasoningEffort = if (keepEffort) currentEffort.wireValue else null,
+                    ),
+                )
+            }
         }
     }
     val onEffortChange: (Int) -> Unit = { index ->
         val chosen = effortOptions.getOrNull(index)
         scope.launch {
-            RuntimeConfigRepository.setAssistantOverlaySettings(
-                overlaySettings.copy(reasoningEffort = chosen?.wireValue),
-            )
+            runCatching {
+                RuntimeConfigRepository.setAssistantOverlaySettings(
+                    overlaySettings.copy(reasoningEffort = chosen?.wireValue),
+                )
+            }
         }
     }
 

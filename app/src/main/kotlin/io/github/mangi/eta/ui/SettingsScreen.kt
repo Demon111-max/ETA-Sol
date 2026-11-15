@@ -102,6 +102,7 @@ import io.github.mangi.eta.ui.components.coui.CouiScaffoldPage
 import io.github.mangi.eta.ui.components.coui.CouiSettingsIcon
 import io.github.mangi.eta.ui.components.coui.CouiSwitchPreference
 import io.github.mangi.eta.ui.navigation.AppRoute
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -215,7 +216,8 @@ private fun SettingsPageContent(
     val appVersionName = appPackageInfo.versionName.orEmpty()
     val appVersionSummary = "${appPackageInfo.versionName} (${appPackageInfo.longVersionCode})"
     val openUrl: (String) -> Unit = { url ->
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        // 无浏览器/无可处理应用时 startActivity 会抛 ActivityNotFoundException，兜住避免崩溃。
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
     }
     var checkingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppLatestRelease?>(null) }
@@ -1303,15 +1305,25 @@ private fun SettingsPageContent(
             showSystemizerDialog = false
             installingSystemizer = true
             coroutineScope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    GoogleAppSystemizerInstaller(context.applicationContext).install()
+                try {
+                    val result = withContext(Dispatchers.IO) {
+                        GoogleAppSystemizerInstaller(context.applicationContext).install()
+                    }
+                    Toast.makeText(
+                        context.applicationContext,
+                        result.toToastMessage(context),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } catch (failure: Throwable) {
+                    if (failure is CancellationException) throw failure
+                    Toast.makeText(
+                        context.applicationContext,
+                        failure.message ?: "安装失败，请重试",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } finally {
+                    installingSystemizer = false
                 }
-                installingSystemizer = false
-                Toast.makeText(
-                    context.applicationContext,
-                    result.toToastMessage(context),
-                    Toast.LENGTH_LONG,
-                ).show()
             }
         },
     )

@@ -184,6 +184,8 @@ internal class AgentAppState(
             try {
                 recoverRuntimeRuns()
                 importArchivedExternalRuns()
+            } catch (failure: Throwable) {
+                AndroidAgentLogger.error("Runtime run recovery failed", failure)
             } finally {
                 runtimeRecoveryInProgress.set(false)
             }
@@ -254,6 +256,8 @@ internal class AgentAppState(
             try {
                 recoverRuntimeRuns()
                 importArchivedExternalRuns()
+            } catch (failure: Throwable) {
+                AndroidAgentLogger.error("Runtime run recovery failed", failure)
             } finally {
                 runtimeRecoveryInProgress.set(false)
             }
@@ -1450,7 +1454,7 @@ internal class AgentAppState(
         if (selectedConversationId == conversationId) {
             conversationPaneState = conversationPaneState.copy(selectedConversationId = conversationId)
         }
-        launchConversationRun(
+        val runLaunched = launchConversationRun(
             conversationId = conversationId,
             runId = runId,
             prompt = runtimePrompt,
@@ -1474,6 +1478,21 @@ internal class AgentAppState(
             },
             reasoningEffort = state.reasoningEffort,
         )
+        if (!runLaunched && !preserveCurrentDraft) {
+            // 注册被拒（已有 run 在跑等）时不能静默吞掉这条消息：把草稿放回输入区，用户可改后再发。
+            val draftText = messages.filterIsInstance<UserMessageUi>().lastOrNull()?.content.orEmpty()
+            conversationsById[conversationId]?.let { current ->
+                updateConversation(
+                    conversationId,
+                    current.copy(
+                        input = draftText,
+                        pendingImages = state.pendingImages,
+                        pendingFileReferences = state.pendingFileReferences,
+                    ),
+                )
+            }
+            AndroidAgentLogger.warn("Conversation run registration rejected; draft restored: $conversationId")
+        }
     }
 
     fun beginMessageEdit(messageId: String) {
@@ -1669,8 +1688,8 @@ internal class AgentAppState(
         reasoningEffort: ReasoningEffort,
         operation: String = AgentRuntimeWire.OP_CHAT,
         rewriteTargetMessageId: String? = null,
-    ) {
-        if (conversationId in pendingConversationDeletes || !runStore.register(runId, conversationId)) return
+    ): Boolean {
+        if (conversationId in pendingConversationDeletes || !runStore.register(runId, conversationId)) return false
         // 发送即绑定：会话记住本轮实际使用的模型，回落到默认模型时也随之更新。
         val runModelId = state.effectiveModelId
         val runReasoningEffort = providers.enabledModel(runModelId)?.let { (provider, model) ->
@@ -1823,11 +1842,12 @@ internal class AgentAppState(
                     content = "",
                     error = appContext.getString(R.string.capability_background_failed),
                 ))
-                return
+                return true
             }
             preparationJob.invokeOnCompletion { AgentExecutionService.release(leaseId) }
         }
         preparationJob.start()
+        return true
     }
 
     private fun List<PendingImageUi>.toHistoryImages(): List<AgentModelClient.ModelImage> =

@@ -1,5 +1,6 @@
 package io.github.mangi.eta.ui.app
 
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewTreeObserver
 import androidx.activity.ComponentActivity
@@ -17,6 +18,7 @@ private class StartupSplash(
     private val isContentReady: () -> Boolean,
 ) : DefaultLifecycleObserver, ViewTreeObserver.OnPreDrawListener {
     private val content = activity.findViewById<View>(android.R.id.content)
+    private val installedAtMs = SystemClock.uptimeMillis()
 
     fun install() {
         activity.lifecycle.addObserver(this)
@@ -25,7 +27,9 @@ private class StartupSplash(
     }
 
     override fun onPreDraw(): Boolean {
-        if (!isContentReady()) return false
+        // 就绪信号万一永远不来（配置读取异常等），超时后也要放行首帧，不能把用户锁在启动画面。
+        val timedOut = SystemClock.uptimeMillis() - installedAtMs >= READY_TIMEOUT_MS
+        if (!isContentReady() && !timedOut) return false
         content.viewTreeObserver.removeOnPreDrawListener(this)
         return true
     }
@@ -35,5 +39,9 @@ private class StartupSplash(
             content.viewTreeObserver.removeOnPreDrawListener(this)
         }
         activity.lifecycle.removeObserver(this)
+    }
+
+    private companion object {
+        const val READY_TIMEOUT_MS = 3_000L
     }
 }

@@ -115,9 +115,11 @@ internal fun ConversationTitleSettingsScreen(
 
     val onToggleEnabled: (Boolean) -> Unit = { checked ->
         scope.launch {
-            RuntimeConfigRepository.setConversationTitleSettings(
-                titleSettings.copy(enabled = checked),
-            )
+            runCatching {
+                RuntimeConfigRepository.setConversationTitleSettings(
+                    titleSettings.copy(enabled = checked),
+                )
+            }
         }
     }
     val onSelectModel: (String?) -> Unit = { modelId ->
@@ -130,20 +132,24 @@ internal fun ConversationTitleSettingsScreen(
         val keepEffort = currentEffort != null &&
             nextCapabilities?.selectableEfforts?.contains(currentEffort) == true
         scope.launch {
-            RuntimeConfigRepository.setConversationTitleSettings(
-                titleSettings.copy(
-                    modelId = modelId,
-                    reasoningEffort = if (keepEffort) currentEffort.wireValue else null,
-                ),
-            )
+            runCatching {
+                RuntimeConfigRepository.setConversationTitleSettings(
+                    titleSettings.copy(
+                        modelId = modelId,
+                        reasoningEffort = if (keepEffort) currentEffort.wireValue else null,
+                    ),
+                )
+            }
         }
     }
     val onEffortChange: (Int) -> Unit = { index ->
         val chosen = effortOptions.getOrNull(index)
         scope.launch {
-            RuntimeConfigRepository.setConversationTitleSettings(
-                titleSettings.copy(reasoningEffort = chosen?.wireValue),
-            )
+            runCatching {
+                RuntimeConfigRepository.setConversationTitleSettings(
+                    titleSettings.copy(reasoningEffort = chosen?.wireValue),
+                )
+            }
         }
     }
 

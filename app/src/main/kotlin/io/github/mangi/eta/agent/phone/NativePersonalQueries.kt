@@ -43,13 +43,9 @@ internal class NativePersonalQueries(
                 }
         }
         val start =
-            PhoneOperation.text(args, "start_time", false, 64)?.let {
-                OffsetDateTime.parse(it).toInstant()
-            }
+            PhoneOperation.text(args, "start_time", false, 64)?.let { parseTime(it) }
         val end =
-            PhoneOperation.text(args, "end_time", false, 64)?.let {
-                OffsetDateTime.parse(it).toInstant()
-            }
+            PhoneOperation.text(args, "end_time", false, 64)?.let { parseTime(it) }
         if (start != null && end != null && end <= start)
             PhoneOperation.error("INVALID_ARGUMENT", "结束时间必须晚于开始")
         if (source.time.isBlank() && (start != null || end != null))

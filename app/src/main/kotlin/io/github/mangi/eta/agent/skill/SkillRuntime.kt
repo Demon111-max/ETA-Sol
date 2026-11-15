@@ -149,7 +149,8 @@ private class BuiltinSkillAssetStore(
         listBuiltins().firstOrNull { it.id == skillId }
 
     fun seedMissingBuiltins(registryStore: SkillRegistryStore) {
-        val registry = registryStore.read()
+        // 必须用严格读：读失败时整表回写会抹掉用户状态与墓碑，宁可这次不播种。
+        val registry = runCatching { registryStore.readStrict() }.getOrElse { return }
         var changed = false
         listBuiltins().forEach { builtin ->
             val entry = registry[builtin.id]

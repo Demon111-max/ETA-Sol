@@ -136,9 +136,11 @@ internal fun SubagentSettingsScreen(
     var customProfiles by remember { mutableStateOf<List<SubagentProfile>>(emptyList()) }
     fun reloadCustomProfiles() {
         scope.launch {
-            customProfiles = withContext(Dispatchers.IO) {
-                SubagentProfileCatalog.listCustom()
-            }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    SubagentProfileCatalog.listCustom()
+                }
+            }.onSuccess { customProfiles = it }
         }
     }
     LaunchedEffect(Unit) {
@@ -196,16 +198,18 @@ internal fun SubagentSettingsScreen(
             subagentEnabled = checked
             Prefs.reconcileAgentPreferences(EtaApp.serviceInstance)
             scope.launch {
-                RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                runCatching { RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance) }
             }
         }
     }
     val onEffortChange: (Int) -> Unit = { index ->
         val chosen = effortOptions.getOrNull(index)
         scope.launch {
-            RuntimeConfigRepository.setSubagentSettings(
-                subagentSettings.copy(reasoningEffort = chosen?.wireValue),
-            )
+            runCatching {
+                RuntimeConfigRepository.setSubagentSettings(
+                    subagentSettings.copy(reasoningEffort = chosen?.wireValue),
+                )
+            }
         }
     }
     val onSaveDraft: (CustomSubagentDraft) -> Unit = { activeDraft ->
@@ -280,9 +284,11 @@ internal fun SubagentSettingsScreen(
                             onSelectModel = { modelId ->
                                 showModelSheet = false
                                 scope.launch {
-                                    RuntimeConfigRepository.setSubagentSettings(
-                                        subagentSettings.copy(modelId = modelId),
-                                    )
+                                    runCatching {
+                                        RuntimeConfigRepository.setSubagentSettings(
+                                            subagentSettings.copy(modelId = modelId),
+                                        )
+                                    }
                                 }
                             },
                         )
@@ -329,8 +335,10 @@ internal fun SubagentSettingsScreen(
                                         val targetName = currentProfile.name
                                         inspectedProfile = null
                                         scope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                SubagentProfileCatalog.deleteCustomProfile(targetName)
+                                            runCatching {
+                                                withContext(Dispatchers.IO) {
+                                                    SubagentProfileCatalog.deleteCustomProfile(targetName)
+                                                }
                                             }
                                             reloadCustomProfiles()
                                         }
@@ -500,9 +508,11 @@ internal fun SubagentSettingsScreen(
                             onSelectModel = { modelId ->
                                 showModelSheet = false
                                 scope.launch {
-                                    RuntimeConfigRepository.setSubagentSettings(
-                                        subagentSettings.copy(modelId = modelId),
-                                    )
+                                    runCatching {
+                                        RuntimeConfigRepository.setSubagentSettings(
+                                            subagentSettings.copy(modelId = modelId),
+                                        )
+                                    }
                                 }
                             },
                         )
@@ -541,8 +551,10 @@ internal fun SubagentSettingsScreen(
                                         val targetName = currentProfile.name
                                         inspectedProfile = null
                                         scope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                SubagentProfileCatalog.deleteCustomProfile(targetName)
+                                            runCatching {
+                                                withContext(Dispatchers.IO) {
+                                                    SubagentProfileCatalog.deleteCustomProfile(targetName)
+                                                }
                                             }
                                             reloadCustomProfiles()
                                         }

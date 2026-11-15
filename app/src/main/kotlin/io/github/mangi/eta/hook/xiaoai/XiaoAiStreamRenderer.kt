@@ -127,7 +127,8 @@ internal class XiaoAiStreamRenderer(
         }
         cardRetryCount.set(0)
         if (card.get() === targetCard) {
-            invokeCompatible(targetCard, "updateCardText", text)
+            // 与 createCard 里的反射调用对齐：宿主版本不匹配时 invoke 会抛，不能让它打断渲染回调链。
+            runCatching { invokeCompatible(targetCard, "updateCardText", text) }
         }
     }
 

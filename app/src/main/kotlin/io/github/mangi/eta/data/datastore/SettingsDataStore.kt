@@ -48,10 +48,15 @@ internal object SettingsDataStore {
 
     fun speechSettingsFlow(): Flow<SpeechSettings> {
         ensureInitialized()
-        return dataStore.data.map { prefs ->
-            prefs[SPEECH_SETTINGS]?.let { speechJson.decodeFromString<SpeechSettings>(it) }
-                ?: SpeechSettings()
-        }
+        return dataStore.data
+            .catch { cause ->
+                if (cause is IOException) emit(emptyPreferences()) else throw cause
+            }
+            .map { prefs ->
+                prefs[SPEECH_SETTINGS]?.let { raw ->
+                    runCatching { speechJson.decodeFromString<SpeechSettings>(raw) }.getOrNull()
+                } ?: SpeechSettings()
+            }
     }
 
     suspend fun speechSettings() = speechSettingsFlow().first()

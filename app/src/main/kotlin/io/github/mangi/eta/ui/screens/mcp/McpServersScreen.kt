@@ -65,6 +65,7 @@ import com.itos.coui.text.Text as CouiText
 import com.itos.coui.theme.CouiTheme
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.mcp.McpServerManager
+import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.agent.mcp.validateMcpEndpoint
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.McpAuthorizationType
@@ -94,6 +95,7 @@ import io.github.mangi.eta.ui.markdown.MarkdownTone
 import io.github.mangi.eta.ui.markdown.StaticMarkdown
 import io.github.mangi.eta.ui.navigation.AppRoute
 import io.github.mangi.eta.ui.screens.tools.GroupBatchTogglePill
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -444,6 +446,7 @@ internal fun McpServerDetailScreen(
     val server = servers.firstOrNull { it.id == serverId }
     var working by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
+    var deletingServer by remember { mutableStateOf(false) }
     var showToken by remember { mutableStateOf(false) }
     var token by remember { mutableStateOf("") }
 
@@ -679,9 +682,20 @@ internal fun McpServerDetailScreen(
                 confirmText = stringResource(R.string.ui_delete_3755f5),
                 destructive = true,
                 onConfirm = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { McpServerRepository.delete(serverId) }
-                        onBack()
+                    if (!deletingServer) {
+                        deletingServer = true
+                        showDelete = false
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) { McpServerRepository.delete(serverId) }
+                                onBack()
+                            } catch (failure: Throwable) {
+                                if (failure is CancellationException) throw failure
+                                AndroidAgentLogger.error("MCP server delete failed", failure)
+                            } finally {
+                                deletingServer = false
+                            }
+                        }
                     }
                 },
                 onDismissRequest = { showDelete = false },
@@ -859,9 +873,20 @@ internal fun McpServerDetailScreen(
                     destructive = true,
                     onCancel = { showDelete = false },
                     onConfirm = {
-                        scope.launch {
-                            withContext(Dispatchers.IO) { McpServerRepository.delete(serverId) }
-                            onBack()
+                        if (!deletingServer) {
+                            deletingServer = true
+                            showDelete = false
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) { McpServerRepository.delete(serverId) }
+                                    onBack()
+                                } catch (failure: Throwable) {
+                                    if (failure is CancellationException) throw failure
+                                    AndroidAgentLogger.error("MCP server delete failed", failure)
+                                } finally {
+                                    deletingServer = false
+                                }
+                            }
                         }
                     },
                 )

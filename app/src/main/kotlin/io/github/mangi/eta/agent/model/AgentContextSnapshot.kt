@@ -21,9 +21,11 @@ internal data class AgentContextSnapshot(
         private val codec = Json { ignoreUnknownKeys = true; encodeDefaults = false }
         fun decode(raw: String?): AgentContextSnapshot? {
             if (raw.isNullOrBlank()) return null
-            return codec.decodeFromString<AgentContextSnapshot>(raw).also {
-                require(it.version == 1 && it.operationId.isNotBlank())
-            }
+            return runCatching {
+                codec.decodeFromString<AgentContextSnapshot>(raw).also {
+                    require(it.version == 1 && it.operationId.isNotBlank())
+                }
+            }.getOrNull()
         }
     }
 }

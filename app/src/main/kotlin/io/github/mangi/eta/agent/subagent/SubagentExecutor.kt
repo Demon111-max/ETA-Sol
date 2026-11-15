@@ -133,7 +133,8 @@ internal class SubagentExecutor(
             )
         }
 
-        publishSnapshot(force = true)
+        // 在 try 之外：发布失败不能挡住后面的执行与 running 释放，用 runCatching 兜住。
+        runCatching { publishSnapshot(force = true) }
 
         val childToolExecutor = AgentModelClient.ToolExecutor { subCall ->
             childController.throwIfCancelled()

@@ -307,6 +307,8 @@ internal fun CommunityCatalogProviderScreen(
                     throw cancelled
                 } catch (_: IllegalArgumentException) {
                     importError = "模型选择已失效，请重新选择"
+                } catch (_: IllegalStateException) {
+                    importError = "导入正在进行，请稍候"
                 } catch (_: Throwable) {
                     importError = "保存提供商失败，请重试"
                 } finally {

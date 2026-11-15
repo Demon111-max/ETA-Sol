@@ -39,7 +39,13 @@ internal class WorkspaceFileStore(
             page.entries.forEach { entry ->
                 val target = if (entry.kind == FileToolKind.SYMLINK) backend.stat(backend.resolve(entry.path)) else entry
                 if (File(target.path).toPath().startsWith(root.toPath()) && target.kind in setOf(FileToolKind.FILE, FileToolKind.DIRECTORY)) {
-                    entries += WorkspaceEntry(File(entry.path).relativeTo(root).path, entry.name,
+                    val entryFile = File(entry.path)
+                    val displayPath = if (entryFile.toPath().startsWith(root.toPath())) {
+                        entryFile.relativeTo(root).path
+                    } else {
+                        entry.name
+                    }
+                    entries += WorkspaceEntry(displayPath, entry.name,
                         target.kind == FileToolKind.DIRECTORY, target.sizeBytes)
                 }
             }

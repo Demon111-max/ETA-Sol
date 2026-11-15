@@ -17,6 +17,7 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import io.github.mangi.eta.ui.components.ansiPlainText
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -132,9 +133,12 @@ internal class UserTerminalStore(
 
     private var blockId = 0L
 
-    /** 每个会话独立的块列表与流式输出缓冲；只有当前会话投影进 uiState.blocks。 */
-    private val sessionBlocks = mutableMapOf<String, List<TerminalBlockUi>>()
-    private val sessionBuffers = mutableMapOf<String, SessionOutput>()
+    /** 每个会话独立的块列表与流式输出缓冲；只有当前会话投影进 uiState.blocks。输出回调在后台线程写，必须用并发容器。 */
+    private val sessionBlocks = ConcurrentHashMap<String, List<TerminalBlockUi>>()
+    private val sessionBuffers = ConcurrentHashMap<String, SessionOutput>()
+
+    /** send 的在途守卫：running 标志要等协程跑到执行点才置位，这期间的连点靠它拦。 */
+    private var sendInFlight = false
 
     fun refreshLinuxReady() {
         val selected = LinuxEnvironmentSettingsRepository.current(appContext).terminalEnvironment
@@ -178,7 +182,11 @@ internal class UserTerminalStore(
     fun newSession() {
         val environment = _uiState.value.environment
         scope.launch {
-            openSessionInternal(environment)
+            try {
+                openSessionInternal(environment)
+            } catch (failure: Throwable) {
+                AndroidAgentLogger.error("Terminal session open failed", failure)
+            }
         }
     }
 
@@ -199,7 +207,11 @@ internal class UserTerminalStore(
     /** 关闭指定会话；关闭当前会话时切换到剩余最近的会话，没有则回到空态。 */
     fun closeSession(sessionId: String) {
         scope.launch {
-            withContext(Dispatchers.IO) { controller.stopSession(sessionId) }
+            runCatching {
+                withContext(Dispatchers.IO) { controller.stopSession(sessionId) }
+            }.onFailure { failure ->
+                AndroidAgentLogger.error("Terminal session stop failed", failure)
+            }
             sessionLeases.remove(sessionId)?.release()
             sessionBlocks.remove(sessionId)
             sessionBuffers.remove(sessionId)
@@ -253,27 +265,50 @@ internal class UserTerminalStore(
         if (command.length > 16_000) return
         val state = _uiState.value
         if (state.running) return
+        if (sendInFlight) return
+        sendInFlight = true
         val environment = state.environment
         scope.launch {
-            val sessionId = ensureSession(state, environment) ?: return@launch
-            val cwdAtStart = _uiState.value.sessions.find { it.id == sessionId }?.cwd.orEmpty()
-            val id = ++blockId
-            appendBlock(
-                sessionId,
-                TerminalBlockUi(
-                    id = id,
-                    command = command,
-                    cwdAtStart = cwdAtStart,
-                    running = true,
-                ),
-            )
-            updateSessionEntry(sessionId) { it.copy(running = true) }
-            sessionBuffers[sessionId] = SessionOutput()
-            val result = withContext(Dispatchers.IO) {
-                controller.exec(sessionId, command) { text, _ -> onOutputDelta(sessionId, id, text) }
+            var activeSessionId: String? = null
+            var activeBlockId: Long? = null
+            try {
+                val sessionId = ensureSession(state, environment) ?: return@launch
+                activeSessionId = sessionId
+                val cwdAtStart = _uiState.value.sessions.find { it.id == sessionId }?.cwd.orEmpty()
+                val id = ++blockId
+                activeBlockId = id
+                appendBlock(
+                    sessionId,
+                    TerminalBlockUi(
+                        id = id,
+                        command = command,
+                        cwdAtStart = cwdAtStart,
+                        running = true,
+                    ),
+                )
+                updateSessionEntry(sessionId) { it.copy(running = true) }
+                sessionBuffers[sessionId] = SessionOutput()
+                val result = withContext(Dispatchers.IO) {
+                    controller.exec(sessionId, command) { text, _ -> onOutputDelta(sessionId, id, text) }
+                }
+                flushOutput(sessionId, id)
+                finalizeBlock(sessionId, id, result)
+            } catch (failure: Throwable) {
+                if (failure is CancellationException) throw failure
+                AndroidAgentLogger.error("Terminal command dispatch failed", failure)
+                val sessionId = activeSessionId
+                val failedBlockId = activeBlockId
+                if (sessionId != null) {
+                    if (failedBlockId != null) {
+                        updateSessionBlocks(sessionId) { blocks ->
+                            blocks.map { if (it.id == failedBlockId) it.copy(running = false) else it }
+                        }
+                    }
+                    updateSessionEntry(sessionId) { it.copy(running = false) }
+                }
+            } finally {
+                sendInFlight = false
             }
-            flushOutput(sessionId, id)
-            finalizeBlock(sessionId, id, result)
         }
     }
 
@@ -537,8 +572,9 @@ internal class UserTerminalStore(
     }
 
     private fun updateSessionBlocks(sessionId: String, transform: (List<TerminalBlockUi>) -> List<TerminalBlockUi>) {
-        val updated = transform(sessionBlocks[sessionId].orEmpty())
-        sessionBlocks[sessionId] = updated
+        val updated = requireNotNull(
+            sessionBlocks.compute(sessionId) { _, current -> transform(current.orEmpty()) },
+        )
         _uiState.update { state ->
             if (state.activeSessionId == sessionId) state.copy(blocks = updated) else state
         }

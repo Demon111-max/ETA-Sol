@@ -65,6 +65,7 @@ import io.github.mangi.eta.ui.components.coui.CouiButton
 import io.github.mangi.eta.ui.components.coui.CouiLazyScaffoldPage
 import io.github.mangi.eta.ui.components.coui.CouiPreference
 import io.github.mangi.eta.ui.navigation.AppRoute
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -221,6 +222,9 @@ internal fun LinuxEnvironmentScreen(
         val operation: suspend () -> Unit = {
             try {
                 block()
+            } catch (failure: Throwable) {
+                if (failure is CancellationException) throw failure
+                resultMessage = failure.message ?: context.getString(R.string.capability_background_failed)
             } finally {
                 progress = null
                 debianProgress = null

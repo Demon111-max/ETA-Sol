@@ -30,6 +30,8 @@ internal object VirtualDisplaySystemHooks {
 
     private val activeEtaDisplayCreation = ThreadLocal.withInitial { false }
     private val activeEtaDisplayIds = ConcurrentHashMap.newKeySet<Int>()
+    /** 创建时的 callbacks 对象 → displayId，供 release 时把 id 从集合里摘掉，避免集合只增不减、id 被复用后误判。 */
+    private val etaDisplayCallbacks = ConcurrentHashMap<Any, Int>()
 
     fun install(
         module: XposedModule,
@@ -81,6 +83,20 @@ internal object VirtualDisplaySystemHooks {
         val releaseInvoker = module.getInvoker(releaseMethod)
 
         hooks.intercept(
+            id = "system.virtual-display-release-cleanup",
+            executable = releaseMethod,
+            description = "DisplayManagerService\$BinderService.releaseVirtualDisplay",
+        ) { chain ->
+            val result = chain.proceed()
+            chain.args.getOrNull(0)?.let { callback ->
+                etaDisplayCallbacks.remove(callback)?.let { displayId ->
+                    activeEtaDisplayIds.remove(displayId)
+                }
+            }
+            result
+        }
+
+        hooks.intercept(
             id = "system.virtual-display-create",
             executable = createMethod,
             description = "DisplayManagerService\$BinderService.createVirtualDisplay",
@@ -122,6 +138,7 @@ internal object VirtualDisplaySystemHooks {
                         return@intercept Display.INVALID_DISPLAY
                     }
                     activeEtaDisplayIds.add(result)
+                    args.getOrNull(1)?.let { callback -> etaDisplayCallbacks[callback] = result }
                 }
                 result
             } finally {

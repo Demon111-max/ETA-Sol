@@ -409,11 +409,14 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
                 return@withMatchingObservation
             }
-            scrollEventExecutor.execute {
-                if (!scrollEventObservationGate.isActive(observation)) return@execute
-                val signal = resolveScrollSignal(eventCopy) ?: return@execute
-                if (scrollEventObservationGate.isActive(observation)) {
-                    recordScrollSignal(signal)
+            // 服务销毁后 executor 已关停，execute 会抛 RejectedExecutionException；这里是回调线程，兜住只丢这一条滚动信号。
+            runCatching {
+                scrollEventExecutor.execute {
+                    if (!scrollEventObservationGate.isActive(observation)) return@execute
+                    val signal = resolveScrollSignal(eventCopy) ?: return@execute
+                    if (scrollEventObservationGate.isActive(observation)) {
+                        recordScrollSignal(signal)
+                    }
                 }
             }
         }

@@ -327,6 +327,12 @@ internal class ConsoleStore(
         scope.launch(Dispatchers.IO) {
             try {
                 startSession(environment, cols, rows)
+            } catch (failure: Throwable) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    _uiState.update {
+                        it.copy(failMessage = failure.message ?: appContext.getString(R.string.terminal_session_closed))
+                    }
+                }
             } finally {
                 withContext(NonCancellable + Dispatchers.Main) { creatingSession = false }
             }

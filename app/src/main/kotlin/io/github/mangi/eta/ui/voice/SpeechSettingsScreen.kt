@@ -60,7 +60,7 @@ internal fun SpeechSettingsScreen(onBack: () -> Unit, onNavigate: (AppRoute) -> 
                         enabled = current.tts != TtsProvider.NONE,
                         onCheckedChange = { enabled ->
                             scope.launch {
-                                SpeechSettingsRepository.save(current.copy(autoSpeak = enabled))
+                                runCatching { SpeechSettingsRepository.save(current.copy(autoSpeak = enabled)) }
                             }
                         },
                     )
@@ -103,7 +103,7 @@ internal fun SpeechSettingsScreen(onBack: () -> Unit, onNavigate: (AppRoute) -> 
                                 enabled = current.tts != TtsProvider.NONE,
                                 onCheckedChange = { enabled ->
                                     scope.launch {
-                                        SpeechSettingsRepository.save(current.copy(autoSpeak = enabled))
+                                        runCatching { SpeechSettingsRepository.save(current.copy(autoSpeak = enabled)) }
                                     }
                                 },
                             )

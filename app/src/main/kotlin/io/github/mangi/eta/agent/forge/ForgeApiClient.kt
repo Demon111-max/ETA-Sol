@@ -281,7 +281,9 @@ internal class ForgeApiClient(
             .get()
             .build()
         val call = eventClient.newCall(request)
-        currentCoroutineContext().job.invokeOnCancellation { call.cancel() }
+        currentCoroutineContext().job.invokeOnCompletion { cause ->
+            if (cause != null) call.cancel()
+        }
         call.execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val source = response.body.source() ?: throw IOException("empty event stream")
