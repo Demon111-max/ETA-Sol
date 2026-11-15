@@ -3,7 +3,7 @@ package io.github.mangi.eta.data.model
 /**
  * 顶栏 Assist / Forge 分段控件的模式。Assist 是现有 Eta Agent，Forge 直接由 opencode 驱动。
  */
-internal enum class ForgeChatMode(val wireValue: String) {
+enum class ForgeChatMode(val wireValue: String) {
     Assist("assist"),
     Forge("forge"),
     ;
