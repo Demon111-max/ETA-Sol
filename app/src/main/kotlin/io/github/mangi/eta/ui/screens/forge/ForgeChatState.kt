@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.screens.forge
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -43,6 +44,9 @@ internal enum class ForgeStartupStage {
     StartingServer,
     Connecting,
 }
+
+/** 遮罩最短展示时长（毫秒）：动画本身约 0.7 秒画完，这个时长保证它每次都完整播完再进对话。 */
+private const val FORGE_SPLASH_MIN_DURATION_MS = 1_250L
 
 /** 一次共用配置对齐的结果：启动与发送共用同一套处理，只在失败呈现上不同。 */
 private sealed interface ConfigApply {
@@ -134,6 +138,7 @@ internal class ForgeChatState(
         startJob = scope.launch {
             startup = ForgeStartup.Connecting
             startupStage = ForgeStartupStage.Preparing
+            val splashStartedAt = SystemClock.elapsedRealtime()
             notice = null
             // 配置与 Assist 共用同一套服务商设置：解析并应用（变了才重写配置并重启 server）。
             when (val applied = applySharedConfig()) {
@@ -172,6 +177,7 @@ internal class ForgeChatState(
                 messages = emptyList()
                 busy = false
                 pendingQuestion = null
+                awaitSplashMinDuration(splashStartedAt)
                 startup = ForgeStartup.Ready
                 onSessionsChanged(null)
                 return@launch
@@ -190,6 +196,7 @@ internal class ForgeChatState(
                 sessionId = null
                 messages = emptyList()
                 busy = false
+                awaitSplashMinDuration(splashStartedAt)
                 startup = ForgeStartup.Ready
                 onSessionsChanged(null)
                 return@launch
@@ -197,12 +204,23 @@ internal class ForgeChatState(
             sessionId = id
             messages = loaded.getOrDefault(emptyList())
             api.sessionBusy(id).onSuccess { busy = it }
+            awaitSplashMinDuration(splashStartedAt)
             startup = ForgeStartup.Ready
             subscribe(id)
             refreshPendingQuestion(id)
             onSessionsChanged(id)
             maybeSetFallbackTitle(id)
         }
+    }
+
+    /**
+     * 等遮罩的最短展示时长走完再进对话：server 已被开屏预热时 start() 会瞬间走完，
+     * 没有这道等待动画会被一闪而过——用户要的是每次进 Forge 都完整播一遍。
+     * 只等在 Ready 之前，失败路径不走这里，报错要立刻露出来。
+     */
+    private suspend fun awaitSplashMinDuration(startedAtMs: Long) {
+        val remaining = FORGE_SPLASH_MIN_DURATION_MS - (SystemClock.elapsedRealtime() - startedAtMs)
+        if (remaining > 0) delay(remaining)
     }
 
     fun retry() {
