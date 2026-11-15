@@ -18,7 +18,10 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,9 +73,14 @@ internal fun ForgeChatPane(
     val scope = rememberCoroutineScope()
     val state = remember { ForgeChatState(context.applicationContext, scope, onSessionsChanged) }
     LaunchedEffect(Unit) { state.start() }
-    // 「新建对话」信号变化时另起一个 opencode 会话；初始值 0 不触发。
+    // 「新建对话」信号递增时才另起新对话；面板重建时带着旧信号值进来不能重复触发，
+    // 否则从侧边栏点开某个会话、面板一重组就会被拽回空白页。
+    var consumedNewConversationSignal by remember { mutableStateOf(newConversationSignal) }
     LaunchedEffect(newConversationSignal) {
-        if (newConversationSignal > 0) state.newConversation()
+        if (newConversationSignal != consumedNewConversationSignal) {
+            consumedNewConversationSignal = newConversationSignal
+            state.newConversation()
+        }
     }
     // 侧边栏点开某个 Forge 会话：请求序号变化就切到目标会话。
     LaunchedEffect(openSessionRequest) {

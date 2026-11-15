@@ -58,6 +58,9 @@ internal class ForgeChatState(
 
     /** 还没启动完就被要求打开的会话（从侧边栏点进来），start() 拿到服务后优先打开它。 */
     private var pendingOpenSessionId: String? = null
+
+    /** 还没启动完就被要求开新对话（空白页），start() 就绪后不落到最近会话、直接空白。 */
+    private var pendingBlank = false
     private var providerId: String = ForgeConfigWriter.PROVIDER_ID
     private var modelId: String = ""
     private var eventJob: Job? = null
@@ -111,6 +114,16 @@ internal class ForgeChatState(
             }
             val pending = pendingOpenSessionId
             pendingOpenSessionId = null
+            if (pending == null && pendingBlank) {
+                // 启动期间就要求开新对话：连会话都不建，直接落到空白页。
+                pendingBlank = false
+                sessionId = null
+                messages = emptyList()
+                busy = false
+                startup = ForgeStartup.Ready
+                onSessionsChanged(null)
+                return@launch
+            }
             val id = pending ?: api.ensureSession().getOrElse { error ->
                 startup = ForgeStartup.Failed(
                     context.getString(R.string.forge_server_failed, error.message.orEmpty()),
@@ -133,11 +146,21 @@ internal class ForgeChatState(
     }
 
     fun send(text: String) {
-        val id = sessionId ?: return
         if (text.isBlank() || busy) return
         busy = true
         notice = null
         scope.launch {
+            // 空白新对话还没有会话：发送时才建，免得列表里堆空会话。
+            val id = sessionId ?: api.createSession().getOrElse { error ->
+                busy = false
+                notice = context.getString(R.string.forge_send_failed, error.message.orEmpty())
+                return@launch
+            }
+            if (sessionId == null) {
+                sessionId = id
+                subscribe(id)
+                onSessionsChanged(id)
+            }
             api.sendMessage(
                 id,
                 text,
@@ -152,29 +175,23 @@ internal class ForgeChatState(
     }
 
     /**
-     * 新建对话：另起一个 opencode 会话并切过去，界面清零；
-     * 旧会话留在服务端不删，正在跑的轮次也不受影响（事件按会话 ID 过滤）。
+     * 新建对话：回到空白页，**不立刻建会话**——会话等第一条消息发送时才建。
+     * 否则每点一次新建，列表里就多一条空的「New session - …」，
+     * 删除当前会话时也会立刻冒出一条新的，看起来像删不掉。
+     * 旧会话留在服务端不删，正在跑的轮次不受影响。
+     * 还没启动完时先记下，start() 就绪后直接落到空白页。
      */
     fun newConversation() {
-        if (startup !is ForgeStartup.Ready) return
-        scope.launch {
-            api.createSession()
-                .onSuccess { id ->
-                    sessionId = id
-                    messages = emptyList()
-                    busy = false
-                    notice = null
-                    // 事件订阅按会话 ID 过滤，切了会话必须重订，否则新会话的事件全被丢掉。
-                    subscribe(id)
-                    onSessionsChanged(id)
-                }
-                .onFailure { error ->
-                    notice = context.getString(
-                        R.string.forge_new_conversation_failed,
-                        error.message.orEmpty(),
-                    )
-                }
+        if (startup !is ForgeStartup.Ready) {
+            pendingBlank = true
+            return
         }
+        eventJob?.cancel()
+        sessionId = null
+        messages = emptyList()
+        busy = false
+        notice = null
+        onSessionsChanged(null)
     }
 
     /**
