@@ -1,0 +1,17 @@
+<!-- DeepSeek Harness (deepseek-ai/deepseek-harness, MIT) 图标 api-outline 的矢量复刻 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="16"
+    android:viewportHeight="16">
+    <path
+        android:pathData="M3 4L7 8L3 12"
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1" />
+    <path
+        android:pathData="M9 12H13"
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1" />
+</vector>

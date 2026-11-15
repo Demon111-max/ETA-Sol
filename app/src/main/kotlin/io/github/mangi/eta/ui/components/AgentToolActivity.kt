@@ -67,7 +67,7 @@ import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 工作过程之外单独出现的工具条目（例如旧会话或语音浮层），沿用时间线节点外观。
+ * 工作过程之外单独出现的工具条目（例如旧会话或语音浮层），与过程内同一副 dsh 行外观。
  */
 @Composable
 internal fun ToolActivityInline(
@@ -82,20 +82,13 @@ internal fun ToolActivityInline(
         return
     }
     Box(modifier = modifier.padding(horizontal = 20.dp, vertical = 2.dp)) {
-        WorkTimelineNode(
-            icon = iconForTool(message.toolName),
-            tone = message.status.nodeTone(),
-            isLast = true,
-            connectTop = false,
-        ) {
-            ToolActivityRow(message, onOpenBrowser, showBrowserShortcut)
-        }
+        ToolActivityRow(message, onOpenBrowser, showBrowserShortcut)
     }
 }
 
 /**
- * 工具的折叠形态是两行：做了什么，以及一行结论。命令、完整结果和浏览器预览只在展开后
- * 组合，长会话中成百上千个工具行保持轻量。
+ * dsh 工具行：折叠时一行——[图标] 工具名 · 摘要（失败时摘要换成错误首行、错误色）。
+ * 命令、完整结果和浏览器预览只在展开后组合，长会话中成百上千个工具行保持轻量。
  */
 @Composable
 internal fun ToolActivityRow(
@@ -137,7 +130,6 @@ internal fun ToolActivityRow(
         null
     }
     val failed = message.status == ToolActivityStatusUi.Failed
-    val title = message.argumentsSummary.ifBlank { toolDisplayName(message.toolName) }
     val outcome = remember(message.status, message.resultSummary) { message.outcomeLine() }
     val browserLine = browserSnapshot?.let { snapshot ->
         when {
@@ -147,7 +139,13 @@ internal fun ToolActivityRow(
             else -> null
         }
     }
-    val subtitle = browserLine ?: outcome
+    // 折叠行摘要：浏览器条目优先显示实时页面行；失败时按 dsh 惯例换成错误首行；
+    // 其余时候是调用摘要（命令/路径等）。
+    val summary = browserLine ?: if (failed) {
+        outcome ?: message.argumentsSummary.ifBlank { null }
+    } else {
+        message.argumentsSummary.ifBlank { null }
+    }
     // 结果只有一行且已作为结论显示时，展开不会带来新信息，不提供展开入口。
     val resultDetail = message.resultSummary?.trim()?.takeIf { it.isNotEmpty() && it != outcome }
     val hasDetail = !message.command.isNullOrBlank() ||
@@ -155,80 +153,40 @@ internal fun ToolActivityRow(
         showBrowserShortcut
 
     Column(modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = WorkRowHeight)
-                .clip(RoundedCornerShape(10.dp))
-                .then(if (hasDetail) Modifier.clickable { expanded = !expanded } else Modifier)
-                .padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        DshRowHeader(
+            icon = dshIconForTool(message.toolName),
+            title = if (showTitle) {
+                toolDisplayName(message.toolName)
+            } else {
+                summary ?: toolDisplayName(message.toolName)
+            },
+            summary = if (showTitle) summary else null,
+            running = running,
+            expanded = expanded,
+            expandable = hasDetail,
+            summaryError = failed,
+            onClick = { expanded = !expanded },
+        )
+        AnimatedVisibility(
+            visible = expanded,
+            enter = dshFoldEnter(),
+            exit = dshFoldExit(),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                if (showTitle) {
-                    val dark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
-                    ShimmerText(
-                        text = title,
-                        active = running,
-                        style = MiuixTheme.textStyles.body2.copy(fontSize = 13.5.sp),
-                        color = if (running) {
-                            MiuixTheme.colorScheme.onSurface
-                        } else {
-                            MiuixTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.56f else 0.52f)
-                        },
-                    )
-                }
-                if (subtitle != null) {
-                    Text(
-                        text = subtitle,
-                        style = if (message.isTerminalTool() && browserLine == null) {
-                            MiuixTheme.textStyles.footnote2.copy(fontFamily = EtaMonospace)
-                        } else {
-                            MiuixTheme.textStyles.footnote2
-                        },
-                        color = if (failed) {
-                            StatusError
-                        } else {
-                            MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.72f)
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = if (showTitle) 1.dp else 0.dp),
-                    )
-                }
-            }
-            if (elapsedSeconds != null && elapsedSeconds >= RUNNING_TIMER_THRESHOLD_SECONDS) {
-                Text(
-                    text = stringResource(R.string.tool_elapsed_seconds, elapsedSeconds),
-                    style = MiuixTheme.textStyles.footnote2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.72f),
-                    modifier = Modifier.padding(start = 8.dp),
+            Box(modifier = Modifier.padding(start = 4.dp)) {
+                ToolActivityDetail(
+                    message = message,
+                    browserSnapshot = browserSnapshot,
+                    showBrowserShortcut = showBrowserShortcut,
+                    onOpenBrowser = onOpenBrowser,
                 )
             }
-            if (hasDetail) {
-                ExpandChevron(
-                    expanded = expanded,
-                    contentDescription = stringResource(
-                        if (expanded) R.string.tool_details_collapse else R.string.tool_details_expand,
-                    ),
-                    modifier = Modifier.padding(start = 6.dp, end = 4.dp),
-                )
-            }
-        }
-
-        AnimatedVisibility(visible = expanded) {
-            ToolActivityDetail(
-                message = message,
-                browserSnapshot = browserSnapshot,
-                showBrowserShortcut = showBrowserShortcut,
-                onOpenBrowser = onOpenBrowser,
-            )
         }
     }
 }
 
 /**
- * 连续调用同一工具的分组：标题汇总次数，展开后每次调用只占一行，失败的调用仍可单独展开。
+ * 连续调用同一工具的分组：dsh 行形态——[图标] 工具名 · 摘要（运行中是最新一次调用的
+ * 摘要，失败时是失败计数，其余时候是调用次数），展开后每次调用各占一行。
  */
 @Composable
 internal fun ToolGroupRow(
@@ -239,81 +197,39 @@ internal fun ToolGroupRow(
     var expanded by rememberSaveable(group.key) { mutableStateOf(false) }
     val running = group.running
     val latest = group.calls.last()
-    val title = toolDisplayName(group.toolName) + " · " +
-        pluralStringResource(R.plurals.tool_group_calls, group.calls.size, group.calls.size)
-    val subtitle = when {
-        running -> latest.argumentsSummary.takeIf(String::isNotBlank)
+    val summary = when {
+        running -> latest.argumentsSummary.ifBlank { null }
         group.failedCount > 0 -> pluralStringResource(
             R.plurals.work_summary_failed,
             group.failedCount,
             group.failedCount,
         )
-        else -> null
+        else -> pluralStringResource(R.plurals.tool_group_calls, group.calls.size, group.calls.size)
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = WorkRowHeight)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable { expanded = !expanded }
-                .padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        DshRowHeader(
+            icon = dshIconForTool(group.toolName),
+            title = toolDisplayName(group.toolName),
+            summary = summary,
+            running = running,
+            expanded = expanded,
+            expandable = true,
+            summaryError = !running && group.failedCount > 0,
+            onClick = { expanded = !expanded },
+        )
+        AnimatedVisibility(
+            visible = expanded,
+            enter = dshFoldEnter(),
+            exit = dshFoldExit(),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                val dark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
-                ShimmerText(
-                    text = title,
-                    active = running,
-                    style = MiuixTheme.textStyles.body2.copy(fontSize = 13.5.sp),
-                    color = if (running) {
-                        MiuixTheme.colorScheme.onSurface
-                    } else {
-                        MiuixTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.56f else 0.52f)
-                    },
-                )
-                if (subtitle != null) {
-                    Text(
-                        text = subtitle,
-                        style = MiuixTheme.textStyles.footnote2,
-                        color = if (!running && group.failedCount > 0) {
-                            StatusError
-                        } else {
-                            MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.72f)
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 1.dp),
-                    )
-                }
-            }
-            ExpandChevron(
-                expanded = expanded,
-                contentDescription = stringResource(
-                    if (expanded) R.string.tool_details_collapse else R.string.tool_details_expand,
-                ),
-                modifier = Modifier.padding(start = 6.dp, end = 4.dp),
-            )
-        }
-        AnimatedVisibility(visible = expanded) {
-            Column(modifier = Modifier.padding(bottom = 4.dp)) {
+            Column(modifier = Modifier.padding(start = 22.dp, bottom = 4.dp)) {
                 group.calls.forEach { call ->
-                    Row(verticalAlignment = Alignment.Top) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 13.dp, end = 8.dp)
-                                .size(5.dp)
-                                .clip(CircleShape)
-                                .background(call.status.dotColor()),
-                        )
-                        ToolActivityRow(
-                            message = call,
-                            onOpenBrowser = onOpenBrowser,
-                            showBrowserShortcut = false,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
+                    ToolActivityRow(
+                        message = call,
+                        onOpenBrowser = onOpenBrowser,
+                        showBrowserShortcut = false,
+                    )
                 }
             }
         }

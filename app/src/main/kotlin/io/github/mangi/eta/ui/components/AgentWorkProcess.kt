@@ -79,8 +79,9 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 把连续的思考与工具调用收束为一条可展开的工作过程：折叠时只是一行摘要，展开后是
- * 左侧带连线的时间线。工作过程与正文同样不加卡片外壳，让最终回答保持视觉主角。
+ * 一轮里的思考与工具调用按 DeepSeek Harness 的形态逐行呈现：每条思考、每次工具
+ * 调用都是独立的 24dp 披露行（dsh 图标 + 标题 · 摘要），点行展开看详情。
+ * 进行中的轮次没有汇总头；轮次结束后出现一行汇总头（带底边发丝线），可折叠整段过程。
  */
 @Composable
 internal fun AgentWorkProcess(
@@ -111,33 +112,26 @@ internal fun AgentWorkProcess(
             .fillMaxWidth()
             .padding(horizontal = if (assistantOverlay) 16.dp else 20.dp, vertical = 2.dp),
     ) {
-        AgentWorkHeader(
-            messages = messages,
-            working = active || running,
-            expanded = bodyVisible,
-            onClick = { manualExpanded = !bodyVisible },
-        )
+        // dsh 形态：进行中的轮次没有汇总头，行直接出现在流里；轮次结束后
+        // 汇总头出现且过程默认收起，点汇总头展开整段。
+        if (!active) {
+            AgentWorkHeader(
+                messages = messages,
+                working = running,
+                expanded = bodyVisible,
+                onClick = { manualExpanded = !bodyVisible },
+            )
+        }
         AnimatedVisibility(
             visible = bodyVisible,
-            enter = fadeIn(tween(160)) + expandVertically(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioNoBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            ),
-            exit = fadeOut(tween(120)) + shrinkVertically(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioNoBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            ),
+            enter = dshFoldEnter(),
+            exit = dshFoldExit(),
         ) {
             Column(modifier = Modifier.padding(bottom = 6.dp)) {
-                steps.forEachIndexed { index, step ->
+                steps.forEach { step ->
                     key(step.key) {
                         AgentWorkStepNode(
                             step = step,
-                            isLast = index == steps.lastIndex,
                             onOpenBrowser = onOpenBrowser,
                             currentBrowserMessageId = currentBrowserMessageId,
                             retainedStreamingStates = retainedStreamingStates,
@@ -149,6 +143,10 @@ internal fun AgentWorkProcess(
     }
 }
 
+/**
+ * dsh 的 turn-process 汇总头：24dp 一行 14sp 弱色文字 + 末尾 14dp chevron-down
+ * （展开时旋转 180°，100ms），下方 8dp 间隔后一条 0.5dp 发丝线。只在轮次结束后出现。
+ */
 @Composable
 private fun AgentWorkHeader(
     messages: List<AgentChatMessageUi>,
@@ -170,43 +168,45 @@ private fun AgentWorkHeader(
         else -> workSummaryText(summary)
     }
     val colors = MiuixTheme.colorScheme
-    val isDark = colors.surface.luminance() < 0.5f
-    val mutedInk = colors.onSurface.copy(alpha = if (isDark) 0.56f else 0.52f)
-    val iconInk = colors.onSurface.copy(alpha = if (isDark) 0.50f else 0.45f)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = WorkRowHeight)
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(modifier = Modifier.width(WorkGutterWidth), contentAlignment = Alignment.Center) {
+    val tertiary = dshTertiaryColor()
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(100),
+        label = "work_header_chevron",
+    )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(24.dp)
+                .clickable(onClick = onClick),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ShimmerText(
+                text = text,
+                active = working,
+                style = MiuixTheme.textStyles.body2.copy(fontSize = 14.sp),
+                color = tertiary,
+                modifier = Modifier.weight(1f, fill = false),
+            )
             Icon(
-                imageVector = when {
-                    runningTool != null -> iconForTool(runningTool.toolName)
-                    working -> Icons.Rounded.Lightbulb
-                    else -> Icons.Rounded.Checklist
-                },
-                contentDescription = null,
-                modifier = Modifier.size(14.5.dp),
-                tint = if (working) colors.primary else iconInk,
+                imageVector = DshChevronDownIcon(),
+                contentDescription = stringResource(
+                    if (expanded) R.string.work_collapse else R.string.work_expand,
+                ),
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .size(14.dp)
+                    .graphicsLayer { rotationZ = chevronRotation },
+                tint = tertiary,
             )
         }
-        Spacer(modifier = Modifier.width(WorkGutterGap))
-        ShimmerText(
-            text = text,
-            active = working,
-            style = MiuixTheme.textStyles.body2.copy(fontSize = 13.5.sp),
-            color = mutedInk,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        ExpandChevron(
-            expanded = expanded,
-            contentDescription = stringResource(
-                if (expanded) R.string.work_collapse else R.string.work_expand,
-            ),
-            modifier = Modifier.padding(start = 4.dp, end = 4.dp),
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+                .height(0.5.dp)
+                .background(colors.outline.copy(alpha = 0.45f)),
         )
     }
 }
@@ -230,63 +230,34 @@ private fun workSummaryText(summary: AgentWorkSummary): String {
 @Composable
 private fun AgentWorkStepNode(
     step: AgentWorkStep,
-    isLast: Boolean,
     onOpenBrowser: () -> Unit,
     currentBrowserMessageId: String?,
     retainedStreamingStates: Map<String, StreamingMarkdownState>,
 ) {
     when (step) {
-        is AgentWorkStep.ToolGroup -> WorkTimelineNode(
-            icon = iconForTool(step.toolName),
-            tone = when {
-                step.running -> WorkNodeTone.Running
-                step.failedCount > 0 -> WorkNodeTone.Failed
-                else -> WorkNodeTone.Done
-            },
-            isLast = isLast,
-        ) {
-            ToolGroupRow(group = step, onOpenBrowser = onOpenBrowser)
-        }
+        is AgentWorkStep.ToolGroup -> ToolGroupRow(group = step, onOpenBrowser = onOpenBrowser)
 
         is AgentWorkStep.Single -> when (val message = step.message) {
-            is ToolActivityMessageUi -> WorkTimelineNode(
-                icon = iconForTool(message.toolName),
-                tone = message.status.nodeTone(),
-                isLast = isLast,
-            ) {
-                ToolActivityRow(
-                    message = message,
-                    onOpenBrowser = onOpenBrowser,
-                    showBrowserShortcut = message.id == currentBrowserMessageId,
-                )
-            }
+            is ToolActivityMessageUi -> ToolActivityRow(
+                message = message,
+                onOpenBrowser = onOpenBrowser,
+                showBrowserShortcut = message.id == currentBrowserMessageId,
+            )
 
-            is ThinkingMessageUi -> WorkTimelineNode(
-                icon = Icons.Rounded.Lightbulb,
-                tone = if (message.isStreaming) WorkNodeTone.Running else WorkNodeTone.Done,
-                isLast = isLast,
-            ) {
-                ThinkingRow(
-                    message = message,
-                    retainedStreamingState = retainedStreamingStates[message.id],
-                    compact = true,
-                )
-            }
+            is ThinkingMessageUi -> ThinkingRow(
+                message = message,
+                retainedStreamingState = retainedStreamingStates[message.id],
+                compact = true,
+            )
 
-            is ToolSummaryMessageUi -> WorkTimelineNode(
-                icon = Icons.Rounded.Build,
-                tone = WorkNodeTone.Done,
-                isLast = isLast,
-            ) {
-                ChatMessageItem(
-                    message = message,
-                    onSuggestionClick = {},
-                    onRunTraceClick = {},
-                    onOpenBrowser = onOpenBrowser,
-                    showBrowserShortcut = false,
-                    compact = true,
-                )
-            }
+            is ToolSummaryMessageUi -> ChatMessageItem(
+                message = message,
+                onSuggestionClick = {},
+                onRunTraceClick = {},
+                onOpenBrowser = onOpenBrowser,
+                showBrowserShortcut = false,
+                compact = true,
+            )
 
             else -> Unit
         }

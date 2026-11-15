@@ -1292,7 +1292,13 @@ internal fun ThinkingRow(
         ?.snapshot?.completedDocumentFor(message.content)
     // 展开态必须在组合期同步推导：若经 LaunchedEffect 晚一帧收起，思考结束的那一帧尾部窗口
     // 已解除而正文仍展开，会以全文高度闪现一帧，再从该高度执行收起动画。
-    val expanded = manualExpanded ?: message.isStreaming
+    // compact（对话流内）按 dsh 形态：流式中也不自动展开，折叠行只推进一行预览摘要，
+    // 展开与否只认手动选择；卡片形态保持流式自动展开。
+    val expanded = if (compact) {
+        manualExpanded ?: false
+    } else {
+        manualExpanded ?: message.isStreaming
+    }
     // 自动模式下高度上限覆盖到收起动画结束，退出过程不会先撑开再收拢。
     val tailWindow = manualExpanded == null
 
@@ -1301,7 +1307,7 @@ internal fun ThinkingRow(
         label = "thinking_pulse",
     )
 
-    // compact 模式渲染在工作过程时间线内，节点徽章已承担图标，这里只保留文字与展开控制。
+    // compact 模式渲染在对话流内，用 DshThinkingHeader 的 dsh 行形态；非 compact 是带描边的卡片。
     val containerModifier = if (compact) {
         modifier.fillMaxWidth()
     } else {
@@ -1320,6 +1326,13 @@ internal fun ThinkingRow(
     }
 
     Column(modifier = containerModifier) {
+        if (compact) {
+            DshThinkingHeader(
+                message = message,
+                expanded = expanded,
+                onClick = { manualExpanded = !expanded },
+            )
+        } else {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1382,8 +1395,13 @@ internal fun ThinkingRow(
                 modifier = Modifier.padding(start = 4.dp, end = if (compact) 4.dp else 0.dp),
             )
         }
+        }
 
-        AnimatedVisibility(visible = expanded && message.content.isNotBlank()) {
+        AnimatedVisibility(
+            visible = expanded && message.content.isNotBlank(),
+            enter = dshFoldEnter(),
+            exit = dshFoldExit(),
+        ) {
             Column {
                 if (!compact) {
                     Box(
@@ -1397,10 +1415,10 @@ internal fun ThinkingRow(
                 val contentModifier = Modifier
                     .fillMaxWidth()
                     .padding(
-                        start = if (compact) 0.dp else 12.dp,
-                        end = if (compact) 4.dp else 12.dp,
-                        top = if (compact) 3.dp else 8.dp,
-                        bottom = if (compact) 10.dp else 12.dp,
+                        start = if (compact) 22.dp else 12.dp,
+                        end = if (compact) 0.dp else 12.dp,
+                        top = if (compact) 4.dp else 8.dp,
+                        bottom = if (compact) 4.dp else 12.dp,
                     )
                 if (streamingState != null &&
                     (message.isStreaming || completedDocument == null || tailWindow)
@@ -1426,6 +1444,85 @@ internal fun ThinkingRow(
                 }
             }
         }
+    }
+}
+
+/**
+ * dsh 思考行标题行：[think 图标] 思考 · 预览摘要。折叠时摘要是思考正文首行
+ * （流式中是最新完成段落的首行，去掉 ** 标记），带扫光与右缘渐隐；
+ * 展开时行首图标换成 chevron-up（DshLeadingIcon 内部处理）。
+ */
+@Composable
+private fun DshThinkingHeader(
+    message: ThinkingMessageUi,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    val tertiary = dshTertiaryColor()
+    val textStyle = MiuixTheme.textStyles.body2.copy(fontSize = 13.sp)
+    val preview = remember(message.content, message.isStreaming) {
+        val raw = if (message.isStreaming) {
+            reasoningLatestParagraphFirstLine(message.content)
+        } else {
+            reasoningFirstLine(message.content)
+        }
+        raw.replace("**", "").trim()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        DshLeadingIcon(expanded = expanded, icon = DshThinkIcon(), tint = tertiary)
+        Spacer(modifier = Modifier.width(6.dp))
+        ShimmerText(
+            text = stringResource(R.string.process_think_title),
+            active = message.isStreaming,
+            style = textStyle,
+            color = tertiary,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (!expanded && preview.isNotEmpty()) {
+            DshRowDot()
+            ShimmerText(
+                text = preview,
+                active = message.isStreaming,
+                style = textStyle,
+                color = tertiary,
+                modifier = Modifier
+                    .weight(1f)
+                    .then(if (message.isStreaming) Modifier.dshStreamingFade() else Modifier),
+            )
+        }
+    }
+}
+
+/** dsh ReasoningRow 的摘要规则：静态取首行；流式取最新一个已完成段落的首行。 */
+private fun reasoningFirstLine(text: String): String {
+    val newline = text.indexOf('\n')
+    return if (newline == -1) text else text.substring(0, newline)
+}
+
+private fun reasoningLatestParagraphFirstLine(text: String): String {
+    var summary = ""
+    var paragraphStart = 0
+    val separator = Regex("\\r?\\n(?:[\\t ]*\\r?\\n)+")
+    while (true) {
+        val next = separator.find(text, paragraphStart)
+        val paragraphEnd = if (next == null) {
+            text.length
+        } else {
+            next.range.first + next.value.indexOf('\n')
+        }
+        val newline = text.indexOf('\n', paragraphStart)
+        if (newline != -1 && newline <= paragraphEnd) {
+            val candidate = text.substring(paragraphStart, newline).trim()
+            if (candidate.isNotEmpty()) summary = candidate
+        }
+        if (next == null) return summary
+        paragraphStart = next.range.last + 1
     }
 }
 
