@@ -59,6 +59,7 @@ import com.itos.coui.theme.LocalCouiTextStyle
 import com.itos.coui.topappbar.CouiTopAppBarDefaults
 import com.itos.coui.topappbar.TopAppBar as CouiTopAppBar
 import com.itos.coui.topappbar.TopAppBarButtonGroup
+import com.itos.coui.topappbar.TopAppBarSurface
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.ForgeChatMode
@@ -494,48 +495,57 @@ private fun HomeCouiTopBar(
     onChatModeSelected: (ForgeChatMode) -> Unit,
     centerContent: @Composable () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color)
-            .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
-            .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal))
-            .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top))
-            .height(CouiTopAppBarDefaults.height)
-            .clipToBounds()
-            .pointerInput(Unit) {
-                detectTapGestures { }
-            }
-            .padding(horizontal = TopBarHorizontalPadding),
-        horizontalArrangement = Arrangement.spacedBy(TopBarControlGap),
-        verticalAlignment = Alignment.CenterVertically,
+    // 菜单/三点按钮是 COUI 的 TopAppBarButton, 必须在顶栏效果作用域内组合, 否则首帧即抛
+    // "顶栏按钮必须位于顶栏效果作用域内"。用官方作用域提供者包住整行, 行内布局与视觉规格保持原样。
+    TopAppBarSurface(
+        modifier = Modifier.fillMaxWidth(),
+        // 自绘背景只覆盖栏内区域, 不在栏底额外向下延伸 12dp 绘制。
+        bottomExtension = 0.dp,
+        dark = dark,
     ) {
-        CouiTopAppBarIconButton(
-            icon = Icons.AutoMirrored.Outlined.ShortText,
-            contentDescription = stringResource(R.string.action_conversation_history),
-            onClick = onOpenConversationPane,
-            dark = dark,
-            colors = colors,
-        )
-        Box(
-            modifier = Modifier.weight(1f),
-            contentAlignment = Alignment.CenterStart,
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(color)
+                .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+                .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal))
+                .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top))
+                .height(CouiTopAppBarDefaults.height)
+                .clipToBounds()
+                .pointerInput(Unit) {
+                    detectTapGestures { }
+                }
+                .padding(horizontal = TopBarHorizontalPadding),
+            horizontalArrangement = Arrangement.spacedBy(TopBarControlGap),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            centerContent()
+            CouiTopAppBarIconButton(
+                icon = Icons.AutoMirrored.Outlined.ShortText,
+                contentDescription = stringResource(R.string.action_conversation_history),
+                onClick = onOpenConversationPane,
+                dark = dark,
+                colors = colors,
+            )
+            Box(
+                modifier = Modifier.weight(1f),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                centerContent()
+            }
+            AssistForgeSwitch(mode = chatMode, onModeSelected = onChatModeSelected)
+            CouiTopBarOverflowMenu(
+                dark = dark,
+                colors = colors,
+                onNewConversation = onNewConversation,
+                onOpenTerminal = onOpenTerminal,
+                onLaunchKimiWeb = onLaunchKimiWeb,
+                kimiWebLabel = kimiWebLabel,
+                canStopKimiWeb = canStopKimiWeb,
+                onStopKimiWeb = onStopKimiWeb,
+                onRefreshKimiWeb = onRefreshKimiWeb,
+                onOpenBrowser = onOpenBrowser,
+            )
         }
-        AssistForgeSwitch(mode = chatMode, onModeSelected = onChatModeSelected)
-        CouiTopBarOverflowMenu(
-            dark = dark,
-            colors = colors,
-            onNewConversation = onNewConversation,
-            onOpenTerminal = onOpenTerminal,
-            onLaunchKimiWeb = onLaunchKimiWeb,
-            kimiWebLabel = kimiWebLabel,
-            canStopKimiWeb = canStopKimiWeb,
-            onStopKimiWeb = onStopKimiWeb,
-            onRefreshKimiWeb = onRefreshKimiWeb,
-            onOpenBrowser = onOpenBrowser,
-        )
     }
 }
 
