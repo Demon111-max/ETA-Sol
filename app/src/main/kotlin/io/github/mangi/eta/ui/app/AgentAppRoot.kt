@@ -73,6 +73,7 @@ import io.github.mangi.eta.ui.model.AgentToolsAction
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
 import io.github.mangi.eta.ui.model.withForgeConversations
 import io.github.mangi.eta.ui.screens.forge.ForgeScreen
+import io.github.mangi.eta.ui.screens.forge.prewarmForgeServer
 import io.github.mangi.eta.ui.model.LOCAL_NETWORK_PERMISSION_ITEM_ID
 import io.github.mangi.eta.ui.model.PermissionHealthAction
 import io.github.mangi.eta.ui.model.PermissionStatusUi
@@ -248,6 +249,17 @@ fun AgentAppRoot(
     // 记住模式只决定「新建对话」开哪种，不决定开屏落点（开屏永远是 Assist，见 forgeOpen）。
     LaunchedEffect(Unit) {
         forgeNewConversationModeWire = SettingsDataStore.forgeChatMode().wireValue
+    }
+    // Forge 预热：开屏后就在后台把 opencode server 拉起来（没配好/环境没就绪会静默跳过），
+    // 第一次切到 Forge 时不用再等它启动。失败不打扰用户，进 Forge 时会再走完整启动流程。
+    LaunchedEffect(Unit) {
+        try {
+            prewarmForgeServer(context)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // 预热只是抢跑，失败无妨。
+        }
     }
     val chatMode = if (forgeOpen) ForgeChatMode.Forge else ForgeChatMode.Assist
     // 侧边栏每次打开都刷新一次 Forge 会话列表（server 在跑才拿得到，失败保留旧列表）。

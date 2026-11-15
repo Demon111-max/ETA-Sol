@@ -18,6 +18,8 @@ import io.github.mangi.eta.agent.forge.ForgeServerStartResult
 import io.github.mangi.eta.agent.forge.hasHttpCode
 import io.github.mangi.eta.agent.forge.ForgeSharedConfig
 import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
+import io.github.mangi.eta.data.model.ForgeCredentials
+import io.github.mangi.eta.data.model.ForgeSettings
 import io.github.mangi.eta.data.model.ReasoningEffort
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +44,35 @@ private sealed interface ConfigApply {
     data object NotConfigured : ConfigApply
 
     data class Failed(val output: String) : ConfigApply
+}
+
+/** 上次成功写入 Linux 环境的共用配置指纹；没变就不重写、不重启 server。 */
+private var appliedConfigFingerprint: String? = null
+
+private fun forgeConfigFingerprint(settings: ForgeSettings, credentials: ForgeCredentials): String =
+    settings.providerId + "\n" + settings.baseUrl + "\n" + settings.modelId +
+        "\n" + credentials.apiKey + "\n" + settings.endpointMode
+
+/**
+ * 开屏预热：App 一进来就在后台把当前共用配置写好、把 opencode server 拉起来，
+ * 用户第一次切到 Forge 时直接能用，不用再对着「正在启动」等。
+ * 没配好 / 环境没就绪就静默跳过——真进 Forge 时它自己会走门禁与完整启动流程；
+ * 指纹与 ForgeChatState 共用同一份，预热做过的对齐不会在进 Forge 时重做一遍。
+ */
+internal suspend fun prewarmForgeServer(context: Context) {
+    val shared = resolveForgeSharedConfig()
+    if (shared !is ForgeSharedConfig.Ready) return
+    val server = ForgeServerManager.default(context)
+    val fingerprint = forgeConfigFingerprint(shared.settings, shared.credentials)
+    if (fingerprint != appliedConfigFingerprint) {
+        if (ForgeConfigWriter.write(context, shared.settings, shared.credentials)
+            is ForgeConfigWriteResult.Written
+        ) {
+            appliedConfigFingerprint = fingerprint
+            server.restartIfRunning(server.environment())
+        }
+    }
+    server.ensureRunning(server.environment())
 }
 
 /**
@@ -178,9 +209,7 @@ internal class ForgeChatState(
         if (shared !is ForgeSharedConfig.Ready) return ConfigApply.NotConfigured
         modelId = shared.settings.modelId
         providerId = shared.settings.providerId
-        val fingerprint = shared.settings.providerId + "\n" + shared.settings.baseUrl +
-            "\n" + shared.settings.modelId + "\n" + shared.credentials.apiKey +
-            "\n" + shared.settings.endpointMode
+        val fingerprint = forgeConfigFingerprint(shared.settings, shared.credentials)
         if (fingerprint != appliedConfigFingerprint) {
             when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
                 ForgeConfigWriteResult.Written -> {
@@ -585,8 +614,5 @@ internal class ForgeChatState(
 
     private companion object {
         const val RECONNECT_DELAY_MS = 1_000L
-
-        /** 上次成功写入 Linux 环境的共用配置指纹；没变就不重写、不重启 server。 */
-        var appliedConfigFingerprint: String? = null
     }
 }
