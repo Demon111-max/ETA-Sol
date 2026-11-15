@@ -479,7 +479,7 @@ fun AgentAppRoot(
                         ForgeScreen(
                             onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
                             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
-                            modifier = Modifier.padding(top = shellPadding.calculateTopPadding()),
+                            topInset = shellPadding.calculateTopPadding(),
                         )
                         return@RoutedShell
                     }

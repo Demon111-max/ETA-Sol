@@ -7,12 +7,11 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
-import androidx.compose.foundation.gestures.AnchoredDraggableDefaults
 import androidx.compose.foundation.gestures.AnchoredDraggableState
 import androidx.compose.foundation.gestures.DraggableAnchors
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.anchoredDraggable
 import androidx.compose.foundation.gestures.animateTo
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +31,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
@@ -51,6 +52,7 @@ import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -119,13 +121,6 @@ fun ConversationSidePaneScaffold(
                 visibilityThreshold = ConversationPaneMetrics.SettleVisibilityThresholdPx,
             )
         }
-        val flingBehavior = AnchoredDraggableDefaults.flingBehavior(
-            state = paneDragState,
-            positionalThreshold = { distance ->
-                distance * ConversationPaneMetrics.SettlePositionThresholdFraction
-            },
-            animationSpec = settleAnimation,
-        )
         val currentVisible by rememberUpdatedState(visible)
         val currentOnOpen by rememberUpdatedState(onOpen)
         val currentOnDismiss by rememberUpdatedState(onDismiss)
@@ -212,14 +207,66 @@ fun ConversationSidePaneScaffold(
                 .clipToBounds()
                 .background(conversationPaneContainerColor())
                 // 手势由共同容器拥有，侧栏和聊天舞台均可拖动；子级先处理滚动与选择。
-                .anchoredDraggable(
-                    state = paneDragState,
-                    reverseDirection = false,
-                    orientation = Orientation.Horizontal,
-                    enabled = backHandlerEnabled && sceneLifecycleState == Lifecycle.State.RESUMED,
-                    flingBehavior = flingBehavior,
-                    interactionSource = dragInteractions,
-                ),
+                // 方向锁定：先攒够 20dp 位移再判方向，横向须明显占优（>纵向 1.5 倍）才接管，
+                // 子级已消费的位移视为滚动直接放弃；避免上滑时手指略向右偏就把侧栏带出来。
+                .pointerInput(paneDragState, backHandlerEnabled, sceneLifecycleState, paneWidthPx) {
+                    if (!backHandlerEnabled || sceneLifecycleState != Lifecycle.State.RESUMED) {
+                        return@pointerInput
+                    }
+                    val decisionDistancePx = 20.dp.toPx()
+                    val flingVelocityPx = 250.dp.toPx()
+                    val velocityTracker = VelocityTracker()
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        velocityTracker.resetTracking()
+                        velocityTracker.addPointerInputChange(down)
+                        var totalDx = 0f
+                        var totalDy = 0f
+                        var locked = false
+                        var aborted = false
+                        var startInteraction: DragInteraction.Start? = null
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            velocityTracker.addPointerInputChange(change)
+                            if (!change.pressed) break
+                            val delta = change.position - change.previousPosition
+                            if (!locked && !aborted) {
+                                if (change.isConsumed) {
+                                    aborted = true
+                                    continue
+                                }
+                                totalDx += delta.x
+                                totalDy += delta.y
+                                if (abs(totalDx) >= decisionDistancePx || abs(totalDy) >= decisionDistancePx) {
+                                    if (abs(totalDx) > abs(totalDy) * 1.5f) {
+                                        locked = true
+                                        startInteraction = DragInteraction.Start()
+                                        dragInteractions.tryEmit(startInteraction)
+                                    } else {
+                                        aborted = true
+                                    }
+                                }
+                                continue
+                            }
+                            if (locked) {
+                                change.consume()
+                                if (delta.x != 0f) paneDragState.dispatchRawDelta(delta.x)
+                            }
+                        }
+                        if (locked) {
+                            startInteraction?.let { dragInteractions.tryEmit(DragInteraction.Stop(it)) }
+                            val velocityX = velocityTracker.calculateVelocity().x
+                            val target = when {
+                                velocityX > flingVelocityPx -> ConversationPaneAnchor.Open
+                                velocityX < -flingVelocityPx -> ConversationPaneAnchor.Closed
+                                paneDragState.offset >= paneWidthPx / 2f -> ConversationPaneAnchor.Open
+                                else -> ConversationPaneAnchor.Closed
+                            }
+                            scope.launch { paneDragState.animateTo(target, settleAnimation) }
+                        }
+                    }
+                },
             contentAlignment = AbsoluteAlignment.TopLeft,
         ) {
             // 两个槽位并排测量和放置，由同一位移推移；不在聊天内容下面叠放侧栏。

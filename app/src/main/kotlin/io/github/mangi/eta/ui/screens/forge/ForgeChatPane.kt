@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.forge.ForgeChatMessage
@@ -58,7 +59,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 思考块、工具行、正文都复用现有组件，不经过 Eta 的 AgentLoop。
  */
 @Composable
-internal fun ForgeChatPane(modifier: Modifier = Modifier) {
+internal fun ForgeChatPane(modifier: Modifier = Modifier, topInset: Dp = 0.dp) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state = remember { ForgeChatState(context.applicationContext, scope) }
@@ -74,9 +75,11 @@ internal fun ForgeChatPane(modifier: Modifier = Modifier) {
             when (val startup = state.startup) {
                 ForgeStartup.Connecting -> ForgeCaption(
                     text = stringResource(R.string.forge_server_starting),
+                    modifier = Modifier.padding(top = topInset + 12.dp, start = 14.dp),
                 )
 
-                is ForgeStartup.Failed -> ListEmptyState(
+                is ForgeStartup.Failed -> Box(modifier = Modifier.padding(top = topInset)) {
+                    ListEmptyState(
                     title = stringResource(R.string.forge_server_failed_title),
                     summary = startup.message,
                     icon = Icons.Rounded.ErrorOutline,
@@ -86,9 +89,10 @@ internal fun ForgeChatPane(modifier: Modifier = Modifier) {
                             onClick = { state.retry() },
                         )
                     },
-                )
+                    )
+                }
 
-                ForgeStartup.Ready -> ForgeTranscript(state = state)
+                ForgeStartup.Ready -> ForgeTranscript(state = state, topInset = topInset)
             }
         }
         if (state.startup is ForgeStartup.Ready) {
@@ -108,11 +112,11 @@ internal fun ForgeChatPane(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ForgeTranscript(state: ForgeChatState) {
+private fun ForgeTranscript(state: ForgeChatState, topInset: Dp = 0.dp) {
     val messages = state.messages
     if (messages.isEmpty()) {
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().padding(top = topInset),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -128,10 +132,11 @@ private fun ForgeTranscript(state: ForgeChatState) {
         // 流式追加时贴住底部；用无动画的 scrollToItem，不引入新的滚动效果。
         listState.scrollToItem(messages.lastIndex)
     }
+    // 与 Assist 同款：列表整屏铺到顶栏底下，顶部留白走 contentPadding，顶栏才有内容可模糊。
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = topInset + 12.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         items(messages, key = { it.id }) { message ->

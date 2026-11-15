@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -15,6 +16,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.TextButton
 import io.github.mangi.eta.R
@@ -58,6 +61,7 @@ internal fun ForgeScreen(
     onOpenLinuxEnvironment: () -> Unit,
     onOpenModelProviders: () -> Unit,
     modifier: Modifier = Modifier,
+    topInset: Dp = 0.dp,
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
@@ -68,7 +72,7 @@ internal fun ForgeScreen(
 
     when (val state = gate) {
         // 门禁通过后直接进对话；检查中与未就绪保持同一块静态版面。
-        ForgeGateState.Ready -> ForgeChatPane(modifier = modifier.fillMaxSize())
+        ForgeGateState.Ready -> ForgeChatPane(modifier = modifier.fillMaxSize(), topInset = topInset)
 
         // 检查中保持空白：不引入任何进度指示。
         ForgeGateState.Checking -> Box(modifier = modifier.fillMaxSize())
@@ -77,7 +81,7 @@ internal fun ForgeScreen(
             prerequisite = state.prerequisite,
             onOpenLinuxEnvironment = onOpenLinuxEnvironment,
             onOpenModelProviders = onOpenModelProviders,
-            modifier = modifier,
+            modifier = modifier.padding(top = topInset),
         )
     }
 }
