@@ -28,6 +28,8 @@ data class ConversationSummaryUi(
     val characterAvatarPath: String? = null,
     /** Forge 对话在列表里的小标记；Assist 对话为 false。 */
     val forge: Boolean = false,
+    /** Forge 会话的 opencode 目录（环境内路径），侧边栏按工作区分组用；Assist 对话为 null。 */
+    val forgeDirectory: String? = null,
 )
 
 @Immutable
@@ -74,6 +76,7 @@ internal fun ConversationPaneUiState.withForgeConversations(
                 mode = ConversationModeUi.Chat,
                 isActiveRun = isBusy,
                 forge = true,
+                forgeDirectory = session.directory.ifBlank { null },
             )
         }
     val pinned = assistConversations.filter { it.isPinned }

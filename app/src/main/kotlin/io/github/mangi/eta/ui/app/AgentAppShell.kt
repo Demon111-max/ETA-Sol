@@ -139,6 +139,9 @@ internal fun AgentAppShell(
     homeModelPickerState: AgentModelPickerUiState? = null,
     chatMode: ForgeChatMode = ForgeChatMode.Assist,
     onChatModeSelected: (ForgeChatMode) -> Unit = {},
+    forgeWorkspaces: List<io.github.mangi.eta.agent.forge.ForgeWorkspace> = emptyList(),
+    onForgeNewConversationInWorkspace: (String) -> Unit = {},
+    onForgeWorkspacesChanged: () -> Unit = {},
     isHomeStreaming: Boolean = false,
     hasPermissionAttention: Boolean = false,
     onHomeModelSelected: (String) -> Unit = {},
@@ -310,6 +313,9 @@ internal fun AgentAppShell(
                 hasPermissionAttention = hasPermissionAttention,
                 chatMode = chatMode,
                 onChatModeSelected = onChatModeSelected,
+                forgeWorkspaces = forgeWorkspaces,
+                onForgeNewConversationInWorkspace = onForgeNewConversationInWorkspace,
+                onForgeWorkspacesChanged = onForgeWorkspacesChanged,
             ) {
                 pageContent()
             }

@@ -35,21 +35,43 @@ internal object ForgeWorkspaces {
     fun all(): List<ForgeWorkspace> =
         SharedFolderMounts.current().map { ForgeWorkspace(it.name, it.sourcePath) }
 
+    private const val PREFS_KEY_DEFAULT_CREATED = "forge_default_workspace_created"
+
+    private fun defaultCreated(): Boolean = runCatching {
+        Prefs.localAgentPreferences()?.getBoolean(PREFS_KEY_DEFAULT_CREATED, false)
+    }.getOrNull() == true
+
+    private fun markDefaultCreated() {
+        runCatching {
+            Prefs.localAgentPreferences()?.edit()
+                ?.putBoolean(PREFS_KEY_DEFAULT_CREATED, true)?.apply()
+        }
+    }
+
     /**
      * 确保默认工作区存在：已有同名挂载直接用；已有指向同一目录的挂载就用那条（不重复建）；
      * 都没有就建目录 + 追加挂载。动不了既有挂载。返回默认工作区，实在建不出来返回 null。
+     * 只在从没建过时自动建：用户主动移除过默认工作区就别再复活它，不然永远删不掉。
      */
     fun ensureDefault(): ForgeWorkspace? {
         val mounts = SharedFolderMounts.current()
         mounts.firstOrNull { it.name == DEFAULT_NAME }
-            ?.let { return ForgeWorkspace(it.name, it.sourcePath) }
+            ?.let {
+                markDefaultCreated()
+                return ForgeWorkspace(it.name, it.sourcePath)
+            }
         mounts.firstOrNull { it.sourcePath == DEFAULT_SOURCE }
-            ?.let { return ForgeWorkspace(it.name, it.sourcePath) }
+            ?.let {
+                markDefaultCreated()
+                return ForgeWorkspace(it.name, it.sourcePath)
+            }
+        if (defaultCreated()) return null
         runCatching { File(DEFAULT_SOURCE).mkdirs() }
         if (SharedFolderMounts.validateName(DEFAULT_NAME, mounts) != null) return null
         if (SharedFolderMounts.validateSource(DEFAULT_SOURCE, mounts) != null) return null
         val updated = mounts + SharedFolderMount(name = DEFAULT_NAME, sourcePath = DEFAULT_SOURCE)
         if (!SharedFolderMounts.save(updated)) return null
+        markDefaultCreated()
         return ForgeWorkspace(DEFAULT_NAME, DEFAULT_SOURCE)
     }
 

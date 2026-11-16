@@ -136,6 +136,8 @@ internal fun ForgeChatPane(
     newConversationSignal: Int = 0,
     openSessionRequest: Pair<String, Int>? = null,
     startBlank: Boolean = false,
+    workspaceRequest: Pair<String, Int>? = null,
+    workspaceStructureSignal: Int = 0,
     onSessionsChanged: (String?) -> Unit = {},
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
 ) {
@@ -146,9 +148,9 @@ internal fun ForgeChatPane(
     val state = remember {
         ForgeChatState(context.applicationContext, scope, onSessionsChanged).also { created ->
             if (startBlank) created.requestBlankOnStart()
+            if (workspaceRequest != null) created.requestWorkspaceOnStart(workspaceRequest.first)
         }
     }
-    var workspaceDialogOpen by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { state.start() }
     // 「新建对话」信号递增时才另起新对话；面板重建时带着旧信号值进来不能重复触发，
     // 否则从侧边栏点开某个会话、面板一重组就会被拽回空白页。
@@ -171,6 +173,27 @@ internal fun ForgeChatPane(
         consumedOpenSessionSeq = request.second
         state.openSession(request.first)
     }
+    // 「在指定工作区开新对话」请求（侧边栏工作区的「+」）：创建时带着的那一发已由
+    // requestWorkspaceOnStart 记下，这里只处理面板活着时新到的；已在该工作区就只开新对话。
+    var consumedWorkspaceSeq by remember { mutableStateOf(workspaceRequest?.second ?: 0) }
+    LaunchedEffect(workspaceRequest) {
+        val request = workspaceRequest ?: return@LaunchedEffect
+        if (request.second == consumedWorkspaceSeq) return@LaunchedEffect
+        consumedWorkspaceSeq = request.second
+        if (state.workspace?.name != request.first) {
+            state.switchWorkspace(request.first)
+        } else {
+            state.newConversation()
+        }
+    }
+    // 侧边栏里增删改名工作区后递增：当前工作区被波及才重启 server，没波及只刷新列表。
+    var consumedStructureSignal by remember { mutableStateOf(workspaceStructureSignal) }
+    LaunchedEffect(workspaceStructureSignal) {
+        if (workspaceStructureSignal != consumedStructureSignal) {
+            consumedStructureSignal = workspaceStructureSignal
+            state.onWorkspacesStructureChanged()
+        }
+    }
     // 空白进场且已就绪后又收到 startBlank（如上层重组）：强制回空白页，不落回任何会话。
     LaunchedEffect(startBlank, state.startup) {
         if (startBlank && state.startup is ForgeStartup.Ready && state.sessionId != null) {
@@ -186,7 +209,7 @@ internal fun ForgeChatPane(
         }
     }
 
-    // 底部整叠（提示条/提问卡/工作区条/输入区）的实测高度：列表按它抬高底部留白，
+    // 底部整叠（提示条/提问卡/输入区）的实测高度：列表按它抬高底部留白，
     // 停在底部时最后一行正好落在输入区上方，不被浮层盖住。
     var bottomStackHeight by remember { mutableStateOf(0.dp) }
     val density = LocalDensity.current
@@ -224,7 +247,6 @@ internal fun ForgeChatPane(
                     state = state,
                     topInset = topInset,
                     bottomInset = bottomStackHeight,
-                    onOpenWorkspaces = { workspaceDialogOpen = true },
                 )
             }
         }
@@ -267,10 +289,6 @@ internal fun ForgeChatPane(
                             onSkip = { state.dismissQuestion() },
                         )
                     }
-                    ForgeWorkspaceBar(
-                        workspace = state.workspace,
-                        onClick = { workspaceDialogOpen = true },
-                    )
                     ForgeComposer(
                         state = state,
                         onSend = { text -> state.send(text) },
@@ -279,375 +297,6 @@ internal fun ForgeChatPane(
                 }
             }
         }
-    }
-    if (workspaceDialogOpen && state.startup is ForgeStartup.Ready) {
-        ForgeWorkspaceDialog(
-            state = state,
-            onDismiss = { workspaceDialogOpen = false },
-        )
-    }
-}
-
-/**
- * 工作区管理弹窗（DSH 式）：列出全部工作区（名字 + 安卓路径），点行切换；
- * 可新建（填一个安卓文件夹路径）、改名、移除（只删记录、不删文件）。
- * 正在跑任务时切换/结构变更先确认——切换会重启 server、停掉当前任务。
- */
-@Composable
-private fun ForgeWorkspaceDialog(state: ForgeChatState, onDismiss: () -> Unit) {
-    var inputRequest by remember { mutableStateOf<ForgeWorkspaceInput?>(null) }
-    var pendingSwitch by remember { mutableStateOf<String?>(null) }
-    var pendingRemove by remember { mutableStateOf<ForgeWorkspace?>(null) }
-    val currentName = state.workspace?.name
-    // 失败文案先在组合期取好：点击回调里不能再调 stringResource。
-    val addFailedText = stringResource(R.string.forge_workspace_add_failed)
-    val renameFailedText = stringResource(R.string.forge_workspace_rename_failed)
-
-    fun requestSwitch(name: String) {
-        if (name == currentName) {
-            onDismiss()
-            return
-        }
-        if (state.busy) {
-            pendingSwitch = name
-        } else {
-            state.switchWorkspace(name)
-            onDismiss()
-        }
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(20.dp))
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.forge_workspace_title),
-                style = MiuixTheme.textStyles.title4,
-                color = MiuixTheme.colorScheme.onSurface,
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            state.workspaces.forEach { workspace ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { requestSwitch(workspace.name) }
-                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (workspace.name == currentName) {
-                        Icon(
-                            imageVector = Icons.Rounded.Check,
-                            contentDescription = null,
-                            tint = MiuixTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.width(16.dp))
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = workspace.name,
-                            style = MiuixTheme.textStyles.body2,
-                            color = MiuixTheme.colorScheme.onSurface,
-                        )
-                        Text(
-                            text = workspace.sourcePath,
-                            style = MiuixTheme.textStyles.footnote2,
-                            color = dshTertiaryColor(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    TextButton(
-                        text = stringResource(R.string.forge_workspace_rename),
-                        onClick = { inputRequest = ForgeWorkspaceInput.Rename(workspace) },
-                    )
-                    TextButton(
-                        text = stringResource(R.string.forge_workspace_remove),
-                        onClick = { pendingRemove = workspace },
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(
-                    text = stringResource(R.string.forge_workspace_add),
-                    onClick = { inputRequest = ForgeWorkspaceInput.Add },
-                )
-                TextButton(
-                    text = stringResource(R.string.forge_dialog_close),
-                    onClick = onDismiss,
-                )
-            }
-        }
-    }
-
-    when (val request = inputRequest) {
-        ForgeWorkspaceInput.Add -> ForgeTextInputDialog(
-            title = stringResource(R.string.forge_workspace_add_title),
-            initial = "/sdcard/Download/",
-            hint = stringResource(R.string.forge_workspace_add_hint),
-            confirmText = stringResource(R.string.forge_workspace_add),
-            onConfirm = { path ->
-                inputRequest = null
-                ForgeWorkspaces.add(path)
-                    .onSuccess { created ->
-                        state.refreshWorkspaces()
-                        requestSwitch(created.name)
-                    }
-                    .onFailure {
-                        state.notify(addFailedText)
-                    }
-            },
-            onDismiss = { inputRequest = null },
-        )
-
-        is ForgeWorkspaceInput.Rename -> ForgeTextInputDialog(
-            title = stringResource(R.string.forge_workspace_rename_title),
-            initial = request.workspace.name,
-            hint = stringResource(R.string.forge_workspace_rename_hint),
-            confirmText = stringResource(R.string.forge_workspace_rename),
-            onConfirm = { newName ->
-                inputRequest = null
-                val wasCurrent = request.workspace.name == currentName
-                ForgeWorkspaces.rename(request.workspace.name, newName)
-                    .onSuccess {
-                        if (wasCurrent) {
-                            state.restartAfterWorkspaceStructureChange()
-                        } else {
-                            state.refreshWorkspaces()
-                        }
-                    }
-                    .onFailure {
-                        state.notify(renameFailedText)
-                    }
-            },
-            onDismiss = { inputRequest = null },
-        )
-
-        null -> Unit
-    }
-
-    pendingSwitch?.let { name ->
-        ForgeConfirmDialog(
-            title = stringResource(R.string.forge_workspace_switch_confirm_title),
-            body = stringResource(R.string.forge_workspace_switch_confirm_body),
-            confirmText = stringResource(R.string.forge_workspace_switch),
-            onConfirm = {
-                pendingSwitch = null
-                state.switchWorkspace(name)
-                onDismiss()
-            },
-            onDismiss = { pendingSwitch = null },
-        )
-    }
-    pendingRemove?.let { workspace ->
-        ForgeConfirmDialog(
-            title = stringResource(R.string.forge_workspace_remove_confirm_title),
-            body = stringResource(R.string.forge_workspace_remove_confirm_body, workspace.name),
-            confirmText = stringResource(R.string.forge_workspace_remove),
-            onConfirm = {
-                pendingRemove = null
-                val wasCurrent = workspace.name == currentName
-                if (ForgeWorkspaces.remove(workspace.name)) {
-                    if (wasCurrent) {
-                        state.restartAfterWorkspaceStructureChange()
-                    } else {
-                        state.refreshWorkspaces()
-                    }
-                }
-            },
-            onDismiss = { pendingRemove = null },
-        )
-    }
-}
-
-private sealed interface ForgeWorkspaceInput {
-    data object Add : ForgeWorkspaceInput
-
-    data class Rename(val workspace: ForgeWorkspace) : ForgeWorkspaceInput
-}
-
-/** Forge 自己的小文本输入弹窗（工作区新建/改名共用）：一行输入 + 取消/确定。 */
-@Composable
-private fun ForgeTextInputDialog(
-    title: String,
-    initial: String,
-    hint: String,
-    confirmText: String,
-    onConfirm: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var value by remember { mutableStateOf(initial) }
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(20.dp))
-                .padding(18.dp),
-        ) {
-            Text(
-                text = title,
-                style = MiuixTheme.textStyles.title4,
-                color = MiuixTheme.colorScheme.onSurface,
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            BasicTextField(
-                value = value,
-                onValueChange = { value = it },
-                textStyle = MiuixTheme.textStyles.body2.copy(
-                    color = MiuixTheme.colorScheme.onSurface,
-                ),
-                cursorBrush = SolidColor(MiuixTheme.colorScheme.primary),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MiuixTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                decorationBox = { innerTextField ->
-                    Box {
-                        if (value.isEmpty()) {
-                            Text(
-                                text = hint,
-                                style = MiuixTheme.textStyles.body2,
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            )
-                        }
-                        innerTextField()
-                    }
-                },
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(
-                    text = stringResource(R.string.forge_dialog_cancel),
-                    onClick = onDismiss,
-                )
-                TextButton(
-                    text = confirmText,
-                    onClick = { onConfirm(value) },
-                    enabled = value.isNotBlank(),
-                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                )
-            }
-        }
-    }
-}
-
-/** Forge 自己的小确认弹窗（切工作区/移除工作区共用）。 */
-@Composable
-private fun ForgeConfirmDialog(
-    title: String,
-    body: String,
-    confirmText: String,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MiuixTheme.colorScheme.surface, RoundedCornerShape(20.dp))
-                .padding(18.dp),
-        ) {
-            Text(
-                text = title,
-                style = MiuixTheme.textStyles.title4,
-                color = MiuixTheme.colorScheme.onSurface,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = body,
-                style = MiuixTheme.textStyles.body2,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(
-                    text = stringResource(R.string.forge_dialog_cancel),
-                    onClick = onDismiss,
-                )
-                TextButton(
-                    text = confirmText,
-                    onClick = onConfirm,
-                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                )
-            }
-        }
-    }
-}
-
-/** 错误提示条：错误色 + 图标，别再用一行弱色灰字——用户看漏了就以为「没反应」。 */
-@Composable
-private fun ForgeNoticeBar(text: String, modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.ErrorOutline,
-            contentDescription = null,
-            tint = StatusError,
-            modifier = Modifier.size(14.dp),
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = text,
-            style = MiuixTheme.textStyles.footnote1,
-            color = StatusError,
-        )
-    }
-}
-
-/** 输入栏上方的工作区条：随时能看到当前在哪个文件夹干活、产出落在哪；点开切换/管理。 */
-@Composable
-private fun ForgeWorkspaceBar(workspace: ForgeWorkspace?, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .padding(horizontal = 16.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.FolderOpen,
-            contentDescription = null,
-            tint = dshTertiaryColor(),
-            modifier = Modifier.size(13.dp),
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = if (workspace != null) {
-                stringResource(R.string.forge_workspace_bar, workspace.name, workspace.sourcePath)
-            } else {
-                stringResource(R.string.forge_workspace_bar_fallback)
-            },
-            style = MiuixTheme.textStyles.footnote1,
-            color = dshTertiaryColor(),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -753,7 +402,6 @@ private fun ForgeTranscript(
     state: ForgeChatState,
     topInset: Dp = 0.dp,
     bottomInset: Dp = 0.dp,
-    onOpenWorkspaces: () -> Unit = {},
 ) {
     val messages = state.messages
     if (messages.isEmpty()) {
@@ -801,11 +449,6 @@ private fun ForgeTranscript(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 ForgeCaption(text = stringResource(R.string.forge_empty_hint))
-                Spacer(modifier = Modifier.height(14.dp))
-                TextButton(
-                    text = stringResource(R.string.forge_workspace_switch),
-                    onClick = onOpenWorkspaces,
-                )
             }
         }
         return
@@ -1182,7 +825,7 @@ private fun ForgeComposer(
     val queuedMessages = state.queuedTexts.mapIndexed { index, text ->
         QueuedMessageUi(id = "forge-queue-$index", content = text)
     }
-    // 底部渐隐与 imePadding 已由外层底部整叠统一提供（盖住工作区条/提问卡/输入区），
+    // 底部渐隐与 imePadding 已由外层底部整叠统一提供（盖住提问卡/输入区），
     // 这里只剩输入区本体，别再套一层渐隐免得交界处颜色叠深。
     Box(
         modifier = Modifier.fillMaxWidth(),

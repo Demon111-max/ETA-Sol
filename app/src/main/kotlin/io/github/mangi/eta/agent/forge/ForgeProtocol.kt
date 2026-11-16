@@ -101,11 +101,12 @@ internal data class ForgeChatMessage(
     val contextTokens: Long? = null,
 )
 
-/** 侧边栏 Forge 会话列表的一项：会话 id / 标题 / 最近更新时间（毫秒）。 */
+/** 侧边栏 Forge 会话列表的一项：会话 id / 标题 / 最近更新时间（毫秒）/ 所属目录（opencode 的会话目录，侧边栏按工作区分组用）。 */
 internal data class ForgeSessionSummary(
     val id: String,
     val title: String,
     val updatedAtMillis: Long,
+    val directory: String = "",
 )
 
 /** opencode question 工具的一个选项。 */
@@ -230,6 +231,7 @@ internal object ForgeProtocol {
                 id = id,
                 title = obj.stringOrNull("title").orEmpty(),
                 updatedAtMillis = updated,
+                directory = obj.stringOrNull("directory").orEmpty(),
             )
         }.sortedByDescending { it.updatedAtMillis }
     }

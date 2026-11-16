@@ -270,6 +270,9 @@ internal class ForgeChatState(
 
     /** 还没启动完就被要求开新对话（空白页），start() 就绪后不落到最近会话、直接空白。 */
     private var pendingBlank = false
+
+    /** 还没启动完就被要求在指定工作区开新对话（侧边栏工作区的「+」），start() 在拉起 server 前先把选择切过去。 */
+    private var pendingWorkspaceName: String? = null
     private var providerId: String = ForgeConfigWriter.PROVIDER_ID
     private var modelId: String = ""
     private var eventJob: Job? = null
@@ -343,6 +346,13 @@ internal class ForgeChatState(
                 }
 
                 ConfigApply.Ready -> Unit
+            }
+            pendingWorkspaceName?.let { target ->
+                pendingWorkspaceName = null
+                // 侧边栏指定了工作区开新对话：先把选择切过去，server 直接以新工作区
+                // 目录启动，并且落到空白页，不恢复旧工作区的最近会话。
+                ForgeWorkspaces.select(target)
+                pendingBlank = true
             }
             refreshWorkspaceState()
             startupStage = ForgeStartupStage.StartingServer
@@ -451,6 +461,20 @@ internal class ForgeChatState(
     fun restartAfterWorkspaceStructureChange() {
         refreshWorkspaceState()
         resetAndRestartServer()
+    }
+
+    /** 侧边栏里增删改名了工作区：当前工作区跟着变了才重启 server 切过去，没变只刷新列表。 */
+    fun onWorkspacesStructureChanged() {
+        val before = workspace?.name
+        refreshWorkspaceState()
+        if (workspace?.name != before) {
+            resetAndRestartServer()
+        }
+    }
+
+    /** 面板创建时记下「在指定工作区开新对话」，start() 拉起 server 前应用（见 start 内）。 */
+    fun requestWorkspaceOnStart(name: String) {
+        pendingWorkspaceName = name
     }
 
     /** 切工作区的公共收尾：废掉在途发送与订阅、回空白页、让 server 以当前工作区目录重启。 */
@@ -1107,39 +1131,56 @@ internal class ForgeChatState(
         }
     }
 
-    /** 收到内容活动时的统一处理：刷新活动时刻、撤销待确认的 idle、busy 兜底补置。 */
+    /** 收到内容活动时的统一处理：刷新活动时刻、busy 兜底补置。待确认的 idle 不在这里撤销——确认循环自己会看活动时刻，活动变了它会重新等一段静默期。 */
     private fun onSessionActivity() {
         lastActivityAtMs = SystemClock.elapsedRealtime()
-        idleConfirmJob?.cancel()
         if (!busy) {
             // 有 part 在动就说明这一轮在跑：打开会话时 busy 对齐失败留下的假空闲靠这里兜底。
             setBusy(true, "part-activity")
             markBusyObserved()
+            // idle 事件可能已经丢了（断线间隙）：给兜底置忙的轮次也挂上结束确认，
+            // 免得 busy 只能等人手动停止。确认走同一套「静默 + 服务端闲」双条件。
+            sessionId?.let { confirmIdle(it) }
         }
     }
 
     /**
      * session.idle 不能照单全收：opencode 在 question 等待等「让出」时刻也会发 idle，
      * 任务没干完就被收起、汇总头提前出现就是这么来的。收到 idle 先挂起，
-     * 800ms 后查服务端状态确认真闲、且期间没有新内容、没有待答提问，才收尾并续发队列。
+     * 等一段静默期后查服务端状态确认真闲、且期间没有新内容、没有待答提问，才收尾并续发队列。
+     * 确认必须是循环：以前等的那一拍里只要来一点新内容、或服务端状态慢半拍还报忙，
+     * 确认就被直接丢弃且再也不会重来——idle 事件已经消费掉了，busy 从此永远挂着
+     * （输出完了还在「正在思考」、停止按钮不收，就是这个洞）。现在两种情况都重新等下一拍，
+     * 直到真静默且服务端真闲才收尾；长任务期间服务端一直报忙，循环就一直守着，不误收。
      */
     private fun confirmIdle(session: String) {
         idleConfirmJob?.cancel()
-        val activityAtIdle = lastActivityAtMs
         idleConfirmJob = scope.launch {
-            delay(IDLE_CONFIRM_DELAY_MS)
-            if (sessionId != session) return@launch
-            if (pendingQuestion != null) return@launch
-            if (lastActivityAtMs != activityAtIdle) return@launch
-            if (api.sessionBusy(session).getOrNull() == true) {
-                AndroidAgentLogger.warn("Forge idle rejected: server still busy session=$session")
+            var rechecks = 0
+            while (true) {
+                val activityAtWaitStart = lastActivityAtMs
+                delay(if (rechecks == 0) IDLE_CONFIRM_DELAY_MS else IDLE_RECHECK_DELAY_MS)
+                if (sessionId != session) return@launch
+                if (pendingQuestion != null) return@launch
+                if (lastActivityAtMs != activityAtWaitStart) {
+                    // 等待期间又有新内容：这一轮还没完，重新等下一段静默期。
+                    rechecks = 0
+                    continue
+                }
+                if (api.sessionBusy(session).getOrNull() == true) {
+                    if (rechecks == 0) {
+                        AndroidAgentLogger.warn("Forge idle deferred: server still busy session=$session")
+                    }
+                    rechecks++
+                    continue
+                }
+                setBusy(false, "idle-confirmed")
+                // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
+                onSessionsChanged(session)
+                maybeSetFallbackTitle(session)
+                drainQueue()
                 return@launch
             }
-            setBusy(false, "idle-confirmed")
-            // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
-            onSessionsChanged(session)
-            maybeSetFallbackTitle(session)
-            drainQueue()
         }
     }
 
@@ -1306,6 +1347,9 @@ internal class ForgeChatState(
 
         /** session.idle 的去抖确认延迟：真结束不会在这期间有新内容，让出型 idle 会被服务端状态否掉。 */
         const val IDLE_CONFIRM_DELAY_MS = 800L
+
+        /** idle 确认没过（还有新内容 / 服务端还报忙）时，下一拍复查的间隔。 */
+        const val IDLE_RECHECK_DELAY_MS = 2_000L
 
         /** 打开会话后 busy 对齐失败的重试延迟。 */
         const val BUSY_ALIGN_RETRY_DELAY_MS = 600L

@@ -53,6 +53,8 @@ import io.github.mangi.eta.data.model.FORGE_CONVERSATION_ID
 import io.github.mangi.eta.data.model.forgeSessionIdOf
 import io.github.mangi.eta.agent.forge.ForgeApiClient
 import io.github.mangi.eta.agent.forge.ForgeSessionSummary
+import io.github.mangi.eta.agent.forge.ForgeWorkspace
+import io.github.mangi.eta.agent.forge.ForgeWorkspaces
 import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
@@ -217,6 +219,12 @@ fun AgentAppRoot(
     var forgeListLoadFailed by remember { mutableStateOf(false) }
     // 侧边栏点开某个 Forge 会话的请求：会话 id + 序号，ForgeChatPane 收到新序号就切过去。
     var forgeOpenSessionRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // Forge 工作区列表（侧边栏按工作区分组用），随会话列表一起刷新。
+    var forgeWorkspaces by remember { mutableStateOf<List<ForgeWorkspace>>(emptyList()) }
+    // 侧边栏工作区「+」的请求：在指定工作区开新对话（工作区名 + 序号）。
+    var forgeWorkspaceRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // 侧边栏里增删改名工作区后递增：ForgeChatPane 据此对齐当前工作区与 server。
+    var forgeWorkspaceStructureSignal by remember { mutableStateOf(0) }
     // 这次进 Forge 是否必须落到新对话空白页：模式切换与「新建」进来=true（用户定：
     // 点切换到另一个模式，必须先新建一个该模式的新会话）；从列表点开 Forge 条目或
     // 某个具体会话进来=false（恢复/打开目标会话）。每条打开 Forge 的路径都显式赋值，
@@ -229,6 +237,7 @@ fun AgentAppRoot(
      * 记下失败状态给抽屉里的说明行；列表为空时延迟重试一次，冷启动刚开抽屉别整批消失。
      */
     fun refreshForgeSessions() {
+        forgeWorkspaces = ForgeWorkspaces.all()
         uiScope.launch {
             val client = ForgeApiClient()
             client.listSessions()
@@ -460,6 +469,23 @@ fun AgentAppRoot(
         navigator.popToHome()
     }
 
+    /** 侧边栏工作区的「+」：在指定工作区开一个新的 Forge 对话（面板据请求切工作区并落空白页）。 */
+    fun createForgeConversationInWorkspace(name: String) {
+        focusManager.clearFocus()
+        conversationPaneOpen = false
+        forgeStartBlank = false
+        forgeOpen = true
+        forgeWorkspaceRequest = name to ((forgeWorkspaceRequest?.second ?: 0) + 1)
+        navigator.popToHome()
+    }
+
+    /** 侧边栏里增删改名了工作区：刷新本地列表，并通知 Forge 面板对齐当前工作区与 server。 */
+    fun onForgeWorkspacesChanged() {
+        forgeWorkspaces = ForgeWorkspaces.all()
+        forgeWorkspaceStructureSignal++
+        refreshForgeSessions()
+    }
+
     fun createConversation(targetMode: ForgeChatMode = forgeNewConversationMode) {
         focusManager.clearFocus()
         conversationPaneOpen = false
@@ -604,6 +630,9 @@ fun AgentAppRoot(
             onHomeModelSelected = agentState::selectModel,
             chatMode = chatMode,
             onChatModeSelected = { mode -> selectChatMode(mode) },
+            forgeWorkspaces = forgeWorkspaces,
+            onForgeNewConversationInWorkspace = { name -> createForgeConversationInWorkspace(name) },
+            onForgeWorkspacesChanged = { onForgeWorkspacesChanged() },
             onOpenCharacter = {
                 agentState.homeState.roleplay?.let { pushRoute(AppRoute.CharacterDetail(it.characterId)) }
             },
@@ -644,6 +673,8 @@ fun AgentAppRoot(
                             newConversationSignal = forgeNewConversationSignal,
                             openSessionRequest = forgeOpenSessionRequest,
                             startBlank = forgeStartBlank,
+                            workspaceRequest = forgeWorkspaceRequest,
+                            workspaceStructureSignal = forgeWorkspaceStructureSignal,
                             onSessionsChanged = { activeId ->
                                 forgeActiveSessionId = activeId
                                 refreshForgeSessions()

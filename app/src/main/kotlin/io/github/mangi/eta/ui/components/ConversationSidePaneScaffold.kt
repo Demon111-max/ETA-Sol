@@ -94,6 +94,9 @@ fun ConversationSidePaneScaffold(
     hasPermissionAttention: Boolean = false,
     chatMode: ForgeChatMode = ForgeChatMode.Assist,
     onChatModeSelected: (ForgeChatMode) -> Unit = {},
+    forgeWorkspaces: List<io.github.mangi.eta.agent.forge.ForgeWorkspace> = emptyList(),
+    onForgeNewConversationInWorkspace: (String) -> Unit = {},
+    onForgeWorkspacesChanged: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     val sceneLifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
@@ -300,6 +303,9 @@ fun ConversationSidePaneScaffold(
                         onOpenSkills = onOpenSkills,
                         onOpenCharacters = onOpenCharacters,
                         onOpenPermissions = onOpenPermissions,
+                        forgeWorkspaces = forgeWorkspaces,
+                        onForgeNewConversationInWorkspace = onForgeNewConversationInWorkspace,
+                        onForgeWorkspacesChanged = onForgeWorkspacesChanged,
                         modifier = Modifier
                             .focusProperties { onEnter = { if (!isRevealed) cancelFocusChange() } }
                             .focusGroup()

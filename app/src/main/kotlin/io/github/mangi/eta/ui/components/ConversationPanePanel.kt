@@ -33,11 +33,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Unarchive
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CreateNewFolder
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -82,9 +90,14 @@ import com.itos.coui.shape.CouiShape
 import com.itos.coui.text.CouiTextKind
 import com.itos.coui.text.Text as CouiText
 import com.itos.coui.theme.CouiTheme
+import androidx.compose.ui.window.Dialog
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.forge.ForgeArchivedSessions
+import io.github.mangi.eta.agent.forge.ForgeWorkspace
+import io.github.mangi.eta.agent.forge.ForgeWorkspaces
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.ForgeChatMode
+import io.github.mangi.eta.data.model.forgeSessionIdOf
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.coui.CouiIcon
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
@@ -100,6 +113,7 @@ import top.yukonga.miuix.kmp.basic.ListPopupColumn
 import top.yukonga.miuix.kmp.basic.ListPopupDefaults
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.LocalContentColor
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -123,6 +137,9 @@ internal fun ConversationPanePanel(
     hasPermissionAttention: Boolean,
     chatMode: ForgeChatMode,
     onChatModeSelected: (ForgeChatMode) -> Unit,
+    forgeWorkspaces: List<ForgeWorkspace> = emptyList(),
+    onForgeNewConversationInWorkspace: (String) -> Unit = {},
+    onForgeWorkspacesChanged: () -> Unit = {},
     onSearchChange: (String) -> Unit,
     onNewConversation: () -> Unit,
     onConversationSelected: (String) -> Unit,
@@ -142,6 +159,41 @@ internal fun ConversationPanePanel(
     val query = state.searchQuery.trim()
     val isSearching = query.isNotBlank()
     val groups = remember(state.conversations) { state.conversations.groupForDrawer() }
+    // Forge 模式的工作区视图：会话按 opencode 目录归到各工作区名下（见列表分支）。
+    // 归档是 App 侧本地记录；本地搜索只过滤 Forge 分区，不动底部全局搜索。
+    val isForgeMode = chatMode == ForgeChatMode.Forge
+    var forgeArchivedIds by remember { mutableStateOf(ForgeArchivedSessions.all()) }
+    var forgeShowArchived by remember { mutableStateOf(false) }
+    var forgeSearchOpen by remember { mutableStateOf(false) }
+    var forgeLocalQuery by remember { mutableStateOf("") }
+    var folderPickerOpen by remember { mutableStateOf(false) }
+    var workspaceActionTarget by remember { mutableStateOf<ForgeWorkspace?>(null) }
+    var workspaceRenameTarget by remember { mutableStateOf<ForgeWorkspace?>(null) }
+    var workspaceRemoveTarget by remember { mutableStateOf<ForgeWorkspace?>(null) }
+    var workspaceError by remember { mutableStateOf<String?>(null) }
+    val forgeConversations = remember(state.conversations, forgeArchivedIds, forgeShowArchived, forgeLocalQuery) {
+        state.conversations.filter { it.forge }
+            .filter { conversation ->
+                val sessionId = forgeSessionIdOf(conversation.id)
+                forgeShowArchived || sessionId == null || sessionId !in forgeArchivedIds
+            }
+            .filter {
+                forgeLocalQuery.isBlank() ||
+                    it.title.contains(forgeLocalQuery.trim(), ignoreCase = true) ||
+                    it.preview.contains(forgeLocalQuery.trim(), ignoreCase = true)
+            }
+    }
+    val forgeGroups = remember(forgeConversations, forgeWorkspaces) {
+        val byWorkspace = forgeWorkspaces.map { workspace ->
+            workspace to forgeConversations.filter { it.forgeDirectory == workspace.linuxPath }
+        }
+        val groupedIds = byWorkspace.flatMap { it.second }.map { it.id }.toSet()
+        val others = forgeConversations.filter { it.id !in groupedIds }
+        byWorkspace to others
+    }
+    val currentForgeWorkspaceName = remember(forgeWorkspaces) {
+        ForgeWorkspaces.currentSelection()?.name
+    }
     val containerColor = conversationPaneContainerColor()
     val isCoui = LocalUiStyle.current == AppearanceUiStyle.COUI
     val couiBackdrop = if (isCoui) rememberCouiBackdrop() else null
@@ -209,7 +261,77 @@ internal fun ConversationPanePanel(
                                 }
                             }
 
-                            if (state.conversations.isEmpty()) {
+                            if (isForgeMode && !isSearching) {
+                                // Forge 模式：会话按工作区分组（工作区头行带「...」管理与「+」新建），
+                                // 顶上一行是分区头：搜索 / 已归档显隐 / 添加工作区。
+                                item(key = "forge_ws_section_header") {
+                                    ForgeWorkspaceSectionHeader(
+                                        showArchived = forgeShowArchived,
+                                        onSearchClick = { forgeSearchOpen = !forgeSearchOpen },
+                                        onToggleArchived = { forgeShowArchived = !forgeShowArchived },
+                                        onAddWorkspace = { folderPickerOpen = true },
+                                    )
+                                }
+                                if (forgeSearchOpen) {
+                                    item(key = "forge_ws_search") {
+                                        ForgeWorkspaceSearchField(
+                                            query = forgeLocalQuery,
+                                            onQueryChange = { forgeLocalQuery = it },
+                                        )
+                                    }
+                                }
+                                val (workspaceGroups, otherForgeConversations) = forgeGroups
+                                workspaceGroups.forEach { (workspace, sessions) ->
+                                    item(key = "forge_ws_header_${workspace.name}") {
+                                        ForgeWorkspaceGroupHeader(
+                                            workspace = workspace,
+                                            isCurrent = workspace.name == currentForgeWorkspaceName,
+                                            onMenuClick = { workspaceActionTarget = workspace },
+                                            onNewConversation = {
+                                                onForgeNewConversationInWorkspace(workspace.name)
+                                            },
+                                        )
+                                    }
+                                    items(
+                                        items = sessions,
+                                        key = { "forge_ws_${workspace.name}_${it.id}" },
+                                    ) { conversation ->
+                                        ForgeConversationRow(
+                                            conversation = conversation,
+                                            selected = conversation.id == state.selectedConversationId,
+                                            archivedIds = forgeArchivedIds,
+                                            onClick = { onConversationSelected(conversation.id) },
+                                            onRename = { onConversationRename(conversation) },
+                                            onDelete = { onConversationDelete(conversation) },
+                                            onArchivedIdsChange = { forgeArchivedIds = it },
+                                        )
+                                    }
+                                }
+                                if (otherForgeConversations.isNotEmpty()) {
+                                    item(key = "forge_ws_others_header") {
+                                        ForgeOtherSessionsHeader()
+                                    }
+                                    items(
+                                        items = otherForgeConversations,
+                                        key = { "forge_ws_other_${it.id}" },
+                                    ) { conversation ->
+                                        ForgeConversationRow(
+                                            conversation = conversation,
+                                            selected = conversation.id == state.selectedConversationId,
+                                            archivedIds = forgeArchivedIds,
+                                            onClick = { onConversationSelected(conversation.id) },
+                                            onRename = { onConversationRename(conversation) },
+                                            onDelete = { onConversationDelete(conversation) },
+                                            onArchivedIdsChange = { forgeArchivedIds = it },
+                                        )
+                                    }
+                                }
+                                if (forgeWorkspaces.isEmpty() && forgeConversations.isEmpty()) {
+                                    item(key = "forge_ws_empty") {
+                                        EmptyConversations(isSearching = false)
+                                    }
+                                }
+                            } else if (state.conversations.isEmpty()) {
                                 item(key = "pane_empty_conversations") {
                                     EmptyConversations(isSearching = isSearching)
                                 }
@@ -299,6 +421,67 @@ internal fun ConversationPanePanel(
                     .width(0.5.dp)
                     .background(conversationPaneEdgeBorderColor()),
             )
+
+            // Forge 工作区管理弹窗群（文件夹选择器 / 改名 / 移除 / 报错），都挂在侧栏根 Box 里。
+            val workspaceAddFailedText = stringResource(R.string.forge_workspace_add_failed)
+            val workspaceRenameFailedText = stringResource(R.string.forge_workspace_rename_failed)
+            if (folderPickerOpen) {
+                FolderPickerDialog(
+                    onDismiss = { folderPickerOpen = false },
+                    onConfirm = { path ->
+                        folderPickerOpen = false
+                        ForgeWorkspaces.add(path)
+                            .onSuccess { created ->
+                                onForgeWorkspacesChanged()
+                                onForgeNewConversationInWorkspace(created.name)
+                            }
+                            .onFailure { workspaceError = workspaceAddFailedText }
+                    },
+                )
+            }
+            workspaceActionTarget?.let { workspace ->
+                ForgeWorkspaceActionDialog(
+                    workspace = workspace,
+                    onDismiss = { workspaceActionTarget = null },
+                    onRename = {
+                        workspaceActionTarget = null
+                        workspaceRenameTarget = workspace
+                    },
+                    onRemove = {
+                        workspaceActionTarget = null
+                        workspaceRemoveTarget = workspace
+                    },
+                )
+            }
+            workspaceRenameTarget?.let { workspace ->
+                ForgeWorkspaceRenameDialog(
+                    workspace = workspace,
+                    onDismiss = { workspaceRenameTarget = null },
+                    onConfirm = { newName ->
+                        workspaceRenameTarget = null
+                        ForgeWorkspaces.rename(workspace.name, newName)
+                            .onSuccess { onForgeWorkspacesChanged() }
+                            .onFailure { workspaceError = workspaceRenameFailedText }
+                    },
+                )
+            }
+            workspaceRemoveTarget?.let { workspace ->
+                ForgeWorkspaceRemoveDialog(
+                    workspace = workspace,
+                    onDismiss = { workspaceRemoveTarget = null },
+                    onConfirm = {
+                        workspaceRemoveTarget = null
+                        ForgeWorkspaces.remove(workspace.name)
+                        onForgeWorkspacesChanged()
+                    },
+                )
+            }
+            workspaceError?.let { message ->
+                ForgeWorkspaceErrorDialog(
+                    message = message,
+                    onDismiss = { workspaceError = null },
+                )
+            }
         }
     }
 }
@@ -600,6 +783,8 @@ private fun ConversationHistoryRow(
     onRename: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
+    onArchiveToggle: (() -> Unit)? = null,
+    archived: Boolean = false,
 ) {
     var showActionMenu by remember { mutableStateOf(false) }
     val hapticFeedback = LocalHapticFeedback.current
@@ -824,21 +1009,35 @@ private fun ConversationHistoryRow(
         val renameText = stringResource(R.string.action_rename)
         val exportText = stringResource(R.string.action_export)
         val deleteText = stringResource(R.string.action_delete)
+        val archiveText = stringResource(
+            if (archived) R.string.forge_session_unarchive else R.string.forge_session_archive,
+        )
         when (LocalUiStyle.current) {
             AppearanceUiStyle.COUI -> {
                 val destructiveColor = CouiDialogDefaults.themeColors().destructive
-                val menuItems = remember(pinText, renameText, exportText, deleteText, destructiveColor, conversation.forge) {
+                val menuItems = remember(pinText, renameText, exportText, deleteText, archiveText, destructiveColor, conversation.forge) {
                     if (conversation.forge) {
-                        listOf(
-                            CouiMenuItem(value = 1, text = renameText, icon = Icons.Outlined.Edit),
-                            CouiMenuItem(
-                                value = 3,
-                                text = deleteText,
-                                icon = Icons.Outlined.Delete,
-                                iconTint = destructiveColor,
-                                dividerBefore = true,
-                            ),
-                        )
+                        buildList {
+                            add(CouiMenuItem(value = 1, text = renameText, icon = Icons.Outlined.Edit))
+                            if (onArchiveToggle != null) {
+                                add(
+                                    CouiMenuItem(
+                                        value = 4,
+                                        text = archiveText,
+                                        icon = if (archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive,
+                                    ),
+                                )
+                            }
+                            add(
+                                CouiMenuItem(
+                                    value = 3,
+                                    text = deleteText,
+                                    icon = Icons.Outlined.Delete,
+                                    iconTint = destructiveColor,
+                                    dividerBefore = true,
+                                ),
+                            )
+                        }
                     } else {
                         listOf(
                             CouiMenuItem(value = 0, text = pinText, icon = Icons.Outlined.PushPin),
@@ -865,6 +1064,7 @@ private fun ConversationHistoryRow(
                             1 -> onRename()
                             2 -> onExport()
                             3 -> onDelete()
+                            4 -> onArchiveToggle?.invoke()
                         }
                     },
                     anchor = anchor,
@@ -913,6 +1113,18 @@ private fun ConversationHistoryRow(
                             },
                         )
                     }
+                    val archiveItem = remember(archiveText, archived) {
+                        DropdownItem(
+                            text = archiveText,
+                            icon = { modifier ->
+                                Icon(
+                                    imageVector = if (archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive,
+                                    contentDescription = null,
+                                    modifier = modifier.size(ConversationPanelMetrics.ActionIconSize),
+                                )
+                            },
+                        )
+                    }
                     val deleteItem = remember(deleteText) {
                         DropdownItem(
                             text = deleteText,
@@ -926,6 +1138,7 @@ private fun ConversationHistoryRow(
                             },
                         )
                     }
+                    val forgeMenuSize = if (onArchiveToggle != null) 3 else 2
                     val deleteColors = DropdownDefaults.dropdownColors(
                         contentColor = MiuixTheme.colorScheme.error,
                         selectedContentColor = MiuixTheme.colorScheme.error,
@@ -946,7 +1159,7 @@ private fun ConversationHistoryRow(
                         }
                         DropdownImpl(
                             item = renameItem,
-                            optionSize = if (conversation.forge) 2 else 4,
+                            optionSize = if (conversation.forge) forgeMenuSize else 4,
                             isSelected = false,
                             index = if (conversation.forge) 0 else 1,
                             onSelectedIndexChange = {
@@ -954,6 +1167,18 @@ private fun ConversationHistoryRow(
                                 onRename()
                             },
                         )
+                        if (conversation.forge && onArchiveToggle != null) {
+                            DropdownImpl(
+                                item = archiveItem,
+                                optionSize = forgeMenuSize,
+                                isSelected = false,
+                                index = 1,
+                                onSelectedIndexChange = {
+                                    showActionMenu = false
+                                    onArchiveToggle()
+                                },
+                            )
+                        }
                         if (!conversation.forge) {
                             DropdownImpl(
                                 item = exportItem,
@@ -968,9 +1193,9 @@ private fun ConversationHistoryRow(
                         }
                         DropdownImpl(
                             item = deleteItem,
-                            optionSize = if (conversation.forge) 2 else 4,
+                            optionSize = if (conversation.forge) forgeMenuSize else 4,
                             isSelected = false,
-                            index = if (conversation.forge) 1 else 3,
+                            index = if (conversation.forge) forgeMenuSize - 1 else 3,
                             dropdownColors = deleteColors,
                             onSelectedIndexChange = {
                                 showActionMenu = false
@@ -1086,4 +1311,413 @@ private fun isUpdatedToday(timestampMillis: Long): Boolean {
     return now.get(java.util.Calendar.ERA) == target.get(java.util.Calendar.ERA) &&
         now.get(java.util.Calendar.YEAR) == target.get(java.util.Calendar.YEAR) &&
         now.get(java.util.Calendar.DAY_OF_YEAR) == target.get(java.util.Calendar.DAY_OF_YEAR)
+}
+
+// ---------------------------------------------------------------------------
+// Forge 工作区分区（侧边栏 Forge 模式）：分区头、工作区组头、会话行与管理弹窗。
+// 按钮规矩（用户定）：相邻按钮至少留 10dp 间隔，短按钮用全圆角，别再贴在一起。
+// ---------------------------------------------------------------------------
+
+/** Forge 分区里的一条会话行：在通用行上接好归档动作（归档状态走本地记录）。 */
+@Composable
+private fun ForgeConversationRow(
+    conversation: ConversationSummaryUi,
+    selected: Boolean,
+    archivedIds: Set<String>,
+    onClick: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onArchivedIdsChange: (Set<String>) -> Unit,
+) {
+    val sessionId = forgeSessionIdOf(conversation.id)
+    ConversationHistoryRow(
+        conversation = conversation,
+        selected = selected,
+        onClick = onClick,
+        onTogglePin = {},
+        onRename = onRename,
+        onExport = {},
+        onDelete = onDelete,
+        onArchiveToggle = if (sessionId != null) {
+            {
+                ForgeArchivedSessions.setArchived(sessionId, sessionId !in archivedIds)
+                onArchivedIdsChange(ForgeArchivedSessions.all())
+            }
+        } else {
+            null
+        },
+        archived = sessionId != null && sessionId in archivedIds,
+    )
+}
+
+/** Forge 分区头：「工作区」标题 + 搜索 / 已归档显隐 / 添加工作区三个按钮。 */
+@Composable
+private fun ForgeWorkspaceSectionHeader(
+    showArchived: Boolean,
+    onSearchClick: () -> Unit,
+    onToggleArchived: () -> Unit,
+    onAddWorkspace: () -> Unit,
+) {
+    val colors = MiuixTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = ConversationPanelMetrics.PaneHorizontalPadding, end = 10.dp, top = 14.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.forge_workspace_title),
+            style = MiuixTheme.textStyles.title3,
+            fontWeight = FontWeight.SemiBold,
+            color = colors.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        ForgeHeaderIconButton(
+            icon = Icons.Outlined.Search,
+            label = stringResource(R.string.forge_workspace_search),
+            onClick = onSearchClick,
+        )
+        ForgeHeaderIconButton(
+            icon = if (showArchived) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
+            label = stringResource(
+                if (showArchived) R.string.forge_workspace_hide_archived else R.string.forge_workspace_show_archived,
+            ),
+            highlighted = showArchived,
+            onClick = onToggleArchived,
+        )
+        ForgeHeaderIconButton(
+            icon = Icons.Rounded.CreateNewFolder,
+            label = stringResource(R.string.forge_workspace_add),
+            onClick = onAddWorkspace,
+        )
+    }
+}
+
+/** 分区头上的圆形图标按钮：34dp 点击区，按钮之间留 6dp（连同内边距，相邻点击区不贴脸）。 */
+@Composable
+private fun ForgeHeaderIconButton(
+    icon: ImageVector,
+    label: String,
+    highlighted: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val colors = MiuixTheme.colorScheme
+    Box(
+        modifier = Modifier
+            .padding(start = 6.dp)
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(if (highlighted) colors.tertiaryContainer else Color.Transparent)
+            .clickable(role = Role.Button, onClickLabel = label, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            modifier = Modifier.size(19.dp),
+            tint = if (highlighted) colors.primary else colors.onSurfaceVariantSummary,
+        )
+    }
+}
+
+/** Forge 分区本地搜索框：只过滤 Forge 会话标题，不动底部全局搜索。 */
+@Composable
+private fun ForgeWorkspaceSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+) {
+    TextField(
+        value = query,
+        onValueChange = onQueryChange,
+        label = stringResource(R.string.forge_workspace_search),
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = ConversationPanelMetrics.PaneHorizontalPadding, vertical = 6.dp),
+    )
+}
+
+/** 工作区组头：文件夹图标 + 名字 + 「...」管理 + 「+」在这个工作区开新对话。 */
+@Composable
+private fun ForgeWorkspaceGroupHeader(
+    workspace: ForgeWorkspace,
+    isCurrent: Boolean,
+    onMenuClick: () -> Unit,
+    onNewConversation: () -> Unit,
+) {
+    val colors = MiuixTheme.colorScheme
+    val moreLabel = stringResource(R.string.action_more)
+    val newLabel = stringResource(R.string.forge_workspace_new_in)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = ConversationPanelMetrics.PaneHorizontalPadding, end = 10.dp, top = 12.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Folder,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = if (isCurrent) colors.primary else colors.onSurfaceVariantSummary,
+        )
+        Spacer(modifier = Modifier.width(9.dp))
+        Text(
+            text = workspace.name,
+            style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
+            fontWeight = FontWeight.Medium,
+            color = colors.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .clickable(role = Role.Button, onClickLabel = moreLabel, onClick = onMenuClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.MoreHoriz,
+                contentDescription = moreLabel,
+                modifier = Modifier.size(18.dp),
+                tint = colors.onSurfaceVariantSummary,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .padding(start = 4.dp)
+                .size(30.dp)
+                .clip(CircleShape)
+                .clickable(role = Role.Button, onClickLabel = newLabel, onClick = onNewConversation),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Add,
+                contentDescription = newLabel,
+                modifier = Modifier.size(19.dp),
+                tint = colors.onSurfaceVariantSummary,
+            )
+        }
+    }
+}
+
+/** 对不上任何工作区的会话（目录在工作区外/服务端历史遗留）单独成一组。 */
+@Composable
+private fun ForgeOtherSessionsHeader() {
+    Text(
+        text = stringResource(R.string.forge_workspace_other_sessions),
+        style = MiuixTheme.textStyles.footnote1,
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        modifier = Modifier.padding(
+            start = ConversationPanelMetrics.PaneHorizontalPadding,
+            top = 14.dp,
+            bottom = 2.dp,
+        ),
+    )
+}
+
+/** 全圆角按钮：短文案按钮统一用它，相邻摆放时由调用方留 10dp 间隔。 */
+@Composable
+private fun ForgePillButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    primary: Boolean = false,
+    destructive: Boolean = false,
+) {
+    val colors = MiuixTheme.colorScheme
+    val background = when {
+        primary -> colors.primary
+        destructive -> colors.error
+        else -> colors.tertiaryContainer
+    }
+    val contentColor = when {
+        primary || destructive -> colors.onPrimary
+        else -> colors.onSurface
+    }
+    Box(
+        modifier = modifier
+            .height(46.dp)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(background)
+            .clickable(role = Role.Button, onClickLabel = text, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
+            fontWeight = FontWeight.Medium,
+            color = contentColor,
+            maxLines = 1,
+        )
+    }
+}
+
+/** 工作区管理弹窗的统一容器：24dp 圆角、内边距 20dp。 */
+@Composable
+private fun ForgeWorkspaceDialogContainer(
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(MiuixTheme.colorScheme.surface)
+                .padding(20.dp),
+        ) {
+            content()
+        }
+    }
+}
+
+/** 工作区「...」菜单：改名 / 移除 / 取消，竖排全圆角按钮、间隔 10dp。 */
+@Composable
+private fun ForgeWorkspaceActionDialog(
+    workspace: ForgeWorkspace,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
+        Text(
+            text = workspace.name,
+            style = MiuixTheme.textStyles.title4,
+            color = MiuixTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = workspace.sourcePath,
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            ForgePillButton(
+                text = stringResource(R.string.forge_workspace_rename),
+                onClick = onRename,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            ForgePillButton(
+                text = stringResource(R.string.forge_workspace_remove),
+                onClick = onRemove,
+                modifier = Modifier.fillMaxWidth(),
+                destructive = true,
+            )
+            ForgePillButton(
+                text = stringResource(R.string.forge_dialog_cancel),
+                onClick = onDismiss,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/** 工作区改名弹窗。 */
+@Composable
+private fun ForgeWorkspaceRenameDialog(
+    workspace: ForgeWorkspace,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember(workspace.name) { mutableStateOf(workspace.name) }
+    ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
+        Text(
+            text = stringResource(R.string.forge_workspace_rename_title),
+            style = MiuixTheme.textStyles.title4,
+            color = MiuixTheme.colorScheme.onSurface,
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        TextField(
+            value = name,
+            onValueChange = { name = it },
+            label = stringResource(R.string.forge_workspace_rename_title),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            text = stringResource(R.string.forge_workspace_rename_hint),
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ForgePillButton(
+                text = stringResource(R.string.forge_dialog_cancel),
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+            )
+            ForgePillButton(
+                text = stringResource(R.string.forge_dialog_confirm),
+                onClick = { onConfirm(name.trim()) },
+                modifier = Modifier.weight(1f),
+                primary = true,
+            )
+        }
+    }
+}
+
+/** 工作区移除确认弹窗：只删记录，文件夹与文件都留在设备上。 */
+@Composable
+private fun ForgeWorkspaceRemoveDialog(
+    workspace: ForgeWorkspace,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
+        Text(
+            text = stringResource(R.string.forge_workspace_remove_confirm_title),
+            style = MiuixTheme.textStyles.title4,
+            color = MiuixTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = stringResource(R.string.forge_workspace_remove_confirm_body, workspace.name),
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ForgePillButton(
+                text = stringResource(R.string.forge_dialog_cancel),
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+            )
+            ForgePillButton(
+                text = stringResource(R.string.forge_workspace_remove),
+                onClick = onConfirm,
+                modifier = Modifier.weight(1f),
+                destructive = true,
+            )
+        }
+    }
+}
+
+/** 工作区操作失败的提示弹窗。 */
+@Composable
+private fun ForgeWorkspaceErrorDialog(
+    message: String,
+    onDismiss: () -> Unit,
+) {
+    ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
+        Text(
+            text = message,
+            style = MiuixTheme.textStyles.body1,
+            color = MiuixTheme.colorScheme.onSurface,
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        ForgePillButton(
+            text = stringResource(R.string.forge_dialog_confirm),
+            onClick = onDismiss,
+            modifier = Modifier.fillMaxWidth(),
+            primary = true,
+        )
+    }
 }
