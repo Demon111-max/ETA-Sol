@@ -39,8 +39,8 @@ android {
         minSdk = 33
         targetSdk = 37
         // versionCode 规则：yyyyMMdd + 两位当日序号（01 起），发版时随 versionName 一起手动递增。
-        versionCode = 2026111604
-        versionName = "3.4.34"
+        versionCode = 2026111605
+        versionName = "3.4.35"
 
         ndk {
             // 同时过滤本地与依赖 AAR 的原生库，确保 APK 仅包含 ARM64。
@@ -61,7 +61,7 @@ android {
 
     buildTypes {
         debug {
-            // 与手机上已安装的官方 Eta 共存：仅 Debug 包使用独立包名与显示名
+            // 与手机上已安装的官方 Eta 共存：Debug / Release 包都使用独立包名与显示名
             applicationIdSuffix = ".sol"
             resValue("string", "app_name", "Eta Sol")
             // 版本名带构建类型标记，设置页与 APK 文件名据此区分 Debug 包
@@ -70,6 +70,8 @@ android {
             isPseudoLocalesEnabled = true
         }
         release {
+            applicationIdSuffix = ".sol"
+            resValue("string", "app_name", "Eta Sol")
             versionNameSuffix = buildMetadataSuffix
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
