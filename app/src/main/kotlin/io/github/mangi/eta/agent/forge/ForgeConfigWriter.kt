@@ -66,10 +66,10 @@ internal object ForgeConfigWriter {
                 putJsonObject("models") {
                     putJsonObject(settings.modelId.trim()) {
                         put("name", settings.modelId.trim())
-                        // 上下文上限：用户在模型设置里给的值，opencode 按它算上下文占用与截断。
-                        settings.contextWindow?.takeIf { it > 0 }?.let { limit ->
-                            putJsonObject("limit") { put("context", limit) }
-                        }
+                        // 不写 limit：opencode 的 limit 要求 context 与 output 成对出现，
+                        // 而 App 的模型设置只有上下文窗口、没有最大输出值；只写 context
+                        // 会让整份配置被 opencode 判为无效、server 启动即退出（1.19.5 实测）。
+                        // 上下文窗口目前只供 App 侧用量显示（ForgeSettings.contextWindow）。
                         // 思考档位：variant 名与 Eta 的 ReasoningEffort wireValue 对齐，
                         // Forge 发送消息时按档位名选 variant（见 ForgeChatState）。
                         putJsonObject("variants") {
