@@ -34,7 +34,14 @@ internal object SharedFolderMounts {
     const val LINUX_MOUNTS_ROOT = "/workspace/mounts"
     const val ANDROID_MOUNTS_ROOT = "/data/local/tmp/eta/mounts"
 
-    private val NAME_PATTERN = Regex("[A-Za-z0-9._-]{1,48}")
+    /**
+     * 挂载名字符集：Unicode 字母、数字与 `.` `_` `-`，长度 1..48。
+     *
+     * 3.4.42 规格变更（SG-08）：从「纯 ASCII」放宽到「Unicode 字母」，让中文目录能保留原名
+     * （见 [defaultName]）。空白、`/`、`\`、`:`、引号等路径/shell 元字符仍一律拒绝——名字会被
+     * 拼进 `/workspace/mounts/<名>` 与 bind mount 参数，含元字符就会破坏目录层级或参数解析。
+     */
+    private val NAME_PATTERN = Regex("[\\p{L}\\p{N}._-]{1,48}")
 
     /** 挂载源禁区：系统关键树、workspace 自身（环境里本就完整可见）与 /。 */
     private val FORBIDDEN_ROOTS = listOf(
@@ -132,16 +139,22 @@ internal object SharedFolderMounts {
     /**
      * 从源目录 basename 推导默认挂载名。
      *
-     * 3.4.41 曾把「剔除后为空」的情况改成 `share-<hash>`（多个中文目录不再都叫 share），
-     * 但既有单测 `SharedFolderMountsTest.defaultNameFallsBackWhenBasenameHasNoSafeChars`
-     * 明确断言 `/sdcard/下载` 得到 `share`，而本轮不允许改测试、也不允许新增失败，
-     * 因此回退为原来的 `share`；同名冲突仍由挂载表的 `-2..-32` 去重兜住。
+     * 3.4.42 规格变更（SG-08）：**保留 Unicode 字母（含汉字）**，不再把非 ASCII 字符整段剔掉。
+     * 旧规格下 `/sdcard/下载` 得到 `share`、`/sdcard/文档` 也是 `share`，第二个再被去重成
+     * `share-2`，用户完全无法从名字分辨哪个目录是哪个；而挂载名同时是 `/workspace/mounts/<名>`
+     * 的路径段，也是 Forge 工作区显示名，可读性优先。
+     *
+     * 仍然剔掉：空白、路径分隔符、`:` 与其它 shell/JSON 元字符（这些会破坏 bind mount 参数或
+     * 目录层级）。名字最终会经 [ProotCommandBuilder] 的 `shellQuote` 与
+     * [TerminalExecutionContext] 的 `JSONObject.quote` 处理，非 ASCII 本身是安全的。
+     *
+     * 只有当 basename 里连一个字母/数字都不剩（例如纯标点、纯 emoji）时才回落到 `share`，
+     * 此时同名冲突仍由挂载表的 `-2..-32` 去重兜住。
      */
     fun defaultName(sourcePath: String): String {
         val base = sourcePath.trimEnd('/').substringAfterLast('/').trim()
         return base.filter { char ->
-            char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' ||
-                char == '.' || char == '_' || char == '-'
+            char.isLetterOrDigit() || char == '.' || char == '_' || char == '-'
         }.take(48).ifBlank { "share" }
     }
 

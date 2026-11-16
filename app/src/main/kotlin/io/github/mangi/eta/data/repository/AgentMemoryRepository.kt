@@ -163,6 +163,26 @@ internal class AgentMemoryStore(
                 cause = throwable,
             )
         }
+        // `AtomicFile.finishWrite` 内部用 `File.renameTo` 落到 baseFile，失败时只写一行
+        // `Log.e("AtomicFile", "Failed to rename …")` 而不抛异常（AOSP 实现）。于是只读挂载、
+        // 目标被占用、非 ext4（FUSE/SD 卡/部分虚拟化文件系统）等环境下会出现「上层拿到成功、
+        // 磁盘仍是旧内容」——记忆静默丢失，且 backup/导出拿到的是内存快照。
+        // 这里回读校验，把不可见的写失败变成可见的 MEMORY_WRITE_FAILED。
+        val persisted = try {
+            atomicFile.openRead().use { it.readBytes() }
+        } catch (throwable: IOException) {
+            throw AgentMemoryException(
+                code = "MEMORY_WRITE_FAILED",
+                message = "记忆文件写入后无法回读校验",
+                cause = throwable,
+            )
+        }
+        if (!persisted.contentEquals(bytes)) {
+            throw AgentMemoryException(
+                code = "MEMORY_WRITE_FAILED",
+                message = "记忆文件写入未生效（回读内容与预期不一致）",
+            )
+        }
     }
 
     private fun replaceRange(

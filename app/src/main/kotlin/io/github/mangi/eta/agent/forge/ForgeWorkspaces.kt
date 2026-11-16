@@ -139,7 +139,8 @@ internal object ForgeWorkspaces {
     /**
      * 把一个 opencode 会话的 directory（形如 /workspace/mounts/<名>）解析到当前工作区的路径：
      * 工作区改过名时旧会话仍记着旧挂载名，经别名表归到新名下，侧边栏才不会把它丢进「其它会话」。
-     * 不是挂载路径、层数超过一级、或解析结果不是当前挂载之一时，原样返回输入。
+     * 命中挂载路径一级子目录时统一归一化成 `前缀 + 规范化名字`（去掉尾斜杠与首尾空白）；
+     * 不是挂载路径、或层数超过一级时原样返回输入。
      */
     fun canonicalDirectory(directory: String): String {
         if (directory.isBlank()) return directory
@@ -149,7 +150,10 @@ internal object ForgeWorkspaces {
         val name = trimmed.substring(prefix.length).trimEnd('/')
         if (name.isEmpty() || '/' in name) return directory
         val canonical = canonicalName(name)
-        if (canonical == name) return directory
+        // 即使没有别名也要回填归一化后的形态：opencode 可能把 directory 记成
+        // `/workspace/mounts/<名>/`（尾斜杠）或带首尾空白，而侧边栏分组是拿它和
+        // `ForgeWorkspace.linuxPath`（无尾斜杠）做字符串相等的，不归一化就会掉进「其它会话」。
+        if (canonical == name) return prefix + canonical
         if (SharedFolderMounts.current().none { it.name == canonical }) return directory
         return prefix + canonical
     }

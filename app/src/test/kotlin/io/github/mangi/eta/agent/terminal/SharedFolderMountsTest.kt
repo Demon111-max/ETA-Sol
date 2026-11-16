@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.terminal
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -61,7 +62,9 @@ class SharedFolderMountsTest {
         assertEquals(SharedFolderMounts.NameError.INVALID, SharedFolderMounts.validateName("", existing))
         assertEquals(SharedFolderMounts.NameError.INVALID, SharedFolderMounts.validateName("has space", existing))
         assertEquals(SharedFolderMounts.NameError.INVALID, SharedFolderMounts.validateName("a/b", existing))
-        assertEquals(SharedFolderMounts.NameError.INVALID, SharedFolderMounts.validateName("中文名", existing))
+        // 3.4.42 规格变更（SG-08）：挂载名允许 Unicode 字母，中文名本身是合法的；
+        // 仍必须拒绝空白、路径分隔符与 shell 元字符（上面几条）。
+        assertNull(SharedFolderMounts.validateName("中文名", existing))
         assertEquals(SharedFolderMounts.NameError.INVALID, SharedFolderMounts.validateName(".", existing))
         assertEquals(SharedFolderMounts.NameError.INVALID, SharedFolderMounts.validateName("..", existing))
         assertEquals(
@@ -73,10 +76,19 @@ class SharedFolderMountsTest {
     }
 
     @Test
-    fun defaultNameFallsBackWhenBasenameHasNoSafeChars() {
+    fun defaultNameKeepsReadableUnicodeBasename() {
         assertEquals("Download", SharedFolderMounts.defaultName("/sdcard/Download"))
-        assertEquals("share", SharedFolderMounts.defaultName("/sdcard/下载"))
+        // 3.4.42 规格变更（SG-08）：旧规格是 `share`（中文整段被剔掉，第二个中文目录变 share-2，
+        // 用户无法分辨）。新规格保留原名，可读性优先。
+        assertEquals("下载", SharedFolderMounts.defaultName("/sdcard/下载"))
         assertEquals("a.b_c-d", SharedFolderMounts.defaultName("/x/a.b_c-d"))
+        // 只有连一个字母/数字都不剩时才回落 share。
+        assertEquals("share", SharedFolderMounts.defaultName("/x/!!!"))
+        // 两个不同中文目录不再撞成同一个名字。
+        assertNotEquals(
+            SharedFolderMounts.defaultName("/sdcard/下载"),
+            SharedFolderMounts.defaultName("/sdcard/文档"),
+        )
     }
 
     @Test
