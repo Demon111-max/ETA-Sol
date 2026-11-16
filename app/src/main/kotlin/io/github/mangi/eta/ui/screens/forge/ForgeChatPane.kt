@@ -302,6 +302,28 @@ internal fun ForgeChatPane(
     }
 }
 
+/** 错误提示条：错误色 + 图标，别再用一行弱色灰字——用户看漏了就以为「没反应」。 */
+@Composable
+private fun ForgeNoticeBar(text: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.ErrorOutline,
+            contentDescription = null,
+            tint = StatusError,
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = text,
+            style = MiuixTheme.textStyles.footnote1,
+            color = StatusError,
+        )
+    }
+}
+
 /**
  * Forge 启动遮罩（仿 DSHA 的启动屏）：中心一团淡光晕，终端符号 >_ 一笔笔把自己画出来，
  * 下面 FORGE 字标淡入，再下面是小转圈 + 随真实启动进度变化的阶段文字。
