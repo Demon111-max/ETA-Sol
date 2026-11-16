@@ -4,7 +4,10 @@ import android.content.Context
 import android.util.AtomicFile
 import io.github.mangi.eta.data.datastore.SettingsDataStore
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 
@@ -163,25 +166,58 @@ internal class AgentMemoryStore(
                 cause = throwable,
             )
         }
-        // `AtomicFile.finishWrite` 内部用 `File.renameTo` 落到 baseFile，失败时只写一行
+        // `AtomicFile.finishWrite` 内部把 `.new` 重命名成 baseFile，失败时只写一行
         // `Log.e("AtomicFile", "Failed to rename …")` 而不抛异常（AOSP 实现）。于是只读挂载、
-        // 目标被占用、非 ext4（FUSE/SD 卡/部分虚拟化文件系统）等环境下会出现「上层拿到成功、
-        // 磁盘仍是旧内容」——记忆静默丢失，且 backup/导出拿到的是内存快照。
-        // 这里回读校验，把不可见的写失败变成可见的 MEMORY_WRITE_FAILED。
-        val persisted = try {
+        // 目标被占用、非 ext4（FUSE/SD 卡、部分虚拟化文件系统）等环境下会出现「上层拿到成功、
+        // 磁盘仍是旧内容」——记忆静默丢失，备份/导出拿到的是内存快照。
+        // 这里先回读校验；不一致就再落一次盘（`.new` → base，必要时直接写 base），复验仍不一致
+        // 才抛 MEMORY_WRITE_FAILED。绝不静默成功。
+        if (!persistedContentMatches(bytes)) {
+            retryPersist(bytes)
+            if (!persistedContentMatches(bytes)) {
+                throw AgentMemoryException(
+                    code = "MEMORY_WRITE_FAILED",
+                    message = "记忆文件写入未生效（回读内容与预期不一致）",
+                )
+            }
+        }
+    }
+
+    private fun persistedBytes(): ByteArray? {
+        return try {
             atomicFile.openRead().use { it.readBytes() }
         } catch (throwable: IOException) {
-            throw AgentMemoryException(
-                code = "MEMORY_WRITE_FAILED",
-                message = "记忆文件写入后无法回读校验",
-                cause = throwable,
-            )
+            null
         }
-        if (!persisted.contentEquals(bytes)) {
-            throw AgentMemoryException(
-                code = "MEMORY_WRITE_FAILED",
-                message = "记忆文件写入未生效（回读内容与预期不一致）",
-            )
+    }
+
+    /** 回读磁盘内容与预期比对；读不出来（文件不存在/无权限）一律视为不匹配。 */
+    private fun persistedContentMatches(expected: ByteArray): Boolean {
+        val persisted = persistedBytes() ?: return false
+        return persisted.contentEquals(expected)
+    }
+
+    /**
+     * `finishWrite` 没能把内容落到 baseFile 时的补救：先把 `AtomicFile` 可能留下的 `<base>.new`
+     * 覆盖过去；还不行就直接写一份再 `Files.move(REPLACE_EXISTING)` 覆盖（`renameTo` 在部分
+     * 文件系统上因目标已存在而失败，这条通常仍能成功）。都失败就交给上层如实报错。
+     */
+    private fun retryPersist(bytes: ByteArray) {
+        val base = atomicFile.baseFile
+        val pending = File(base.path + ".new")
+        try {
+            if (pending.isFile) {
+                Files.move(pending.toPath(), base.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+            if (persistedContentMatches(bytes)) return
+            val repair = File(base.path + ".repair")
+            FileOutputStream(repair).use { stream ->
+                stream.write(bytes)
+                stream.fd.sync()
+            }
+            Files.move(repair.toPath(), base.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        } catch (throwable: IOException) {
+            // 落不动就交给上层如实报失败。
         }
     }
 
