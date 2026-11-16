@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -37,6 +38,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Refresh
@@ -421,34 +423,87 @@ private fun ForgeTranscript(
                 )
             }
         } else {
-            // 空页要把工作区说清楚：这是哪个文件夹、产出的文件去哪拿（DSH 式工作区的门面）。
+            // 空页门面：终端徽章（与启动屏 >_ 字标同一套形象）+ 标题 + 工作区卡片。
+            // 以前是一行灰字飘在白页中央，路径还会在词中间折行；现在工作区进卡片，
+            // 名字一行、路径一行截断，产出落在哪一眼看清。
             Column(
                 modifier = Modifier.fillMaxSize().padding(top = topInset, start = 24.dp, end = 24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xFF26262C), Color(0xFF545460)),
+                            ),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = ">_",
+                        style = MiuixTheme.textStyles.title3,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = stringResource(R.string.forge_empty_title),
-                    style = MiuixTheme.textStyles.title4,
+                    style = MiuixTheme.textStyles.title3,
+                    fontWeight = FontWeight.SemiBold,
                     color = MiuixTheme.colorScheme.onSurface,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(20.dp))
                 val workspace = state.workspace
-                Text(
-                    text = if (workspace != null) {
-                        stringResource(
-                            R.string.forge_workspace_hint,
-                            workspace.name,
-                            workspace.sourcePath,
+                Column(
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(MiuixTheme.colorScheme.tertiaryContainer)
+                        .padding(horizontal = 16.dp, vertical = 13.dp),
+                ) {
+                    if (workspace != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Folder,
+                                contentDescription = null,
+                                modifier = Modifier.size(19.dp),
+                                tint = MiuixTheme.colorScheme.primary,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = workspace.name,
+                                style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
+                                fontWeight = FontWeight.Medium,
+                                color = MiuixTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Text(
+                            text = workspace.sourcePath,
+                            style = MiuixTheme.textStyles.footnote1.copy(fontSize = 12.sp),
+                            color = dshTertiaryColor(),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 27.dp, top = 3.dp),
                         )
                     } else {
-                        stringResource(R.string.forge_workspace_unavailable)
-                    },
-                    style = MiuixTheme.textStyles.footnote1,
-                    color = dshTertiaryColor(),
-                )
-                Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = stringResource(R.string.forge_workspace_unavailable),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = dshTertiaryColor(),
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(14.dp))
                 ForgeCaption(text = stringResource(R.string.forge_empty_hint))
+                Spacer(modifier = Modifier.height(4.dp))
+                ForgeCaption(text = stringResource(R.string.forge_empty_switch_hint))
             }
         }
         return

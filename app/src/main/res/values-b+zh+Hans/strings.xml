@@ -1603,6 +1603,7 @@
   <string name="folder_picker_create">创建</string>
   <string name="folder_picker_load_failed">这个文件夹读不出来。</string>
   <string name="folder_picker_empty">这里没有文件夹。</string>
+  <string name="forge_empty_switch_hint">切换工作区在侧边栏里</string>
   <string name="forge_dialog_close">关闭</string>
   <string name="forge_dialog_cancel">取消</string>
   <string name="forge_rename_failed">改名失败，稍后再试。</string>

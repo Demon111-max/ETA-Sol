@@ -1622,6 +1622,7 @@
   <string name="folder_picker_create">Create</string>
   <string name="folder_picker_load_failed">This folder could not be read.</string>
   <string name="folder_picker_empty">No folders here.</string>
+  <string name="forge_empty_switch_hint">Switch workspaces from the sidebar</string>
   <string name="forge_dialog_close">Close</string>
   <string name="forge_dialog_cancel">Cancel</string>
   <string name="forge_rename_failed">Rename failed. Try again later.</string>
