@@ -140,6 +140,11 @@ internal fun ConversationPanePanel(
     forgeWorkspaces: List<ForgeWorkspace> = emptyList(),
     onForgeNewConversationInWorkspace: (String) -> Unit = {},
     onForgeWorkspacesChanged: () -> Unit = {},
+    /**
+     * 外部传入的当前工作区名：面板内切换工作区只写 prefs，工作区列表不变，靠这个值驱动
+     * 「当前工作区」高亮刷新。为 null 时回落到面板内读 [ForgeWorkspaces.currentSelection]。
+     */
+    currentForgeWorkspaceName: String? = null,
     onSearchChange: (String) -> Unit,
     onNewConversation: () -> Unit,
     onConversationSelected: (String) -> Unit,
@@ -171,14 +176,29 @@ internal fun ConversationPanePanel(
     var workspaceRenameTarget by remember { mutableStateOf<ForgeWorkspace?>(null) }
     var workspaceRemoveTarget by remember { mutableStateOf<ForgeWorkspace?>(null) }
     var workspaceError by remember { mutableStateOf<String?>(null) }
-    val forgeConversations = remember(state.conversations, forgeArchivedIds, forgeShowArchived, forgeLocalQuery) {
+    var workspaceNotice by remember { mutableStateOf<String?>(null) }
+    // 刚被移除的工作区名：列表刷新之前先把它从「当前工作区」高亮里排除，别留一个已不存在的选中项。
+    var lastRemovedWorkspaceName by remember { mutableStateOf<String?>(null) }
+    val forgeConversations = remember(
+        state.conversations,
+        state.selectedConversationId,
+        forgeArchivedIds,
+        forgeShowArchived,
+        forgeSearchOpen,
+        forgeLocalQuery,
+    ) {
         state.conversations.filter { it.forge }
             .filter { conversation ->
                 val sessionId = forgeSessionIdOf(conversation.id)
-                forgeShowArchived || sessionId == null || sessionId !in forgeArchivedIds
+                forgeShowArchived || sessionId == null || sessionId !in forgeArchivedIds ||
+                    // 归档的正是当前打开着的会话：仍留在列表里并带归档标记（会高亮选中、可取消归档），
+                    // 否则侧栏会立刻失去选中项，用户也不知道这条会话去哪了。
+                    conversation.id == state.selectedConversationId
             }
             .filter {
-                forgeLocalQuery.isBlank() ||
+                // 搜索框收起时一律不过滤：残留的查询词会让会话「静默消失」。
+                !forgeSearchOpen ||
+                    forgeLocalQuery.isBlank() ||
                     it.title.contains(forgeLocalQuery.trim(), ignoreCase = true) ||
                     it.preview.contains(forgeLocalQuery.trim(), ignoreCase = true)
             }
@@ -191,9 +211,12 @@ internal fun ConversationPanePanel(
         val others = forgeConversations.filter { it.id !in groupedIds }
         byWorkspace to others
     }
-    val currentForgeWorkspaceName = remember(forgeWorkspaces) {
+    // 面板内切换工作区只写 prefs、工作区列表不变，所以除了列表本身，还要用「当前选中的会话」
+    // 这类会随切换变化的 key 驱动重算；对外部传入的名字优先（那条路径完全可观察）。
+    val localForgeWorkspaceName = remember(forgeWorkspaces, lastRemovedWorkspaceName, state.selectedConversationId) {
         ForgeWorkspaces.currentSelection()?.name
     }
+    val activeForgeWorkspaceName = currentForgeWorkspaceName ?: localForgeWorkspaceName
     val containerColor = conversationPaneContainerColor()
     val isCoui = LocalUiStyle.current == AppearanceUiStyle.COUI
     val couiBackdrop = if (isCoui) rememberCouiBackdrop() else null
@@ -261,13 +284,20 @@ internal fun ConversationPanePanel(
                                 }
                             }
 
-                            if (isForgeMode && !isSearching) {
+                            if (isForgeMode) {
                                 // Forge 模式：会话按工作区分组（工作区头行带「...」管理与「+」新建），
                                 // 顶上一行是分区头：搜索 / 已归档显隐 / 添加工作区。
+                                // 搜索态也走这条分支：落到通用分组会让已归档会话复活、且那些行
+                                // 拿不到归档开关（无法取消归档）。
                                 item(key = "forge_ws_section_header") {
                                     ForgeWorkspaceSectionHeader(
                                         showArchived = forgeShowArchived,
-                                        onSearchClick = { forgeSearchOpen = !forgeSearchOpen },
+                                        onSearchClick = {
+                                            // 收起搜索框时连查询词一起清掉：过滤只认词，不收起来就仍被过滤。
+                                            val opening = !forgeSearchOpen
+                                            forgeSearchOpen = opening
+                                            if (!opening) forgeLocalQuery = ""
+                                        },
                                         onToggleArchived = { forgeShowArchived = !forgeShowArchived },
                                         onAddWorkspace = { folderPickerOpen = true },
                                     )
@@ -285,7 +315,8 @@ internal fun ConversationPanePanel(
                                     item(key = "forge_ws_header_${workspace.name}") {
                                         ForgeWorkspaceGroupHeader(
                                             workspace = workspace,
-                                            isCurrent = workspace.name == currentForgeWorkspaceName,
+                                            isCurrent = workspace.name == activeForgeWorkspaceName &&
+                                                workspace.name != lastRemovedWorkspaceName,
                                             onMenuClick = { workspaceActionTarget = workspace },
                                             onNewConversation = {
                                                 onForgeNewConversationInWorkspace(workspace.name)
@@ -326,9 +357,17 @@ internal fun ConversationPanePanel(
                                         )
                                     }
                                 }
-                                if (forgeWorkspaces.isEmpty() && forgeConversations.isEmpty()) {
+                                if (forgeConversations.isEmpty()) {
+                                    // 三种「列表空」分开说：搜索无命中 / 有工作区但没有会话 / 还没有工作区。
                                     item(key = "forge_ws_empty") {
-                                        EmptyConversations(isSearching = false)
+                                        when {
+                                            isSearching || (forgeSearchOpen && forgeLocalQuery.isNotBlank()) ->
+                                                ForgeEmptyHint(text = stringResource(R.string.forge_ws_no_matches))
+                                            forgeWorkspaces.isEmpty() -> EmptyConversations(isSearching = false)
+                                            else -> ForgeEmptyHint(
+                                                text = stringResource(R.string.forge_ws_no_conversations),
+                                            )
+                                        }
                                     }
                                 }
                             } else if (state.conversations.isEmpty()) {
@@ -425,6 +464,8 @@ internal fun ConversationPanePanel(
             // Forge 工作区管理弹窗群（文件夹选择器 / 改名 / 移除 / 报错），都挂在侧栏根 Box 里。
             val workspaceAddFailedText = stringResource(R.string.forge_workspace_add_failed)
             val workspaceRenameFailedText = stringResource(R.string.forge_workspace_rename_failed)
+            val workspaceRemoveFailedText = stringResource(R.string.forge_workspace_remove_failed)
+            val workspaceRemovedNoticeText = stringResource(R.string.forge_workspace_removed_notice)
             if (folderPickerOpen) {
                 FolderPickerDialog(
                     onDismiss = { folderPickerOpen = false },
@@ -471,8 +512,16 @@ internal fun ConversationPanePanel(
                     onDismiss = { workspaceRemoveTarget = null },
                     onConfirm = {
                         workspaceRemoveTarget = null
-                        ForgeWorkspaces.remove(workspace.name)
-                        onForgeWorkspacesChanged()
+                        // 被移除的工作区若正是当前工作区：先把它从高亮里摘掉（列表刷新前也不残留），
+                        // 再给一次提示说明它的会话还在服务端、只是没有工作区目录了（不擅自删会话）。
+                        val wasCurrent = workspace.name == activeForgeWorkspaceName
+                        if (ForgeWorkspaces.remove(workspace.name)) {
+                            lastRemovedWorkspaceName = workspace.name
+                            onForgeWorkspacesChanged()
+                            if (wasCurrent) workspaceNotice = workspaceRemovedNoticeText
+                        } else {
+                            workspaceError = workspaceRemoveFailedText
+                        }
                     },
                 )
             }
@@ -480,6 +529,12 @@ internal fun ConversationPanePanel(
                 ForgeWorkspaceErrorDialog(
                     message = message,
                     onDismiss = { workspaceError = null },
+                )
+            }
+            workspaceNotice?.let { message ->
+                ForgeWorkspaceNoticeDialog(
+                    message = message,
+                    onDismiss = { workspaceNotice = null },
                 )
             }
         }
@@ -900,13 +955,24 @@ private fun ConversationHistoryRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = title,
-                        color = titleColor,
+                        // 已归档的会话在列表里照样认得出来：标题淡化一档（归档开关打开时它们也在列表里）。
+                        color = if (archived) titleColor.copy(alpha = 0.55f) else titleColor,
                         style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
+                    if (archived) {
+                        Icon(
+                            imageVector = Icons.Outlined.Archive,
+                            contentDescription = stringResource(R.string.forge_session_archived_mark),
+                            modifier = Modifier
+                                .padding(start = 6.dp)
+                                .size(13.dp),
+                            tint = summaryColor.copy(alpha = 0.8f),
+                        )
+                    }
                     if (conversation.forge) {
                         Text(
                             text = stringResource(R.string.forge_mode_forge),
@@ -1263,6 +1329,22 @@ private fun EmptyConversations(isSearching: Boolean) {
             )
         }
     }
+}
+
+/** Forge 分区里的一行轻空态（比整页空态克制）：只说明当前筛选下没有会话。 */
+@Composable
+private fun ForgeEmptyHint(text: String) {
+    Text(
+        text = text,
+        style = MiuixTheme.textStyles.footnote1,
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        modifier = Modifier.padding(
+            start = ConversationPanelMetrics.PaneHorizontalPadding,
+            end = ConversationPanelMetrics.PaneHorizontalPadding,
+            top = 12.dp,
+            bottom = 8.dp,
+        ),
+    )
 }
 
 private data class ConversationDrawerGroup(
@@ -1715,6 +1797,28 @@ private fun ForgeWorkspaceErrorDialog(
         Spacer(modifier = Modifier.height(16.dp))
         ForgePillButton(
             text = stringResource(R.string.forge_dialog_confirm),
+            onClick = onDismiss,
+            modifier = Modifier.fillMaxWidth(),
+            primary = true,
+        )
+    }
+}
+
+/** 工作区移除成功的一次性告知（不删服务端会话，只说清那些会话现在没有工作区目录了）。 */
+@Composable
+private fun ForgeWorkspaceNoticeDialog(
+    message: String,
+    onDismiss: () -> Unit,
+) {
+    ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
+        Text(
+            text = message,
+            style = MiuixTheme.textStyles.body1,
+            color = MiuixTheme.colorScheme.onSurface,
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        ForgePillButton(
+            text = stringResource(R.string.forge_dialog_close),
             onClick = onDismiss,
             modifier = Modifier.fillMaxWidth(),
             primary = true,

@@ -305,10 +305,18 @@ internal class ForgeServerManager(
         environment: TerminalEnvironment,
         timeoutMs: Long = HEALTH_TIMEOUT_MS,
     ): String? {
+        // 轮询里只走轻量 HTTP 探针：status() 会为每个身份组起一次性 proot shell 做存活探测，
+        // 每 500ms 调一次等于让启动被自己的探活拖慢。基线只在开始前取一次（顺带拿 taskId），
+        // 之后用 findTask 读记录文件这种廉价判据看它是否已经退出。
+        val baseline = status(environment)
+        if (baseline.code == "FORGE_SERVER_EXITED") return "FORGE_SERVER_EXITED"
+        val taskId = baseline.taskId
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (isHealthy()) return null
-            if (status(environment).code == "FORGE_SERVER_EXITED") return "FORGE_SERVER_EXITED"
+            if (taskId != null && daemonSupervisor.findTask(taskId)?.completedAt != null) {
+                return "FORGE_SERVER_EXITED"
+            }
             delay(POLL_INTERVAL_MS)
         }
         return if (isHealthy()) null else "FORGE_SERVER_TIMEOUT"

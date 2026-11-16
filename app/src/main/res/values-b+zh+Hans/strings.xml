@@ -1610,4 +1610,12 @@
   <string name="forge_rename_failed">改名失败，稍后再试。</string>
   <string name="forge_delete_failed">删除失败，稍后再试。</string>
   <string name="forge_list_unavailable">Forge 会话列表没拉到，Forge 服务启动后会显示出来。</string>
+  <string name="forge_workspace_removed_notice">工作区已移除。它的会话还留在服务端，但不再属于任何工作区目录了。</string>
+  <string name="forge_workspace_remove_failed">这个工作区移除失败，重试一下。</string>
+  <string name="forge_ws_no_conversations">这些工作区里还没有会话。</string>
+  <string name="forge_ws_no_matches">没有匹配的会话。</string>
+  <string name="forge_session_archived_mark">已归档</string>
+  <string name="forge_folder_unreadable">这个文件夹读不出来，换一个。</string>
+  <string name="forge_folder_create_failed">文件夹没能创建出来。</string>
+  <string name="forge_folder_root_not_allowed">请选「手机存储」里的文件夹，不要直接选根目录。</string>
 </resources>

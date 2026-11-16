@@ -159,6 +159,8 @@ internal data class ForgePendingAttachment(
 
 /** 一条排队中的发送（本轮还在跑时用户又发了一条）：轮次自然结束时按序续发。 */
 private data class ForgeQueuedSend(
+    /** 稳定 id：输入栏队列条用它做 key，删中间一条时后面的条目不会串位、删错。 */
+    val id: Long,
     val text: String,
     val attachments: List<ForgePendingAttachment>,
 )
@@ -262,6 +264,10 @@ internal class ForgeChatState(
     var queuedTexts by mutableStateOf<List<String>>(emptyList())
         private set
 
+    /** 与 [queuedTexts] 一一对应的稳定 id：输入栏的队列条用它做 key。 */
+    var queuedIds by mutableStateOf<List<Long>>(emptyList())
+        private set
+
     /**
      * 输入框草稿。以前草稿只活在输入框自己的 rememberTextFieldState 里，
      * 面板一旦重建（进设置/终端子页再回来）就跟着组合一起没了；状态提升到
@@ -329,11 +335,17 @@ internal class ForgeChatState(
     private var noticeJob: Job? = null
     private var queuedSends: List<ForgeQueuedSend> = emptyList()
 
+    /** 排队发送的自增 id 源（只增不减，删条目不会让别的条目换 key）。 */
+    private var nextQueuedId = 0L
+
     /** 发送世代号：每次真正发起发送 +1，新建/切换/停止也 +1；在途发送回写前校验，防迟到回调劫持当前界面。 */
     private var sendGeneration = 0
 
     /** 是否有发送协程在途：重连对齐 busy 时不能把发送中的 busy 冲掉（对齐只信服务端会误判刚提交未开跑的瞬间）。 */
     private var sendInFlight = false
+
+    /** 最近一次 idle 收尾的时刻：用来识别「同一轮迟到的 part」，别把它当新一轮复活 busy。 */
+    private var idleConfirmedAtMs = 0L
     private val server = ForgeServerManager.default(context)
     private val api = ForgeApiClient()
 
@@ -429,6 +441,24 @@ internal class ForgeChatState(
             }
             val pending = pendingOpenSessionId
             pendingOpenSessionId = null
+            if (workspace == null && pending == null) {
+                // 没有可用工作区（默认目录建不出来、且没有别的挂载）：不能在 /workspace 里
+                // 建会话——那样会话的 directory 属于一个谁也认领不了的裸目录，侧边栏既分不到
+                // 组、切工作区后也再找不到它。落空白页并明示，用户加一个工作区就能继续。
+                pendingBlank = false
+                sessionId = null
+                messages = emptyList()
+                setBusy(false, "start-noworkspace")
+                pendingQuestion = null
+                turnError = null
+                turnStartedAtMs = 0L
+                awaitSplashMinDuration(splashStartedAt)
+                startup = ForgeStartup.Ready
+                workspaceFallbackNotice()
+                onSessionsChanged(null)
+                replayPendingNavigation()
+                return@launch
+            }
             if (pending == null && pendingBlank) {
                 // 启动期间就要求开新对话：连会话都不建，直接落到空白页。
                 pendingBlank = false
@@ -436,10 +466,13 @@ internal class ForgeChatState(
                 messages = emptyList()
                 setBusy(false, "start-blank")
                 pendingQuestion = null
+                turnError = null
+                turnStartedAtMs = 0L
                 awaitSplashMinDuration(splashStartedAt)
                 startup = ForgeStartup.Ready
                 workspaceFallbackNotice()
                 onSessionsChanged(null)
+                replayPendingNavigation()
                 return@launch
             }
             startupStage = ForgeStartupStage.Connecting
@@ -461,10 +494,14 @@ internal class ForgeChatState(
                 sessionId = null
                 messages = emptyList()
                 setBusy(false, "start-404")
+                pendingQuestion = null
+                turnError = null
+                turnStartedAtMs = 0L
                 awaitSplashMinDuration(splashStartedAt)
                 startup = ForgeStartup.Ready
                 workspaceFallbackNotice()
                 onSessionsChanged(null)
+                replayPendingNavigation()
                 return@launch
             }
             if (loaded.isFailure) {
@@ -488,6 +525,8 @@ internal class ForgeChatState(
             refreshPendingQuestion(id)
             onSessionsChanged(id)
             maybeSetFallbackTitle(id)
+            // 启动窗口内又点了「开某个会话 / 开新对话」：这里补一次消费，别留到下次 start。
+            replayPendingNavigation()
         }
     }
 
@@ -501,7 +540,28 @@ internal class ForgeChatState(
     /** 没有可用工作区（挂载建不出来）时明示：当前在私有目录干活、产出文件拿不出来，不静默。 */
     private fun workspaceFallbackNotice() {
         if (workspace == null) {
-            notice = context.getString(R.string.forge_workspace_unavailable)
+            // 走 showNotice 而不是直接写 notice：直接赋值绕过了 TTL 与「同一条不重复弹」的去重，
+            // 这条提示会一直挂在页面上，后面所有 showNotice 也覆盖不掉它。
+            showNotice(context.getString(R.string.forge_workspace_unavailable))
+        }
+    }
+
+    /**
+     * 启动挂起窗口内新到的导航请求（开某会话 / 开新对话）：`start()` 只在拉起 server 前
+     * 取一次 pending，窗口内点进来的请求会留在字段里，等到下次 start 才被消费——表现为
+     * 「点了没反应」，隔一次进面板又莫名跳走。Ready 之后补一次消费，把它就地执行掉。
+     */
+    private fun replayPendingNavigation() {
+        val queuedOpen = pendingOpenSessionId
+        if (queuedOpen != null) {
+            pendingOpenSessionId = null
+            pendingBlank = false
+            openSession(queuedOpen)
+            return
+        }
+        if (pendingBlank) {
+            pendingBlank = false
+            newConversation()
         }
     }
 
@@ -511,6 +571,13 @@ internal class ForgeChatState(
      */
     fun switchWorkspace(name: String) {
         if (workspace?.name == name) return
+        // 侧边栏/外部调用可能递来一个已经被删掉的工作区名：写进 prefs 会让「当前工作区」
+        // 指向不存在的挂载，server 起来后 cwd 落空、会话成了孤儿。这里先校验存在性。
+        if (ForgeWorkspaces.all().none { it.name == name }) {
+            showNotice(context.getString(R.string.forge_workspace_unavailable))
+            refreshWorkspaceState()
+            return
+        }
         ForgeWorkspaces.select(name)
         refreshWorkspaceState()
         resetAndRestartServer()
@@ -522,11 +589,16 @@ internal class ForgeChatState(
         resetAndRestartServer()
     }
 
-    /** 侧边栏里增删改名了工作区：当前工作区跟着变了才重启 server 切过去，没变只刷新列表。 */
+    /**
+     * 侧边栏里增删改名了工作区：只有「当前工作区名变了」才重启 server。名字没变但挂载集合
+     * 变了（改名往返、删掉别的挂载、挂载表重排）时 server 的 --cwd 与可见挂载都已过期，
+     * 会话会写进旧目录，因此再加一条挂载指纹比对。
+     */
     fun onWorkspacesStructureChanged() {
-        val before = workspace?.name
+        val beforeName = workspace?.name
+        val beforeFingerprint = ForgeWorkspaces.mountsFingerprint()
         refreshWorkspaceState()
-        if (workspace?.name != before) {
+        if (workspace?.name != beforeName || ForgeWorkspaces.mountsFingerprint() != beforeFingerprint) {
             resetAndRestartServer()
         }
     }
@@ -576,6 +648,11 @@ internal class ForgeChatState(
     fun retry() {
         startJob?.cancel()
         startJob = null
+        // 重试是「从头再来」：上一轮留下的错误条、秒表起点、残提问都必须清掉，否则失败页
+        // 重试成功后仍带着旧的 turnError 与一个从上次开始就算的计时。
+        turnError = null
+        turnStartedAtMs = 0L
+        pendingQuestion = null
         start()
     }
 
@@ -625,22 +702,27 @@ internal class ForgeChatState(
         if (text.isBlank() && attachments.isEmpty()) return
         pendingAttachments = emptyList()
         if (busy) {
-            queuedSends = queuedSends + ForgeQueuedSend(text, attachments)
-            queuedTexts = queuedSends.map { queued ->
-                queued.text.ifBlank { queued.attachments.firstOrNull()?.displayName.orEmpty() }
-            }
+            queuedSends = queuedSends + ForgeQueuedSend(++nextQueuedId, text, attachments)
+            syncQueueState()
             return
         }
         launchSend(text, attachments)
     }
 
-    /** 删掉一条排队中的发送（输入栏队列条上的删除）。 */
-    fun removeQueuedMessage(index: Int) {
-        if (index !in queuedSends.indices) return
-        queuedSends = queuedSends.filterIndexed { i, _ -> i != index }
+    /** 队列的两个对外列表（文本 + 稳定 id）永远一起更新，别让它们错位。 */
+    private fun syncQueueState() {
         queuedTexts = queuedSends.map { queued ->
             queued.text.ifBlank { queued.attachments.firstOrNull()?.displayName.orEmpty() }
         }
+        queuedIds = queuedSends.map { it.id }
+    }
+
+    /** 删掉一条排队中的发送（输入栏队列条上的删除）：按稳定 id 删，不按位置。 */
+    fun removeQueuedMessage(id: Long) {
+        val remaining = queuedSends.filterNot { it.id == id }
+        if (remaining.size == queuedSends.size) return
+        queuedSends = remaining
+        syncQueueState()
     }
 
     fun addAttachment(attachment: ForgePendingAttachment) {
@@ -656,15 +738,13 @@ internal class ForgeChatState(
         if (busy) return
         val next = queuedSends.firstOrNull() ?: return
         queuedSends = queuedSends.drop(1)
-        queuedTexts = queuedSends.map { queued ->
-            queued.text.ifBlank { queued.attachments.firstOrNull()?.displayName.orEmpty() }
-        }
+        syncQueueState()
         launchSend(next.text, next.attachments)
     }
 
     private fun clearQueue() {
         queuedSends = emptyList()
-        queuedTexts = emptyList()
+        syncQueueState()
     }
 
     /**
@@ -924,6 +1004,10 @@ internal class ForgeChatState(
     private fun sanitizeFilename(raw: String): String {
         val cleaned = raw.trim()
             .replace(Regex("\\s+"), "_")
+            // 分隔符与 .. 必须在这里就清掉：附件名来自 SAF 的 displayName（外部来源，不可信），
+            // 直接拼进工作区路径时 ../ 会写到工作区之外。
+            .replace(Regex("[/\\\\]+"), "_")
+            .replace("..", "_")
             .replace(Regex("[?#%<>:\\\"|*]"), "")
         return cleaned.ifBlank { "file" }
     }
@@ -991,6 +1075,9 @@ internal class ForgeChatState(
             return
         }
         if (id == sessionId) return
+        // 明确要打开某个会话时，之前记下的「下次落空白页」就作废：两者是互斥的导航意图，
+        // 不清掉的话这次打开成功、下次进面板却又莫名回到空白页。
+        pendingBlank = false
         // 连点两个会话时只认最后一次：取消上一个打开任务，迟到的加载结果不许覆盖。
         openJob?.cancel()
         invalidateInFlightSend()
@@ -1050,15 +1137,19 @@ internal class ForgeChatState(
             if (result.isSuccess) {
                 if (sessionId == id) {
                     val value = result.getOrThrow()
-                    setBusy(value, "open-align")
-                    if (value) markBusyObserved()
+                    // 发送在途时服务端一定还没开跑（状态是 idle）：这时对齐出来的 false
+                    // 会把刚点发送的等待行直接收掉。有在途发送就不许用它覆盖 busy。
+                    if (!sendInFlight) {
+                        setBusy(value, "open-align")
+                        if (value) markBusyObserved()
+                    }
                 }
                 return@launch
             }
             delay(BUSY_ALIGN_RETRY_DELAY_MS)
-            if (sessionId != id) return@launch
+            if (sessionId != id || sendInFlight) return@launch
             api.sessionBusy(id).onSuccess {
-                if (sessionId == id) {
+                if (sessionId == id && !sendInFlight) {
                     setBusy(it, "open-align-retry")
                     if (it) markBusyObserved()
                 }
@@ -1117,10 +1208,30 @@ internal class ForgeChatState(
 
     /** 向服务端对齐当前会话挂起中的 question（事件可能在断线/切会话期间错过）。 */
     private suspend fun refreshPendingQuestion(id: String) {
-        api.listPendingQuestions().onSuccess { list ->
-            if (sessionId == id) {
-                pendingQuestion = list.firstOrNull { it.sessionId == id }
-            }
+        val probe = api.listPendingQuestions()
+        // 查询失败不等于「没有提问」：照旧保留手上的卡，别把可答的卡清掉、整轮没人能回答。
+        if (probe.isFailure) return
+        val fetched = probe.getOrNull()?.firstOrNull { it.sessionId == id }
+        if (sessionId != id) return
+        if (fetched != null) {
+            pendingQuestion = fetched
+            return
+        }
+        // 列表里没有本会话的卡，但手上正好有一张：它可能是这次请求发出之后才到的 question.asked
+        // （响应早于它生成）。隔一拍再确认一次，仍然没有才清——直接清会让用户丢掉这道题。
+        val current = pendingQuestion ?: run {
+            // 手上也没有卡：确认页面已经是「无卡」状态即可。
+            pendingQuestion = null
+            return
+        }
+        if (current.sessionId != id) return
+        delay(PENDING_QUESTION_RECHECK_MS)
+        if (sessionId != id) return
+        val again = api.listPendingQuestions().getOrNull()?.firstOrNull { it.sessionId == id }
+        if (again != null) {
+            pendingQuestion = again
+        } else if (pendingQuestion?.id == current.id) {
+            pendingQuestion = null
         }
     }
 
@@ -1140,8 +1251,10 @@ internal class ForgeChatState(
             if (summary.title.isNotBlank() && !summary.title.startsWith("New session")) {
                 return@launch
             }
-            api.renameSession(id, firstUserText.take(30))
-            onSessionsChanged(id)
+            // 改名成功才需要刷新列表：失败时再刷一次只会多打一次全量会话请求（每轮 2-3 次）。
+            if (api.renameSession(id, firstUserText.take(30)).isSuccess) {
+                onSessionsChanged(id)
+            }
         }
     }
 
@@ -1166,6 +1279,12 @@ internal class ForgeChatState(
         openJob?.cancel()
         idleConfirmJob?.cancel()
         noticeJob?.cancel()
+        // 发送协程也要掐：面板销毁（子页往返、切到别的 tab）后它还在跑，回写会打到
+        // 已经不在屏幕上的 state，重新进面板时那次发送的收尾还会把新页面的 busy 改掉。
+        sendJob?.cancel()
+        sendJob = null
+        sendInFlight = false
+        sendGeneration++
     }
 
     private fun subscribe(id: String) {
@@ -1235,8 +1354,13 @@ internal class ForgeChatState(
 
     /** 收到内容活动时的统一处理：刷新活动时刻、busy 兜底补置。待确认的 idle 不在这里撤销——确认循环自己会看活动时刻，活动变了它会重新等一段静默期。 */
     private fun onSessionActivity() {
-        lastActivityAtMs = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        lastActivityAtMs = now
         if (!busy) {
+            // 一轮刚收尾（idle 已确认）之后紧跟着到的 part 是同一轮的收尾尾巴（合并后的
+            // 快照、迟到的 delta）。把它当新一轮会在界面上闪一下「正在思考」，还会再挂一次
+            // 结束确认——那一拍里服务端确实闲，于是又走一遍 drainQueue。宁可只刷新活动时刻。
+            if (!sendInFlight && now - idleConfirmedAtMs < LATE_PART_GRACE_MS) return
             // 有 part 在动就说明这一轮在跑：打开会话时 busy 对齐失败留下的假空闲靠这里兜底。
             setBusy(true, "part-activity")
             markBusyObserved()
@@ -1316,6 +1440,10 @@ internal class ForgeChatState(
     /** 一轮真正结束时的收尾：放开 busy、通知列表刷新、补标题、续发队列。 */
     private fun finishIdle(session: String) {
         setBusy(false, "idle-confirmed")
+        // 记下收尾时刻：紧接着到的 part 属于同一轮，不再复活 busy（见 onSessionActivity）。
+        idleConfirmedAtMs = SystemClock.elapsedRealtime()
+        // 计时起点归零：下一轮从用户点发送那刻重新起算，否则等待行会显示上一轮的总时长。
+        turnStartedAtMs = 0L
         // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
         onSessionsChanged(session)
         maybeSetFallbackTitle(session)
@@ -1393,11 +1521,14 @@ internal class ForgeChatState(
                 // 以前 requestId 为空就无条件清当前卡，别的会话答完题会把这边的卡误撤，
                 // 而这边还挂在提问上没人答、整轮挂死。
                 val current = pendingQuestion
-                if (current != null && event.requestId.isNotBlank() &&
-                    event.requestId == current.id &&
-                    (event.sessionId == null || event.sessionId == session)
-                ) {
-                    pendingQuestion = null
+                if (current != null && (event.sessionId == null || event.sessionId == session)) {
+                    if (event.requestId.isNotBlank()) {
+                        if (event.requestId == current.id) pendingQuestion = null
+                    } else {
+                        // 兜底：服务端没带请求 id（字段改名/旧版本）时，会话对得上就认这次清除。
+                        // 会话内同时只可能有一张卡（pendingQuestion 是单值），误撤范围限于本会话。
+                        pendingQuestion = null
+                    }
                 }
             }
 
@@ -1406,8 +1537,19 @@ internal class ForgeChatState(
     }
 
     private fun ensureMessage(messageId: String, role: ForgeRole) {
-        if (messages.any { it.id == messageId }) return
-        messages = messages + ForgeChatMessage(id = messageId, role = role, parts = emptyList())
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index < 0) {
+            messages = messages + ForgeChatMessage(id = messageId, role = role, parts = emptyList())
+            return
+        }
+        // part 事件可能先于 message.updated 到达，占位消息只能先按 Assistant 建；真正的角色
+        // 到了必须纠正回来，否则用户消息被当成助手消息渲染（没有用户气泡、错误条也挂错行）。
+        val existing = messages[index]
+        if (existing.role != role) {
+            val updated = messages.toMutableList()
+            updated[index] = existing.copy(role = role)
+            messages = updated
+        }
     }
 
     private fun upsertPart(part: ForgePart) {
@@ -1437,22 +1579,22 @@ internal class ForgeChatState(
 
     /**
      * part.updated 的开始快照 text 为空，不能把 delta 已攒出的文本冲掉；
-     * 未结束的文本/思考段只接受不比现有短的全文，结束快照的全文照单全收。
+     * 未结束的文本/思考段只接受不比现有短的全文。
+     * 结束快照一般带全文，但服务端也会发「只带已确认前缀」的结束快照：这种情况下
+     * （更短且是现有文本的前缀）采用现有文本，只把 ended 标记收下——否则回复尾部会被截断。
      */
     private fun mergePartText(existing: ForgePart, incoming: ForgePart): ForgePart = when {
-        existing is ForgePart.Text && incoming is ForgePart.Text ->
-            if (!incoming.ended && incoming.text.length < existing.text.length) {
-                incoming.copy(text = existing.text)
-            } else {
-                incoming
-            }
+        existing is ForgePart.Text && incoming is ForgePart.Text -> when {
+            incoming.text.length >= existing.text.length -> incoming
+            incoming.ended && existing.text.startsWith(incoming.text) -> incoming.copy(text = existing.text)
+            else -> incoming.copy(text = existing.text)
+        }
 
-        existing is ForgePart.Reasoning && incoming is ForgePart.Reasoning ->
-            if (!incoming.ended && incoming.text.length < existing.text.length) {
-                incoming.copy(text = existing.text)
-            } else {
-                incoming
-            }
+        existing is ForgePart.Reasoning && incoming is ForgePart.Reasoning -> when {
+            incoming.text.length >= existing.text.length -> incoming
+            incoming.ended && existing.text.startsWith(incoming.text) -> incoming.copy(text = existing.text)
+            else -> incoming.copy(text = existing.text)
+        }
 
         else -> incoming
     }
@@ -1502,6 +1644,12 @@ internal class ForgeChatState(
 
         /** 打开会话后 busy 对齐失败的重试延迟。 */
         const val BUSY_ALIGN_RETRY_DELAY_MS = 600L
+
+        /** 收尾后多久内到的 part 视为同一轮的尾巴（不复活 busy、不再挂结束确认）。 */
+        const val LATE_PART_GRACE_MS = 1_500L
+
+        /** refreshPendingQuestion 发现「列表空但手上有卡」时的复核间隔。 */
+        const val PENDING_QUESTION_RECHECK_MS = 400L
 
         /** 错误提示的自动消失时长，别再永久挂着跨操作残留。 */
         const val NOTICE_TTL_MS = 6_000L

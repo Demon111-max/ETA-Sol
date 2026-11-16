@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -137,6 +138,8 @@ internal fun ForgeChatPane(
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
+    /** 打开侧边栏（工作区列表在那里）：空页的工作区卡片点一下就走到这。 */
+    onOpenWorkspacePicker: () -> Unit = {},
 ) {
     // 状态由 AgentAppRoot 持有后传进来：面板整块销毁重建（进设置/终端子页再回来）时
     // 草稿、待发附件、排队消息、当前会话都跟着状态活着。start() 自己会在已 Ready 时
@@ -190,6 +193,7 @@ internal fun ForgeChatPane(
                     state = state,
                     topInset = topInset,
                     bottomInset = bottomStackHeight,
+                    onOpenWorkspacePicker = onOpenWorkspacePicker,
                 )
             }
         }
@@ -367,6 +371,7 @@ private fun ForgeTranscript(
     state: ForgeChatState,
     topInset: Dp = 0.dp,
     bottomInset: Dp = 0.dp,
+    onOpenWorkspacePicker: () -> Unit = {},
 ) {
     val messages = state.messages
     if (messages.isEmpty()) {
@@ -427,6 +432,9 @@ private fun ForgeTranscript(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(18.dp))
                         .background(MiuixTheme.colorScheme.tertiaryContainer)
+                        // 空页这张卡是「产出落在哪」的唯一说明：给它一个出口，
+                        // 点一下能去侧边栏切工作区/新建工作区，而不是只能干看。
+                        .clickable { onOpenWorkspacePicker() }
                         .padding(horizontal = 16.dp, vertical = 13.dp),
                 ) {
                     if (workspace != null) {
@@ -445,6 +453,13 @@ private fun ForgeTranscript(
                                 color = MiuixTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = Icons.Rounded.KeyboardArrowRight,
+                                contentDescription = stringResource(R.string.forge_empty_switch_hint),
+                                modifier = Modifier.size(18.dp),
+                                tint = dshTertiaryColor(),
                             )
                         }
                         Text(
@@ -456,11 +471,29 @@ private fun ForgeTranscript(
                             modifier = Modifier.padding(start = 27.dp, top = 3.dp),
                         )
                     } else {
-                        Text(
-                            text = stringResource(R.string.forge_workspace_unavailable),
-                            style = MiuixTheme.textStyles.footnote1,
-                            color = dshTertiaryColor(),
-                        )
+                        // 一个工作区都没有：这里必须给出入口，否则新用户连第一句话都发不出去
+                        // （没有工作区就没有可写目录，会话也不该建）。
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.FolderOpen,
+                                contentDescription = null,
+                                modifier = Modifier.size(19.dp),
+                                tint = MiuixTheme.colorScheme.primary,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = stringResource(R.string.forge_workspace_unavailable),
+                                style = MiuixTheme.textStyles.footnote1,
+                                color = dshTertiaryColor(),
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = Icons.Rounded.KeyboardArrowRight,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = dshTertiaryColor(),
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(14.dp))
@@ -491,13 +524,21 @@ private fun ForgeTranscript(
     // 新内容不许抢屏，改出一个回到底部的按钮。以前是每个 delta 无条件 scrollToItem，
     // 流式期间根本没法往上看。
     var followBottom by remember { mutableStateOf(true) }
+    // 判定容差：末项底边离视口底还有这么多像素以内，仍算「停在底部」。
+    val followBottomSlackPx = with(LocalDensity.current) { FOLLOW_BOTTOM_SLACK.toPx() }
     LaunchedEffect(listState) {
         snapshotFlow { listState.layoutInfo }
             .collect { info ->
                 val total = info.totalItemsCount
                 if (total > 0) {
-                    val lastVisible = info.visibleItemsInfo.lastOrNull()?.index
-                    if (lastVisible != null) followBottom = lastVisible >= total - 1
+                    val last = info.visibleItemsInfo.lastOrNull()
+                    if (last != null) {
+                        // 只看「最后一项是否可见」不够：末项（一整轮回答）常常高于视口，用户
+                        // 上滑读它时末项仍可见，流式内容却一直把人拽回底部。要求末项的底边
+                        // 真的贴到视口底（含容差）才算贴底。
+                        followBottom = last.index >= total - 1 &&
+                            last.offset + last.size <= info.viewportEndOffset + followBottomSlackPx
+                    }
                 }
             }
     }
@@ -853,8 +894,8 @@ private fun ForgeComposer(
             ),
         )
     }
-    val queuedMessages = state.queuedTexts.mapIndexed { index, text ->
-        QueuedMessageUi(id = "forge-queue-$index", content = text)
+    val queuedMessages = state.queuedIds.zip(state.queuedTexts).map { (id, text) ->
+        QueuedMessageUi(id = "forge-queue-$id", content = text)
     }
     // 底部渐隐与 imePadding 已由外层底部整叠统一提供（盖住提问卡/输入区），
     // 这里只剩输入区本体，别再套一层渐隐免得交界处颜色叠深。
@@ -893,8 +934,8 @@ private fun ForgeComposer(
                 canCompactContext = false,
                 onSubmit = onSend,
                 onRemoveQueuedMessage = { id ->
-                    id.removePrefix("forge-queue-").toIntOrNull()
-                        ?.let { index -> state.removeQueuedMessage(index) }
+                    id.removePrefix("forge-queue-").toLongOrNull()
+                        ?.let { queuedId -> state.removeQueuedMessage(queuedId) }
                 },
                 onStop = onStop,
                 onAttachImage = { uri ->
@@ -1081,6 +1122,9 @@ private fun materializePathEntry(context: Context, rawPath: String): ForgePendin
 
 private const val MAX_STAGED_ATTACHMENT_BYTES = 64L * 1024 * 1024
 private const val MAX_PREVIEW_BYTES = 1_500_000
+
+/** 判定「列表停在底部」的容差：末项底边离视口底这么近就算贴底，避免像素级抖动误判成上滑。 */
+private val FOLLOW_BOTTOM_SLACK = 8.dp
 
 /**
  * question 工具的提问卡：模型问了问题、整轮正挂起等回答。

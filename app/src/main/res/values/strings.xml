@@ -1629,4 +1629,12 @@
   <string name="forge_rename_failed">Rename failed. Try again later.</string>
   <string name="forge_delete_failed">Delete failed. Try again later.</string>
   <string name="forge_list_unavailable">Forge sessions could not be loaded. They will appear once the Forge server is running.</string>
+  <string name="forge_workspace_removed_notice">Workspace removed. Its conversations stay on the server, but no longer belong to a workspace folder.</string>
+  <string name="forge_workspace_remove_failed">Could not remove that workspace. Try again.</string>
+  <string name="forge_ws_no_conversations">No conversations in these workspaces yet.</string>
+  <string name="forge_ws_no_matches">No conversations match your search.</string>
+  <string name="forge_session_archived_mark">Archived</string>
+  <string name="forge_folder_unreadable">This folder cannot be read. Pick another one.</string>
+  <string name="forge_folder_create_failed">The folder could not be created here.</string>
+  <string name="forge_folder_root_not_allowed">Pick a folder inside Phone storage, not the storage root itself.</string>
 </resources>

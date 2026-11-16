@@ -340,6 +340,10 @@ internal class ForgeApiClient(
     /**
      * 订阅 /event。服务端按 SSE 逐行下发，这里只关心 data 行；
      * 连接断开时把异常抛给上层，由上层重新拉全量消息对齐。
+     *
+     * SSE 允许多行 data（收到时按换行拼接成一个事件体），也允许 `event:`/`id:`/`retry:` 字段与
+     * `:` 注释行（心跳）。以前只认「单行 data 且立刻当整条事件」，多行事件会被拆成几段各自解析失败、
+     * 整条丢掉；现在攒着拼、能解析就派发，空行是事件边界，攒不住就丢掉，绝不无限吃内存。
      */
     fun events(): Flow<ForgeEvent> = flow {
         val request = Request.Builder()
@@ -354,23 +358,53 @@ internal class ForgeApiClient(
         call.execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val source = response.body.source() ?: throw IOException("empty event stream")
+            val pending = StringBuilder()
             while (currentCoroutineContext().isActive) {
                 val line = try {
                     source.readUtf8Line()
                 } catch (failure: IOException) {
                     if (currentCoroutineContext().isActive) throw failure else break
                 } ?: break
-                if (!line.startsWith("data:")) continue
-                val payload = line.removePrefix("data:").trim()
-                if (payload.isEmpty()) continue
-                val event = ForgeProtocol.parseEvent(payload) ?: continue
-                emit(event)
+                when {
+                    // 空行 = 一个事件的边界：把攒下的整段交出去，解析不出来就丢。
+                    line.isEmpty() -> {
+                        val payload = pending.toString().trim()
+                        pending.setLength(0)
+                        if (payload.isNotEmpty()) {
+                            ForgeProtocol.parseEvent(payload)?.let { emit(it) }
+                        }
+                    }
+
+                    // ":" 开头是注释/心跳，没有载荷。
+                    line.startsWith(":") -> Unit
+
+                    line.startsWith("data:") -> {
+                        if (pending.isNotEmpty()) pending.append('\n')
+                        pending.append(line.removePrefix("data:").trim())
+                        // 有些实现不在事件末尾补空行，单行即完整 JSON 时立刻派发；
+                        // parseEvent 对不完整 JSON 返回 null，于是继续攒下一行。
+                        val payload = pending.toString()
+                        val event = ForgeProtocol.parseEvent(payload)
+                        if (event != null) {
+                            pending.setLength(0)
+                            emit(event)
+                        } else if (pending.length > MAX_EVENT_PAYLOAD_CHARS) {
+                            pending.setLength(0)
+                        }
+                    }
+
+                    // event:/id:/retry: 等字段：事件类型与载荷都在 data 的 JSON 里，忽略。
+                    else -> Unit
+                }
             }
         }
     }.flowOn(Dispatchers.IO)
 
     private companion object {
         val JsonMediaType = "application/json; charset=utf-8".toMediaType()
+
+        /** 单条事件体的上限：多行 data 攒超过这个长度就认定是脏数据，直接丢掉，避免无界增长。 */
+        const val MAX_EVENT_PAYLOAD_CHARS = 4 * 1024 * 1024
     }
 }
 

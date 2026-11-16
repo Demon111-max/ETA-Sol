@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.forge
 
+import io.github.mangi.eta.agent.terminal.PrefsWriteLock
 import io.github.mangi.eta.agent.terminal.SharedFolderMount
 import io.github.mangi.eta.agent.terminal.SharedFolderMounts
 import io.github.mangi.eta.config.Prefs
@@ -162,28 +163,28 @@ internal object ForgeWorkspaces {
      * 一个 `cd` 不进去的工作区，所以不保存挂载、也不写 created-once 标记，让下次进 Forge 再试。
      * 已存在的挂载同样要复核目录：缺失就补建，补不出来也不能当成可用的默认工作区（仍不写标记）。
      */
-    fun ensureDefault(): ForgeWorkspace? {
+    fun ensureDefault(): ForgeWorkspace? = synchronized(PrefsWriteLock.lock) {
         val mounts = SharedFolderMounts.current()
         mounts.firstOrNull { it.name == DEFAULT_NAME }
             ?.let { mount ->
-                if (!ensureSourceDir(mount.sourcePath)) return null
+                if (!ensureSourceDir(mount.sourcePath)) return@synchronized null
                 markDefaultCreated()
-                return ForgeWorkspace(mount.name, mount.sourcePath)
+                return@synchronized ForgeWorkspace(mount.name, mount.sourcePath)
             }
         mounts.firstOrNull { it.sourcePath == DEFAULT_SOURCE }
             ?.let { mount ->
-                if (!ensureSourceDir(mount.sourcePath)) return null
+                if (!ensureSourceDir(mount.sourcePath)) return@synchronized null
                 markDefaultCreated()
-                return ForgeWorkspace(mount.name, mount.sourcePath)
+                return@synchronized ForgeWorkspace(mount.name, mount.sourcePath)
             }
-        if (defaultCreated()) return null
-        if (!ensureSourceDir(DEFAULT_SOURCE)) return null
-        if (SharedFolderMounts.validateName(DEFAULT_NAME, mounts) != null) return null
-        if (SharedFolderMounts.validateSource(DEFAULT_SOURCE, mounts) != null) return null
+        if (defaultCreated()) return@synchronized null
+        if (!ensureSourceDir(DEFAULT_SOURCE)) return@synchronized null
+        if (SharedFolderMounts.validateName(DEFAULT_NAME, mounts) != null) return@synchronized null
+        if (SharedFolderMounts.validateSource(DEFAULT_SOURCE, mounts) != null) return@synchronized null
         val updated = mounts + SharedFolderMount(name = DEFAULT_NAME, sourcePath = DEFAULT_SOURCE)
-        if (!SharedFolderMounts.save(updated)) return null
+        if (!SharedFolderMounts.save(updated)) return@synchronized null
         markDefaultCreated()
-        return ForgeWorkspace(DEFAULT_NAME, DEFAULT_SOURCE)
+        ForgeWorkspace(DEFAULT_NAME, DEFAULT_SOURCE)
     }
 
     /** 当前选中的工作区：持久化的选择还存在就用它，否则默认工作区，再否则第一条；一条都没有返回 null。 */
@@ -200,63 +201,89 @@ internal object ForgeWorkspaces {
     }
 
     fun select(name: String) {
+        // 与增删改名共用一把锁：选择与挂载表改动交错时，别写回一个刚被删掉的名字。
+        synchronized(PrefsWriteLock.lock) {
+            runCatching {
+                Prefs.localAgentPreferences()?.edit()?.putString(PREFS_KEY_CURRENT, name)?.apply()
+            }
+        }
+    }
+
+    /**
+     * 工作区被删掉后清掉「当前选择」指针——前提是它正指向 [name]。
+     * 留着不清的话：同名工作区重建时 prefs 里的旧名字会重新命中，旧选择凭空复活。
+     * 清空而不是改写成「剩下的首选」：currentSelection() 自带回落顺序（默认名 → 默认目录 → 第一条），
+     * 这里再写死一个名字，那个名字后面被删又会变成新的悬空指针。
+     */
+    private fun clearSelectionPointingTo(name: String) {
         runCatching {
-            Prefs.localAgentPreferences()?.edit()?.putString(PREFS_KEY_CURRENT, name)?.apply()
+            val prefs = Prefs.localAgentPreferences() ?: return
+            if (prefs.getString(PREFS_KEY_CURRENT, null) != name) return
+            prefs.edit().remove(PREFS_KEY_CURRENT).apply()
         }
     }
 
     /** 新建工作区：从 Android 目录路径推导挂载名（重名自动加后缀），建目录并保存挂载。 */
-    fun add(sourcePathRaw: String): Result<ForgeWorkspace> {
+    fun add(sourcePathRaw: String): Result<ForgeWorkspace> = synchronized(PrefsWriteLock.lock) {
         val source = SharedFolderMounts.normalizeSourcePath(sourcePathRaw)
-            ?: return Result.failure(IllegalArgumentException("invalid source path"))
+            ?: return@synchronized Result.failure(IllegalArgumentException("invalid source path"))
         val mounts = SharedFolderMounts.current()
         SharedFolderMounts.validateSource(source, mounts)?.let {
-            return Result.failure(IllegalArgumentException("source rejected: $it"))
+            return@synchronized Result.failure(IllegalArgumentException("source rejected: $it"))
+        }
+        // 读侧 decode() 超限时会静默截断，写侧必须先把话说清楚：
+        // 否则第 17 个工作区「添加成功」，下次 all() 里凭空消失。
+        if (mounts.size >= SharedFolderMounts.MAX_MOUNTS) {
+            return@synchronized Result.failure(
+                IllegalStateException("too many workspaces: limit is ${SharedFolderMounts.MAX_MOUNTS}"),
+            )
         }
         // 目录建不出来就别保存：否则「添加成功」的挂载在环境里 cd 不进去。
         if (!ensureSourceDir(source)) {
-            return Result.failure(IllegalStateException("cannot create directory: $source"))
+            return@synchronized Result.failure(IllegalStateException("cannot create directory: $source"))
         }
         var name = SharedFolderMounts.defaultName(source)
         var suffix = 2
         while (SharedFolderMounts.validateName(name, mounts) != null) {
             name = "${SharedFolderMounts.defaultName(source).take(44)}-$suffix"
             suffix++
-            if (suffix > 32) return Result.failure(IllegalArgumentException("cannot derive unique name"))
+            if (suffix > 32) return@synchronized Result.failure(IllegalArgumentException("cannot derive unique name"))
         }
         val workspace = ForgeWorkspace(name = name, sourcePath = source)
         val saved = SharedFolderMounts.save(mounts + SharedFolderMount(name = name, sourcePath = source))
-        return if (saved) Result.success(workspace) else Result.failure(IllegalStateException("save failed"))
+        return@synchronized if (saved) Result.success(workspace) else Result.failure(IllegalStateException("save failed"))
     }
 
     /**
      * 改名：只改挂载名（Linux 路径随之变），目录内容不动；改的是当前工作区时选择跟着走。
      * 会话的 directory 不迁移（那是 server 侧数据），改为记一条别名，由 [canonicalDirectory] 归位。
      */
-    fun rename(oldName: String, newNameRaw: String): Result<ForgeWorkspace> {
+    fun rename(oldName: String, newNameRaw: String): Result<ForgeWorkspace> = synchronized(PrefsWriteLock.lock) {
         val mounts = SharedFolderMounts.current()
         val target = mounts.firstOrNull { it.name == oldName }
-            ?: return Result.failure(IllegalArgumentException("workspace not found"))
+            ?: return@synchronized Result.failure(IllegalArgumentException("workspace not found"))
         val wasCurrent = currentSelection()?.name == oldName
         val newName = newNameRaw.trim()
         val others = mounts.filter { it.name != oldName }
         SharedFolderMounts.validateName(newName, others)?.let {
-            return Result.failure(IllegalArgumentException("name rejected: $it"))
+            return@synchronized Result.failure(IllegalArgumentException("name rejected: $it"))
         }
         val saved = SharedFolderMounts.save(others + SharedFolderMount(name = newName, sourcePath = target.sourcePath))
-        if (!saved) return Result.failure(IllegalStateException("save failed"))
+        if (!saved) return@synchronized Result.failure(IllegalStateException("save failed"))
         recordAlias(oldName, newName)
         if (wasCurrent) select(newName)
-        return Result.success(ForgeWorkspace(newName, target.sourcePath))
+        return@synchronized Result.success(ForgeWorkspace(newName, target.sourcePath))
     }
 
     /** 移除工作区：只删挂载记录，文件夹与里面的文件都不动；指向它的别名一并清掉，免得删了又被指回来。 */
-    fun remove(name: String): Boolean {
+    fun remove(name: String): Boolean = synchronized(PrefsWriteLock.lock) {
         val mounts = SharedFolderMounts.current()
-        if (mounts.none { it.name == name }) return false
-        if (!SharedFolderMounts.save(mounts.filter { it.name != name })) return false
+        if (mounts.none { it.name == name }) return@synchronized false
+        if (!SharedFolderMounts.save(mounts.filter { it.name != name })) return@synchronized false
         clearAliasesPointingTo(name)
-        return true
+        // 删掉的就是当前工作区时把这个指针也清掉：prefs 里留着旧名字，同名重建时旧选择会自己复活。
+        clearSelectionPointingTo(name)
+        true
     }
 
     /** 当前全部挂载的指纹：server 启动时焊入的是当时的挂载集合，指纹变了说明挂载改过、在跑的 server 看不到新挂载。 */

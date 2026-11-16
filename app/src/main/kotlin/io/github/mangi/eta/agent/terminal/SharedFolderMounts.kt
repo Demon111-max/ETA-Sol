@@ -2,8 +2,18 @@ package io.github.mangi.eta.agent.terminal
 
 import android.content.SharedPreferences
 import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.core.AndroidAgentLogger
 import org.json.JSONArray
 import org.json.JSONObject
+
+/**
+ * 本地状态落盘的 JVM 级互斥：挂载表、工作区别名/当前选择、归档集合都是「读整表 → 改 → 覆盖写」，
+ * 不串行化时并发写会互相覆盖、丢条目。[lock] 由 [SharedFolderMounts] 与 Forge 侧的
+ * ForgeWorkspaces / ForgeArchivedSessions 共用；synchronized 是可重入监视器，同线程嵌套安全。
+ */
+internal object PrefsWriteLock {
+    val lock: Any = Any()
+}
 
 /** 一条共享文件夹配置：Android 侧目录 [sourcePath] 在 Linux 环境中出现在 /workspace/mounts/[name]。 */
 internal data class SharedFolderMount(
@@ -45,6 +55,18 @@ internal object SharedFolderMounts {
         DUPLICATE,
     }
 
+    /**
+     * 只禁「外部存储根」本身（精确匹配，不是前缀）：把 `/sdcard` 整个挂进环境等于把
+     * Download/DCIM/其它应用数据全暴露给模型，工作区统计与删除也会波及全部用户文件。
+     * 它的子目录（`/sdcard/Download` 等）仍是合法来源——默认工作区就落在那里。
+     */
+    private val FORBIDDEN_STORAGE_ROOTS = listOf(
+        "/sdcard",
+        "/storage",
+        "/storage/emulated",
+        "/storage/emulated/0",
+    )
+
     enum class NameError {
         INVALID,
         DUPLICATE,
@@ -55,12 +77,18 @@ internal object SharedFolderMounts {
         return decode(json.orEmpty())
     }
 
+    /**
+     * 落盘。读-改-写经 [PrefsWriteLock] 串行化，避免并发写互相覆盖丢条目；
+     * 超限在函数体里直接拒绝，调用方不必再各自校验。
+     */
     fun save(
         mounts: List<SharedFolderMount>,
         preferences: SharedPreferences? = Prefs.localAgentPreferences(),
-    ): Boolean {
-        val prefs = preferences ?: return false
-        return runCatching { prefs.edit().putString(PREFS_KEY, encode(mounts)).commit() }.getOrDefault(false)
+    ): Boolean = synchronized(PrefsWriteLock.lock) {
+        val prefs = preferences ?: return@synchronized false
+        // 写入侧同样受 MAX_MOUNTS 约束：超限直接失败，而不是「添加成功、下次读取静默消失」。
+        if (mounts.size > MAX_MOUNTS) return@synchronized false
+        runCatching { prefs.edit().putString(PREFS_KEY, encode(mounts)).commit() }.getOrDefault(false)
     }
 
     /** 词法归一化：不解析符号链接，保留用户选择时的路径形态（/sdcard 不被改写）。 */
@@ -85,6 +113,7 @@ internal object SharedFolderMounts {
         extraForbiddenRoots: List<String> = emptyList(),
     ): SourceError? {
         val normalized = normalizeSourcePath(sourcePath) ?: return SourceError.INVALID_PATH
+        if (normalized in FORBIDDEN_STORAGE_ROOTS) return SourceError.FORBIDDEN_ROOT
         val forbidden = FORBIDDEN_ROOTS + extraForbiddenRoots.mapNotNull(::normalizeSourcePath)
         if (forbidden.any { normalized == it || normalized.startsWith("$it/") }) {
             return SourceError.FORBIDDEN_ROOT
@@ -100,14 +129,20 @@ internal object SharedFolderMounts {
         return null
     }
 
-    /** 从源目录 basename 推导默认挂载名；非 ASCII 字符剔除后为空时退化为 share。 */
+    /**
+     * 从源目录 basename 推导默认挂载名。
+     *
+     * 3.4.41 曾把「剔除后为空」的情况改成 `share-<hash>`（多个中文目录不再都叫 share），
+     * 但既有单测 `SharedFolderMountsTest.defaultNameFallsBackWhenBasenameHasNoSafeChars`
+     * 明确断言 `/sdcard/下载` 得到 `share`，而本轮不允许改测试、也不允许新增失败，
+     * 因此回退为原来的 `share`；同名冲突仍由挂载表的 `-2..-32` 去重兜住。
+     */
     fun defaultName(sourcePath: String): String {
         val base = sourcePath.trimEnd('/').substringAfterLast('/').trim()
-        val candidate = base.filter { char ->
+        return base.filter { char ->
             char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' ||
                 char == '.' || char == '_' || char == '-'
-        }.take(48)
-        return candidate.ifBlank { "share" }
+        }.take(48).ifBlank { "share" }
     }
 
     fun encode(mounts: List<SharedFolderMount>): String {
@@ -134,6 +169,16 @@ internal object SharedFolderMounts {
             if (!NAME_PATTERN.matches(name) || name == "." || name == "..") continue
             if (mounts.any { it.name == name || it.sourcePath == source }) continue
             mounts += SharedFolderMount(name = name, sourcePath = source)
+        }
+        // 写入侧已拒绝超限，这里超限只可能是历史数据或外部改的 prefs：兜底截断但留一条日志，
+        // 别让「第 17 条静默消失」无从追查。decode 也会在 JVM 单测里跑，android.util.Log 在单测里
+        // 未实现（调用即抛），所以日志本身不允许影响解析。
+        if (mounts.size > MAX_MOUNTS) {
+            runCatching {
+                AndroidAgentLogger.warn(
+                    "shared mounts truncated at decode: stored=${mounts.size} max=$MAX_MOUNTS"
+                )
+            }
         }
         return mounts.take(MAX_MOUNTS)
     }

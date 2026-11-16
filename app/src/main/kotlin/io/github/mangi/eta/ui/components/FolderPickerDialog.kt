@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import io.github.mangi.eta.R
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Icon
@@ -58,31 +60,53 @@ internal fun FolderPickerDialog(
     onConfirm: (String) -> Unit,
 ) {
     val colors = MiuixTheme.colorScheme
-    var currentPath by remember { mutableStateOf(PICKER_ROOT) }
+    // 当前目录与隐藏文件开关要能扛住配置变更/进程重建（rememberSaveable），
+    // 否则转屏后选择器会跳回 /sdcard。
+    var currentPath by rememberSaveable { mutableStateOf(PICKER_ROOT) }
     var entries by remember { mutableStateOf<List<File>>(emptyList()) }
     var loadFailed by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
-    var showHidden by remember { mutableStateOf(false) }
+    var showHidden by rememberSaveable { mutableStateOf(false) }
     var refreshTick by remember { mutableStateOf(0) }
     var newFolderOpen by remember { mutableStateOf(false) }
+    var confirmError by remember { mutableStateOf<String?>(null) }
+    var createError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(currentPath, showHidden, refreshTick) {
+        // 切目录时先复位：否则上一目录的「读取失败」会闪一下，而且确认按钮会沿用旧结论。
         loaded = false
-        val result = withContext(Dispatchers.IO) {
-            runCatching {
+        loadFailed = false
+        confirmError = null
+        entries = emptyList()
+        var failed = false
+        val listed = withContext(Dispatchers.IO) {
+            try {
                 File(currentPath).listFiles()
                     ?.filter { it.isDirectory && (showHidden || !it.name.startsWith(".")) }
                     ?.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            } catch (cancellation: CancellationException) {
+                // 协程取消必须继续上抛，不能被当成「读取失败」（否则取消一次就闪一屏错误）。
+                throw cancellation
+            } catch (failure: Throwable) {
+                failed = true
+                null
             }
         }
-        entries = result.getOrNull() ?: emptyList()
-        loadFailed = result.getOrNull() == null
+        entries = listed ?: emptyList()
+        // listFiles() 返回 null 也代表读不出来（不是目录 / 无权限），一并算失败。
+        loadFailed = failed || listed == null
         loaded = true
     }
 
     val segments = remember(currentPath) {
         currentPath.removePrefix(PICKER_ROOT).split('/').filter { it.isNotBlank() }
     }
+    // 「打开」的前置条件：列表已读完且没失败，且不能是共享存储根目录本身（那是目录树起点，不是工程目录）。
+    val atStorageRoot = currentPath == PICKER_ROOT
+    val canConfirm = loaded && !loadFailed && !atStorageRoot
+    val rootNotAllowedText = stringResource(R.string.forge_folder_root_not_allowed)
+    val unreadableText = stringResource(R.string.forge_folder_unreadable)
+    val createFailedText = stringResource(R.string.forge_folder_create_failed)
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -181,6 +205,30 @@ internal fun FolderPickerDialog(
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
+            if (atStorageRoot) {
+                Text(
+                    text = rootNotAllowedText,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = colors.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+            }
+            confirmError?.let { message ->
+                Text(
+                    text = message,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = colors.error,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+            }
+            createError?.let { message ->
+                Text(
+                    text = message,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = colors.error,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 PickerPillButton(
                     text = stringResource(R.string.folder_picker_new_folder),
@@ -203,9 +251,22 @@ internal fun FolderPickerDialog(
                 )
                 PickerPillButton(
                     text = stringResource(R.string.folder_picker_open),
-                    onClick = { onConfirm(currentPath) },
+                    // 确认前再校验一次真实可读性：列表读失败、或目标目录不存在/不可读时只在本地报错，
+                    // 不把坏路径交给上层（否则会建出一个永远用不了的工作区）。
+                    onClick = {
+                        val target = File(currentPath)
+                        when {
+                            atStorageRoot -> confirmError = rootNotAllowedText
+                            !target.isDirectory || !target.canRead() -> confirmError = unreadableText
+                            else -> {
+                                confirmError = null
+                                onConfirm(currentPath)
+                            }
+                        }
+                    },
                     modifier = Modifier.weight(1f),
                     primary = true,
+                    enabled = canConfirm,
                 )
             }
         }
@@ -221,9 +282,12 @@ internal fun FolderPickerDialog(
                     if (created.isDirectory) true else created.mkdirs() && created.isDirectory
                 }.getOrDefault(false)
                 if (ok) {
+                    createError = null
                     // 建完直接进去，用户下一步多半就是「打开」选它当工作区。
                     currentPath = created.absolutePath
                 } else {
+                    // 建不出来（无权限 / 名字非法 / 只剩只读）要看得见，别静默什么都不发生。
+                    createError = createFailedText
                     refreshTick++
                 }
             },
@@ -261,6 +325,7 @@ private fun PickerPillButton(
     modifier: Modifier = Modifier,
     primary: Boolean = false,
     highlighted: Boolean = false,
+    enabled: Boolean = true,
 ) {
     val colors = MiuixTheme.colorScheme
     val background = when {
@@ -277,8 +342,9 @@ private fun PickerPillButton(
         modifier = modifier
             .height(44.dp)
             .clip(RoundedCornerShape(percent = 50))
-            .background(background)
-            .clickable(role = Role.Button, onClickLabel = text, onClick = onClick)
+            // 禁用态只淡化背景与文字、不再接收点击（默认 enabled=true，既有调用外观不变）。
+            .background(if (enabled) background else background.copy(alpha = 0.35f))
+            .clickable(enabled = enabled, role = Role.Button, onClickLabel = text, onClick = onClick)
             .padding(horizontal = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -286,7 +352,7 @@ private fun PickerPillButton(
             text = text,
             style = MiuixTheme.textStyles.body2.copy(fontSize = 14.sp),
             fontWeight = FontWeight.Medium,
-            color = contentColor,
+            color = if (enabled) contentColor else contentColor.copy(alpha = 0.4f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

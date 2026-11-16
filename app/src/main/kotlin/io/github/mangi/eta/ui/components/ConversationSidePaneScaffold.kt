@@ -97,6 +97,8 @@ internal fun ConversationSidePaneScaffold(
     forgeWorkspaces: List<io.github.mangi.eta.agent.forge.ForgeWorkspace> = emptyList(),
     onForgeNewConversationInWorkspace: (String) -> Unit = {},
     onForgeWorkspacesChanged: () -> Unit = {},
+    /** 当前工作区名（由外部持有；切换工作区只写 prefs，靠它驱动高亮）。null 时面板自己读 prefs。 */
+    currentForgeWorkspaceName: String? = null,
     content: @Composable () -> Unit,
 ) {
     val sceneLifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
@@ -145,7 +147,11 @@ internal fun ConversationSidePaneScaffold(
                 !offset.isNaN() && offset > 0.5f
             }
         }
-        val panelListState = rememberLazyListState()
+        // Assist 与 Forge 各持一份滚动位置：两个模式的分组结构完全不同，
+        // 共用一份状态会让切模式后落回另一套列表的偏移上（错位甚至空白）。
+        val assistListState = rememberLazyListState()
+        val forgeListState = rememberLazyListState()
+        val panelListState = if (chatMode == ForgeChatMode.Forge) forgeListState else assistListState
         val scope = rememberCoroutineScope()
         val focusManager = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current
@@ -306,6 +312,7 @@ internal fun ConversationSidePaneScaffold(
                         forgeWorkspaces = forgeWorkspaces,
                         onForgeNewConversationInWorkspace = onForgeNewConversationInWorkspace,
                         onForgeWorkspacesChanged = onForgeWorkspacesChanged,
+                        currentForgeWorkspaceName = currentForgeWorkspaceName,
                         modifier = Modifier
                             .focusProperties { onEnter = { if (!isRevealed) cancelFocusChange() } }
                             .focusGroup()

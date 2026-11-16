@@ -10,6 +10,7 @@ import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -135,6 +136,15 @@ internal object ForgeConfigWriter {
                         .trim().take(400),
                 )
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            // shell/文件操作抛出的异常不能直接穿给调用方协程：ForgeChatState 与 start() 都不接，
+            // 异常一路冒到 startup 协程只会让它永远停在 Connecting。这里转成既有失败类型。
+            ForgeConfigWriteResult.Failed(
+                code = -1,
+                output = "config write failed: " + (error.message ?: error.javaClass.simpleName),
+            )
         } finally {
             supervisor.beginClosing()
         }

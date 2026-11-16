@@ -52,6 +52,7 @@ import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.model.FORGE_CONVERSATION_ID
 import io.github.mangi.eta.data.model.forgeSessionIdOf
 import io.github.mangi.eta.agent.forge.ForgeApiClient
+import io.github.mangi.eta.agent.forge.ForgeArchivedSessions
 import io.github.mangi.eta.agent.forge.ForgeSessionSummary
 import io.github.mangi.eta.agent.forge.ForgeWorkspace
 import io.github.mangi.eta.agent.forge.ForgeWorkspaces
@@ -227,6 +228,8 @@ fun AgentAppRoot(
     var forgeWorkspaceRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
     // 侧边栏里增删改名工作区后递增：ForgeChatPane 据此对齐当前工作区与 server。
     var forgeWorkspaceStructureSignal by remember { mutableStateOf(0) }
+    // refreshForgeSessions 的请求代序号（只做比较、不参与重组，所以用容器而非 state）。
+    val forgeListRequestSeq = remember { intArrayOf(0) }
 
     /**
      * 向 opencode 拉一次会话列表刷新侧边栏，并按服务端状态对齐每条的运行标记
@@ -235,23 +238,35 @@ fun AgentAppRoot(
      */
     fun refreshForgeSessions() {
         forgeWorkspaces = ForgeWorkspaces.all()
+        // 请求代序号：一轮对话结束会连发 2-3 次刷新，冷启动还会叠一次延迟重试。没有这道
+        // 守卫时，先发的慢响应会后到并把新列表覆盖回去（侧边栏闪回旧会话/旧运行标记）。
+        val seq = ++forgeListRequestSeq[0]
         uiScope.launch {
             val client = ForgeApiClient()
             client.listSessions()
                 .onSuccess { sessions ->
+                    if (seq != forgeListRequestSeq[0]) return@onSuccess
                     forgeSessions = sessions
                     forgeListLoadFailed = false
+                    // 归档集合只增不减会无界增长：这轮列表里已经不存在的会话 id 顺手清掉。
+                    if (sessions.isNotEmpty()) {
+                        ForgeArchivedSessions.prune(sessions.map { it.id }.toSet())
+                    }
                     client.sessionStatuses().onSuccess { statuses ->
+                        if (seq != forgeListRequestSeq[0]) return@onSuccess
                         forgeBusySessionIds = statuses.filterValues { it }.keys
                             .filter { id -> sessions.any { it.id == id } }
                             .toSet()
                     }
                 }
                 .onFailure {
+                    if (seq != forgeListRequestSeq[0]) return@onFailure
                     forgeListLoadFailed = true
                     if (forgeSessions.isEmpty()) {
                         delay(1_200)
+                        if (seq != forgeListRequestSeq[0]) return@onFailure
                         ForgeApiClient().listSessions().onSuccess { sessions ->
+                            if (seq != forgeListRequestSeq[0]) return@onSuccess
                             forgeSessions = sessions
                             forgeListLoadFailed = false
                         }
@@ -665,6 +680,9 @@ fun AgentAppRoot(
             chatMode = chatMode,
             onChatModeSelected = { mode -> selectChatMode(mode) },
             forgeWorkspaces = forgeWorkspaces,
+            // 当前工作区以 ForgeChatState 为准（切换/结构变化都会刷新它）：侧栏分区头据此高亮，
+            // 面板内换工作区后不必等重建；未进过 Forge 时它是 null，侧栏回落到 prefs 里的选择。
+            currentForgeWorkspaceName = forgeState.workspace?.name,
             onForgeNewConversationInWorkspace = { name -> createForgeConversationInWorkspace(name) },
             onForgeWorkspacesChanged = { onForgeWorkspacesChanged() },
             onOpenCharacter = {
@@ -705,6 +723,9 @@ fun AgentAppRoot(
                             onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
                             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
                             topInset = shellPadding.calculateTopPadding(),
+                            // 空页那张「产出落在哪」卡片点一下打开侧边栏：工作区列表就在那儿，
+                            // 没有工作区时也是那里加。以前卡片是死的，新用户找不到入口。
+                            onOpenWorkspacePicker = { conversationPaneOpen = true },
                             onBusyChanged = { busyId, busy ->
                                 // 面板销毁时回的是 (null, false)：服务端轮次不会因此停，
                                 // 不清集合，运行标记靠列表刷新向服务端对齐。

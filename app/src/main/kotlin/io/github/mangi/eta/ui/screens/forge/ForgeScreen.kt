@@ -71,6 +71,8 @@ internal fun ForgeScreen(
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
+    /** 打开侧边栏的工作区列表（空页工作区卡片的出口）。 */
+    onOpenWorkspacePicker: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
@@ -103,6 +105,7 @@ internal fun ForgeScreen(
             modifier = modifier.fillMaxSize(),
             topInset = topInset,
             onBusyChanged = onBusyChanged,
+            onOpenWorkspacePicker = onOpenWorkspacePicker,
         )
 
         // 检查中保持空白：不引入任何进度指示。

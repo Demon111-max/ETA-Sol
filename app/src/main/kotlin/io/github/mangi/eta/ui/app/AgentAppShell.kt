@@ -140,6 +140,8 @@ internal fun AgentAppShell(
     chatMode: ForgeChatMode = ForgeChatMode.Assist,
     onChatModeSelected: (ForgeChatMode) -> Unit = {},
     forgeWorkspaces: List<io.github.mangi.eta.agent.forge.ForgeWorkspace> = emptyList(),
+    /** 当前 Forge 工作区名（由 ForgeChatState 提供）；null 时侧栏回落到 ForgeWorkspaces.currentSelection()。 */
+    currentForgeWorkspaceName: String? = null,
     onForgeNewConversationInWorkspace: (String) -> Unit = {},
     onForgeWorkspacesChanged: () -> Unit = {},
     isHomeStreaming: Boolean = false,
@@ -314,6 +316,7 @@ internal fun AgentAppShell(
                 chatMode = chatMode,
                 onChatModeSelected = onChatModeSelected,
                 forgeWorkspaces = forgeWorkspaces,
+                currentForgeWorkspaceName = currentForgeWorkspaceName,
                 onForgeNewConversationInWorkspace = onForgeNewConversationInWorkspace,
                 onForgeWorkspacesChanged = onForgeWorkspacesChanged,
             ) {
