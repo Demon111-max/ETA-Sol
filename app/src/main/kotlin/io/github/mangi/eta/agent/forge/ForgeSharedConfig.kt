@@ -17,7 +17,7 @@ import io.github.mangi.eta.data.repository.ProviderRepository
  *
  * opencode 侧走 OpenAI 兼容协议，所以只有 OpenAI 兼容（含自定义）且用
  * API Key 的服务商能喂给 Forge；选中 Anthropic / Gemini 或 OAuth 服务商时视为未配置，
- * 由 Forge 门禁提示去模型提供商里换一个。
+ * 由 Forge 门禁提示去模型提供商里换一个——不会自作主张换成别的启用服务商。
  */
 internal sealed interface ForgeSharedConfig {
     data class Ready(
@@ -31,8 +31,9 @@ internal sealed interface ForgeSharedConfig {
 internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
     val providers = ProviderRepository.allProviders()
     val selection = ProviderRepository.settings()
+    // 只认用户选中的那一个：选中项被禁用/未配置就是 NotConfigured，绝不回落到"第一个启用的服务商"，
+    // 否则用户代码会被发往没选过的厂商。服务商内部仍可回落到它自己的第一个可用模型（selectedOrFirstModel）。
     val provider = providers.firstOrNull { it.id == selection.selectedProviderId && it.isEnabled }
-        ?: providers.firstOrNull { it.isEnabled }
         ?: return ForgeSharedConfig.NotConfigured
     if (provider.runtimeProviderType != ProviderTypes.OPENAI_COMPATIBLE) {
         return ForgeSharedConfig.NotConfigured

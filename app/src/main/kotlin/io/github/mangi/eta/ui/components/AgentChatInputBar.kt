@@ -63,6 +63,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -172,6 +173,8 @@ internal fun AgentChatInputBar(
     showAttach: Boolean = true,
     hintText: String? = null,
     workingText: String? = null,
+    /** 输入内容变化的外传（含被外部同步写入、发送后清空）：供需要跨重建保留草稿的调用方落盘。 */
+    onInputChange: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
@@ -188,6 +191,11 @@ internal fun AgentChatInputBar(
         }
     }
     LaunchedEffect(isEditingMessage, recognitionEnabled) { dictation.cancel() }
+    // 把输入内容外传：本组件自己持有 TextFieldState（普通输入不往上抛，避免每个字符带整个
+    // 聊天舞台重组），但需要跨重建保住草稿的调用方拿不到内容，所以在这里做一次单向外抛。
+    LaunchedEffect(textFieldState) {
+        snapshotFlow { textFieldState.text.toString() }.collect(onInputChange)
+    }
     var wasEditingMessage by remember { mutableStateOf(isEditingMessage) }
     var syncedVersion by remember { mutableIntStateOf(inputSyncVersion) }
     val canSend = textFieldState.text.isNotBlank() ||

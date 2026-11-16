@@ -1594,6 +1594,7 @@
   <string name="forge_workspace_other_sessions">其他会话</string>
   <string name="forge_session_archive">归档</string>
   <string name="forge_session_unarchive">取消归档</string>
+  <string name="forge_queue_cleared">已取消 %1$d 条排队消息</string>
   <string name="folder_picker_title">选择工作区目录</string>
   <string name="folder_picker_open">打开</string>
   <string name="folder_picker_new_folder">新建文件夹</string>

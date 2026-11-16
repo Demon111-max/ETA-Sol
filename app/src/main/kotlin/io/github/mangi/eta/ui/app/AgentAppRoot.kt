@@ -74,6 +74,7 @@ import io.github.mangi.eta.ui.model.AgentSystemEnhanceAction
 import io.github.mangi.eta.ui.model.AgentToolsAction
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
 import io.github.mangi.eta.ui.model.withForgeConversations
+import io.github.mangi.eta.ui.screens.forge.ForgeChatState
 import io.github.mangi.eta.ui.screens.forge.ForgeScreen
 import io.github.mangi.eta.ui.screens.forge.prewarmForgeServer
 import io.github.mangi.eta.ui.model.LOCAL_NETWORK_PERMISSION_ITEM_ID
@@ -208,7 +209,8 @@ fun AgentAppRoot(
     // Forge 靠用户点切换或点 Forge 条目进入；否则上次停在 Forge，次次开屏都是 Forge。
     var forgeOpen by remember { mutableStateOf(false) }
     // Forge 里点「新建对话」的信号：计数递增，ForgeChatPane 收到新值就另起一个 opencode 会话。
-    var forgeNewConversationSignal by remember { mutableStateOf(0) }
+    // 「新建对话」不再走信号：模式切换与侧边栏「新建」直接对 forgeState.newConversation() 下单，
+    // 一次性意图在状态上执行一次就结束，面板重建没有重放的机会。
     // Forge 的真实会话列表（来自 opencode，不进 Eta 数据库）：侧边栏按它一条会话生成一个条目。
     var forgeSessions by remember { mutableStateOf<List<ForgeSessionSummary>>(emptyList()) }
     var forgeActiveSessionId by remember { mutableStateOf<String?>(null) }
@@ -225,11 +227,6 @@ fun AgentAppRoot(
     var forgeWorkspaceRequest by remember { mutableStateOf<Pair<String, Int>?>(null) }
     // 侧边栏里增删改名工作区后递增：ForgeChatPane 据此对齐当前工作区与 server。
     var forgeWorkspaceStructureSignal by remember { mutableStateOf(0) }
-    // 这次进 Forge 是否必须落到新对话空白页：模式切换与「新建」进来=true（用户定：
-    // 点切换到另一个模式，必须先新建一个该模式的新会话）；从列表点开 Forge 条目或
-    // 某个具体会话进来=false（恢复/打开目标会话）。每条打开 Forge 的路径都显式赋值，
-    // 不留上一次的残值。ForgeChatPane 在创建状态时消费它（面板每次进入都是新建的）。
-    var forgeStartBlank by remember { mutableStateOf(false) }
 
     /**
      * 向 opencode 拉一次会话列表刷新侧边栏，并按服务端状态对齐每条的运行标记
@@ -263,6 +260,47 @@ fun AgentAppRoot(
         }
     }
 
+    // Forge 面板状态提升到这里持有：面板整块销毁重建（进设置/终端子页再回来、切 Assist 再切回）
+    // 时草稿、待发附件、排队消息、当前会话都跟着状态活着；四条一次性信号也由这里按序号消费，
+    // 重建不会把旧请求再放一遍。状态只在进程死亡时丢，那时 forgeOpen 也已回落 false。
+    val forgeState = remember {
+        ForgeChatState(
+            context = context.applicationContext,
+            scope = uiScope,
+            onSessionsChanged = { activeId ->
+                forgeActiveSessionId = activeId
+                refreshForgeSessions()
+            },
+        )
+    }
+
+    // 「打开某个 Forge 会话」：同样按序号消费，面板重建带着旧值进来不会把人拽回旧会话。
+    LaunchedEffect(forgeOpenSessionRequest) {
+        val request = forgeOpenSessionRequest ?: return@LaunchedEffect
+        if (forgeState.consumeOpenSessionSeq(request.second)) {
+            forgeState.openSession(request.first)
+        }
+    }
+
+    // 「在指定工作区开新对话」：已在目标工作区就只开新对话，否则先切工作区（会重启 server）。
+    LaunchedEffect(forgeWorkspaceRequest) {
+        val request = forgeWorkspaceRequest ?: return@LaunchedEffect
+        if (forgeState.consumeWorkspaceSeq(request.second)) {
+            if (forgeState.workspace?.name != request.first) {
+                forgeState.switchWorkspace(request.first)
+            } else {
+                forgeState.newConversation()
+            }
+        }
+    }
+
+    // 工作区增删改名：交给状态对齐当前工作区与 server（只有当前工作区被波及才重启）。
+    LaunchedEffect(forgeWorkspaceStructureSignal) {
+        if (forgeState.consumeStructureSignal(forgeWorkspaceStructureSignal)) {
+            forgeState.onWorkspacesStructureChanged()
+        }
+    }
+
     /** Forge 条目的重命名走 opencode 接口改标题：失败要让用户知道，别改不动还装作成功、条目又弹回来。 */
     fun renameForgeConversation(conversation: ConversationSummaryUi, newTitle: String) {
         val sessionId = forgeSessionIdOf(conversation.id) ?: return
@@ -292,7 +330,7 @@ fun AgentAppRoot(
                     forgeBusySessionIds = forgeBusySessionIds - sessionId
                     if (forgeActiveSessionId == sessionId) {
                         forgeActiveSessionId = null
-                        if (forgeOpen) forgeNewConversationSignal++
+                        if (forgeOpen) forgeState.newConversation()
                     }
                 }
                 .onFailure {
@@ -443,7 +481,6 @@ fun AgentAppRoot(
         val targetForgeSession = forgeSessionIdOf(conversationId)
         if (targetForgeSession != null) {
             // 打开某个具体的 Forge 会话：Forge 页切到那个 opencode 会话，Assist 状态不碰。
-            forgeStartBlank = false
             forgeOpen = true
             forgeActiveSessionId = targetForgeSession
             forgeOpenSessionRequest =
@@ -453,7 +490,6 @@ fun AgentAppRoot(
         }
         if (conversationId == FORGE_CONVERSATION_ID) {
             // 打开 Forge 对话：不碰 Assist 的会话状态，正在运行的 Assist 继续跑。
-            forgeStartBlank = false
             forgeOpen = true
             navigator.popToHome()
             return
@@ -473,7 +509,6 @@ fun AgentAppRoot(
     fun createForgeConversationInWorkspace(name: String) {
         focusManager.clearFocus()
         conversationPaneOpen = false
-        forgeStartBlank = false
         forgeOpen = true
         forgeWorkspaceRequest = name to ((forgeWorkspaceRequest?.second ?: 0) + 1)
         navigator.popToHome()
@@ -490,9 +525,11 @@ fun AgentAppRoot(
         focusManager.clearFocus()
         conversationPaneOpen = false
         if (targetMode == ForgeChatMode.Forge) {
-            forgeStartBlank = true
             forgeOpen = true
-            forgeNewConversationSignal++
+            // 直接对状态下单：以前靠 forgeStartBlank + 信号让面板自己消费，面板重建时
+            // 这两个意图会被重放（陈旧请求把人拽回旧会话/空白页）。状态在上层手里，
+            // 调用一次就是一次，没有重放的机会。
+            forgeState.newConversation()
             navigator.popToHome()
             return
         }
@@ -509,13 +546,10 @@ fun AgentAppRoot(
         uiScope.launch { SettingsDataStore.setForgeChatMode(mode) }
         if (mode == chatMode) return
         if (mode == ForgeChatMode.Forge) {
-            // 切换到 Forge 必须先落到一个新的 Forge 对话，不回到上次停的那条：
-            // startBlank 之外再补一发新建信号——面板还活着时只靠 startBlank 它不会重建，
-            // 残留的打开请求就可能把界面拽回旧会话（面板侧还有消费序号守卫，三重保险）。
+            // 切换到 Forge 必须先落到一个新的 Forge 对话，不回到上次停的那条。
             focusManager.clearFocus()
-            forgeStartBlank = true
             forgeOpen = true
-            forgeNewConversationSignal++
+            forgeState.newConversation()
             navigator.popToHome()
             conversationPaneOpen = false
         } else {
@@ -667,18 +701,10 @@ fun AgentAppRoot(
                 RoutedShell(route = AppRoute.Home, applyShellPadding = false) { shellPadding ->
                     if (forgeOpen) {
                         ForgeScreen(
+                            state = forgeState,
                             onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
                             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
                             topInset = shellPadding.calculateTopPadding(),
-                            newConversationSignal = forgeNewConversationSignal,
-                            openSessionRequest = forgeOpenSessionRequest,
-                            startBlank = forgeStartBlank,
-                            workspaceRequest = forgeWorkspaceRequest,
-                            workspaceStructureSignal = forgeWorkspaceStructureSignal,
-                            onSessionsChanged = { activeId ->
-                                forgeActiveSessionId = activeId
-                                refreshForgeSessions()
-                            },
                             onBusyChanged = { busyId, busy ->
                                 // 面板销毁时回的是 (null, false)：服务端轮次不会因此停，
                                 // 不清集合，运行标记靠列表刷新向服务端对齐。

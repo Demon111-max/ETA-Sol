@@ -1613,6 +1613,7 @@
   <string name="forge_workspace_other_sessions">Other conversations</string>
   <string name="forge_session_archive">Archive</string>
   <string name="forge_session_unarchive">Unarchive</string>
+  <string name="forge_queue_cleared">Discarded %1$d queued message(s)</string>
   <string name="folder_picker_title">Choose a workspace folder</string>
   <string name="folder_picker_open">Open</string>
   <string name="folder_picker_new_folder">New folder</string>

@@ -64,8 +64,11 @@ internal class ForgeServerManager(
         /** 在跑但不健康时的短宽限：给正在启动的 server 留出就绪时间，过了还不健康按卡死处理、停掉重拉。 */
         private const val UNHEALTHY_GRACE_MS = 8_000L
 
-        /** 停掉自家旧 server 后等端口释放的最长等待，免得新 server 抢不到 4097。 */
-        private const val PORT_DRAIN_TIMEOUT_MS = 3_000L
+        /**
+         * 停掉自家旧 server 后等端口释放的最长等待。proot 进程树回收慢，3 秒往往不够：
+         * 旧 server 还没退干净就启动，新 server 抢不到 4097，会被误报成端口被占。
+         */
+        private const val PORT_DRAIN_TIMEOUT_MS = 15_000L
 
         /** 在跑的 server 启动时焊入的挂载集合指纹；与当前挂载不一致说明挂载改过、需要重启才生效。 */
         private const val PREFS_KEY_SERVER_MOUNTS_FP = "forge_server_mounts_fp"
@@ -165,9 +168,10 @@ internal class ForgeServerManager(
         }
         if (!current.running) {
             if (isHealthy()) {
-                // 刚停掉自家旧 server 时端口可能还没释放：等它排空再启动；排空后仍有人应答才是外部 server。
-                val drained = !stoppedAny || waitForPortDrain()
-                if (!drained || isHealthy()) {
+                // 端口还有人在答：刚停掉自家旧 server 时先轮询等它真正退出（proot 进程树回收慢，
+                // 几秒内还在应答是常态，别急着报占用）；不是自家停的说明是外部 server 占着 4097，
+                // 直接报占用，不白等 15 秒。确认释放后才走下面的启动分支。
+                if (!stoppedAny || !waitForPortDrain()) {
                     return ForgeServerStartResult.Failed("FORGE_PORT_IN_USE")
                 }
             }
@@ -214,12 +218,12 @@ internal class ForgeServerManager(
         return stopped
     }
 
-    /** 等端口不再应答（旧 server 真正退出），最多等 PORT_DRAIN_TIMEOUT_MS。 */
+    /** 等端口不再应答（旧 server 真正退出）：每 POLL_INTERVAL_MS 探一次，最多等 PORT_DRAIN_TIMEOUT_MS。 */
     private suspend fun waitForPortDrain(): Boolean {
         val deadline = System.currentTimeMillis() + PORT_DRAIN_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             if (!isHealthy()) return true
-            delay(200)
+            delay(POLL_INTERVAL_MS)
         }
         return !isHealthy()
     }

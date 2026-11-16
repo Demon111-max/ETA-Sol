@@ -140,19 +140,42 @@ internal object ForgeConfigWriter {
         }
     }
 
-    /** 用 heredoc 落盘，避免把 Key 拼进会回显的命令行；写完立即收权限到 600。 */
+    /**
+     * 用 heredoc 落盘，避免把 Key 拼进会回显的命令行；写完立即收权限到 600。
+     *
+     * 两份文件都先写同目录 `.tmp` 再 `mv -f` 原子覆盖：写到一半被杀/超时只坏临时文件，
+     * 正式文件要么还是上一版完整的、要么已是新的一版，不会留下截断的 JSON。
+     * 覆盖前先探测旧文件能否解析（jq 优先；精简环境里没有 jq 时退化为首尾花括号判据），
+     * 解析不了说明是上次写坏的残留：先 `mv` 成 `.bak` 再覆盖，让坏文件在下一次写入时自愈。
+     */
     internal fun writeCommand(configJson: String, authJson: String): String = buildString {
         append("set -e\n")
         append("mkdir -p \"${'$'}HOME/.config/opencode\" \"${'$'}HOME/.local/share/opencode\"\n")
-        append("cat > \"${'$'}HOME/.config/opencode/opencode.json\" <<'ETA_FORGE_CONFIG_EOF'\n")
+        append("eta_forge_config=\"${'$'}HOME/.config/opencode/opencode.json\"\n")
+        append("eta_forge_auth=\"${'$'}HOME/.local/share/opencode/auth.json\"\n")
+        append("eta_forge_backup_if_corrupt() {\n")
+        append("  [ -f \"${'$'}1\" ] || return 0\n")
+        append("  if command -v jq >/dev/null 2>&1; then\n")
+        append("    jq -e . \"${'$'}1\" >/dev/null 2>&1 && return 0\n")
+        // 没有 jq 的精简环境：退化为「首字符是 { 且末尾（去空白后）是 }」，
+        // 截断的 JSON 一定丢掉收尾括号；文件本身是一行 JSON，不能按行数判。
+        append("  elif [ \"${'$'}(head -c 1 \"${'$'}1\")\" = \"{\" ] &&\n")
+        append("       [ \"${'$'}(tr -d ' \\t\\r\\n' < \"${'$'}1\" | tail -c 1)\" = \"}\" ]; then\n")
+        append("    return 0\n")
+        append("  fi\n")
+        append("  mv -f \"${'$'}1\" \"${'$'}1.bak\"\n")
+        append("}\n")
+        append("eta_forge_backup_if_corrupt \"${'$'}eta_forge_config\"\n")
+        append("cat > \"${'$'}eta_forge_config.tmp\" <<'ETA_FORGE_CONFIG_EOF'\n")
         append(configJson).append('\n')
         append("ETA_FORGE_CONFIG_EOF\n")
-        append("cat > \"${'$'}HOME/.local/share/opencode/auth.json\" <<'ETA_FORGE_AUTH_EOF'\n")
+        append("chmod 600 \"${'$'}eta_forge_config.tmp\"\n")
+        append("mv -f \"${'$'}eta_forge_config.tmp\" \"${'$'}eta_forge_config\"\n")
+        append("eta_forge_backup_if_corrupt \"${'$'}eta_forge_auth\"\n")
+        append("cat > \"${'$'}eta_forge_auth.tmp\" <<'ETA_FORGE_AUTH_EOF'\n")
         append(authJson).append('\n')
         append("ETA_FORGE_AUTH_EOF\n")
-        append(
-            "chmod 600 \"${'$'}HOME/.config/opencode/opencode.json\" " +
-                "\"${'$'}HOME/.local/share/opencode/auth.json\"",
-        )
+        append("chmod 600 \"${'$'}eta_forge_auth.tmp\"\n")
+        append("mv -f \"${'$'}eta_forge_auth.tmp\" \"${'$'}eta_forge_auth\"\n")
     }
 }

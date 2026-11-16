@@ -65,16 +65,11 @@ internal sealed interface ForgeGateState {
  */
 @Composable
 internal fun ForgeScreen(
+    state: ForgeChatState,
     onOpenLinuxEnvironment: () -> Unit,
     onOpenModelProviders: () -> Unit,
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
-    newConversationSignal: Int = 0,
-    openSessionRequest: Pair<String, Int>? = null,
-    startBlank: Boolean = false,
-    workspaceRequest: Pair<String, Int>? = null,
-    workspaceStructureSignal: Int = 0,
-    onSessionsChanged: (String?) -> Unit = {},
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
@@ -101,17 +96,12 @@ internal fun ForgeScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    when (val state = gate) {
+    when (val gateState = gate) {
         // 门禁通过后直接进对话；检查中与未就绪保持同一块静态版面。
         ForgeGateState.Ready -> ForgeChatPane(
+            state = state,
             modifier = modifier.fillMaxSize(),
             topInset = topInset,
-            newConversationSignal = newConversationSignal,
-            openSessionRequest = openSessionRequest,
-            startBlank = startBlank,
-            workspaceRequest = workspaceRequest,
-            workspaceStructureSignal = workspaceStructureSignal,
-            onSessionsChanged = onSessionsChanged,
             onBusyChanged = onBusyChanged,
         )
 
@@ -119,7 +109,7 @@ internal fun ForgeScreen(
         ForgeGateState.Checking -> Box(modifier = modifier.fillMaxSize())
 
         is ForgeGateState.Missing -> ForgeGateMissing(
-            prerequisite = state.prerequisite,
+            prerequisite = gateState.prerequisite,
             onOpenLinuxEnvironment = onOpenLinuxEnvironment,
             onOpenModelProviders = onOpenModelProviders,
             modifier = modifier.padding(top = topInset),

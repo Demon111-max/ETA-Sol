@@ -45,14 +45,31 @@ internal class ForgeApiClient(
             .build()
     }
 
-    /** 已有会话就沿用最近更新的一个，没有就新建一个。 */
-    suspend fun ensureSession(): Result<String> {
-        val existing = runCatching { latestSession() }
-        existing.getOrNull()?.let { return Result.success(it) }
-        if (existing.isFailure && (existing.exceptionOrNull() as? IOException) != null) {
-            return Result.failure(existing.exceptionOrNull()!!)
+    /**
+     * 已有会话就沿用最近更新的一个，没有就新建一个。
+     *
+     * [directory] 非空时只在同一个目录（工作区）的会话里挑更新的那个：opencode 的会话列表是全局的，
+     * 不按目录过滤就会在切到工作区 B 时打开工作区 A 的会话。此时改用 [listSessions] 过滤
+     * [ForgeSessionSummary.directory]（两边都经 [ForgeWorkspaces.canonicalDirectory] 归一，
+     * 工作区改过名时旧会话仍记着旧挂载名，不归一会当成"没有会话"而白新建一个）；
+     * [directory] 为 null 时保持旧的全局最新行为。
+     * 列表拉不到（服务不可达等）按失败返回，只有确实没有会话才新建。
+     */
+    suspend fun ensureSession(directory: String? = null): Result<String> {
+        if (directory.isNullOrBlank()) {
+            val existing = runCatching { latestSession() }
+            existing.getOrNull()?.let { return Result.success(it) }
+            if (existing.isFailure && (existing.exceptionOrNull() as? IOException) != null) {
+                return Result.failure(existing.exceptionOrNull()!!)
+            }
+            return createSession()
         }
-        return createSession()
+        val summaries = listSessions().getOrElse { failure -> return Result.failure(failure) }
+        val target = ForgeWorkspaces.canonicalDirectory(directory)
+        val latest = summaries
+            .filter { ForgeWorkspaces.canonicalDirectory(it.directory) == target }
+            .maxByOrNull { it.updatedAtMillis }
+        return latest?.let { Result.success(it.id) } ?: createSession()
     }
 
     private suspend fun latestSession(): String? = withContext(Dispatchers.IO) {

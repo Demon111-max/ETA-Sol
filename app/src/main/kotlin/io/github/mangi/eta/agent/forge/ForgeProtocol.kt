@@ -417,7 +417,9 @@ internal object ForgeProtocol {
                 }
             }
 
-            "session.idle" -> sessionId?.let { ForgeEvent.Idle(it) } ?: ForgeEvent.Ignored(type)
+            // 缺 sessionID 时不能丢：丢了就再没有第二个 idle，busy 永久挂住。
+            // 发空串，由状态机按「当前打开的会话」处理。
+            "session.idle" -> ForgeEvent.Idle(sessionId.orEmpty())
 
             "session.error" -> {
                 // opencode 的错误在 properties.error.data.message 里，顶层没有 message 字段。

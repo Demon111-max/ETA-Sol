@@ -133,79 +133,20 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  */
 @Composable
 internal fun ForgeChatPane(
+    state: ForgeChatState,
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
-    newConversationSignal: Int = 0,
-    openSessionRequest: Pair<String, Int>? = null,
-    startBlank: Boolean = false,
-    workspaceRequest: Pair<String, Int>? = null,
-    workspaceStructureSignal: Int = 0,
-    onSessionsChanged: (String?) -> Unit = {},
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    // 模式切换进来时 startBlank=true：状态一创建就记下「落到新对话」，start() 读到
-    // pendingBlank 会跳过恢复最近会话。面板每次进入 Forge 都是新建的，记在这里最稳。
-    val state = remember {
-        ForgeChatState(context.applicationContext, scope, onSessionsChanged).also { created ->
-            if (startBlank) created.requestBlankOnStart()
-            if (workspaceRequest != null) created.requestWorkspaceOnStart(workspaceRequest.first)
-        }
-    }
+    // 状态由 AgentAppRoot 持有后传进来：面板整块销毁重建（进设置/终端子页再回来）时
+    // 草稿、待发附件、排队消息、当前会话都跟着状态活着。start() 自己会在已 Ready 时
+    // 直接返回（并把断掉的事件订阅接回去），所以这里无条件调用是安全的。
     LaunchedEffect(Unit) { state.start() }
-    // 「新建对话」信号递增时才另起新对话；面板重建时带着旧信号值进来不能重复触发，
-    // 否则从侧边栏点开某个会话、面板一重组就会被拽回空白页。
-    var consumedNewConversationSignal by remember { mutableStateOf(newConversationSignal) }
-    LaunchedEffect(newConversationSignal) {
-        if (newConversationSignal != consumedNewConversationSignal) {
-            consumedNewConversationSignal = newConversationSignal
-            state.newConversation()
-        }
-    }
-    // 「打开会话」请求同样要消费守卫：面板以 startBlank 创建时（切模式进来），
-    // 上层残留的旧请求绝不能再把界面拽回某个旧会话——创建时带着的请求序号一律视为已消费；
-    // 不是空白进场时（从列表点开会话创建的面板），初始请求要照常生效一次。
-    var consumedOpenSessionSeq by remember {
-        mutableStateOf(if (startBlank) openSessionRequest?.second ?: 0 else 0)
-    }
-    LaunchedEffect(openSessionRequest) {
-        val request = openSessionRequest ?: return@LaunchedEffect
-        if (request.second == consumedOpenSessionSeq) return@LaunchedEffect
-        consumedOpenSessionSeq = request.second
-        state.openSession(request.first)
-    }
-    // 「在指定工作区开新对话」请求（侧边栏工作区的「+」）：创建时带着的那一发已由
-    // requestWorkspaceOnStart 记下，这里只处理面板活着时新到的；已在该工作区就只开新对话。
-    var consumedWorkspaceSeq by remember { mutableStateOf(workspaceRequest?.second ?: 0) }
-    LaunchedEffect(workspaceRequest) {
-        val request = workspaceRequest ?: return@LaunchedEffect
-        if (request.second == consumedWorkspaceSeq) return@LaunchedEffect
-        consumedWorkspaceSeq = request.second
-        if (state.workspace?.name != request.first) {
-            state.switchWorkspace(request.first)
-        } else {
-            state.newConversation()
-        }
-    }
-    // 侧边栏里增删改名工作区后递增：当前工作区被波及才重启 server，没波及只刷新列表。
-    var consumedStructureSignal by remember { mutableStateOf(workspaceStructureSignal) }
-    LaunchedEffect(workspaceStructureSignal) {
-        if (workspaceStructureSignal != consumedStructureSignal) {
-            consumedStructureSignal = workspaceStructureSignal
-            state.onWorkspacesStructureChanged()
-        }
-    }
-    // 空白进场且已就绪后又收到 startBlank（如上层重组）：强制回空白页，不落回任何会话。
-    LaunchedEffect(startBlank, state.startup) {
-        if (startBlank && state.startup is ForgeStartup.Ready && state.sessionId != null) {
-            state.newConversation()
-        }
-    }
     // 运行状态同步给上层：侧边栏要在正在跑的 Forge 会话条目上显示运行圆点。
     LaunchedEffect(state.busy, state.sessionId) { onBusyChanged(state.sessionId, state.busy) }
     DisposableEffect(Unit) {
         onDispose {
+            // 只断订阅/在途任务，状态本身留在上层：再进来时 start() 会把订阅接回去。
             state.shutdown()
             onBusyChanged(null, false)
         }
@@ -568,8 +509,12 @@ private fun ForgeTranscript(
     }
     val lastAssistantTurn = turns.filterIsInstance<ForgeTurn.Assistant>().lastOrNull()
     val turnError = state.turnError
-    val errorAnchorFound = turnError != null && turns.filterIsInstance<ForgeTurn.Assistant>()
+    // 失败锚点可能落在用户消息上（助手还没产出任何 part 时失败，最后一条就是用户消息），
+    // 以前只在助手轮里找锚，找不到就回退到最后一条助手轮——于是错误被画到上一轮回答下面；
+    // 一个助手轮都没有时更是整条错误都不渲染。
+    val errorAnchorInAssistant = turnError != null && turns.filterIsInstance<ForgeTurn.Assistant>()
         .any { turn -> turn.messages.any { it.id == turnError.anchorMessageId } }
+    val standaloneError = turnError != null && turns.none { it is ForgeTurn.Assistant }
     val coroutineScope = rememberCoroutineScope()
     Box(modifier = Modifier.fillMaxSize()) {
         // 与 Assist 同款：列表整屏铺满，顶部留白走 contentPadding 让顶栏有内容可模糊；
@@ -596,10 +541,13 @@ private fun ForgeTranscript(
                         active = (state.busy || state.pendingQuestion != null) &&
                             turn.messages.lastOrNull()?.id == messages.lastOrNull()?.id,
                         error = turnError?.takeIf { err ->
-                            turn === lastAssistantTurn &&
-                                (err.anchorMessageId == null ||
-                                    turn.messages.any { it.id == err.anchorMessageId } ||
-                                    !errorAnchorFound)
+                            // 锚在助手轮里就画在那一轮；锚不在助手轮（失败时最后一条是用户消息）
+                            // 才退到最后一条助手轮，且只画一处，别重复渲染。
+                            if (errorAnchorInAssistant) {
+                                turn.messages.any { it.id == err.anchorMessageId }
+                            } else {
+                                turn === lastAssistantTurn
+                            }
                         },
                     )
                 }
@@ -614,6 +562,12 @@ private fun ForgeTranscript(
                         overtimeEnabled = state.pendingQuestion == null,
                         modifier = Modifier.padding(horizontal = 20.dp),
                     )
+                }
+            }
+            if (standaloneError && turnError != null) {
+                // 一个助手轮都没有（首条消息就失败）：没有可依附的回答，错误单独占一行。
+                item(key = "forge_standalone_error") {
+                    ForgeTurnErrorRow(error = turnError)
                 }
             }
         }
@@ -914,7 +868,10 @@ private fun ForgeComposer(
                 .padding(top = 14.dp, start = 14.dp, end = 14.dp, bottom = 10.dp),
         ) {
             AgentChatInputBar(
-                input = "",
+                // 草稿存在状态里而不是输入框内部：面板被销毁重建（进子页再回来）时
+                // 已输入的内容和待发附件都要还在。
+                input = state.draft,
+                onInputChange = { state.draft = it },
                 isCompacting = false,
                 contextUsage = AgentContextUsageUi(
                     contextTokens = state.contextUsageTokens

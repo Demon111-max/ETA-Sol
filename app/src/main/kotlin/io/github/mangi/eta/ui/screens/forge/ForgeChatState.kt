@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.screens.forge
 import android.content.Context
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -261,6 +262,13 @@ internal class ForgeChatState(
     var queuedTexts by mutableStateOf<List<String>>(emptyList())
         private set
 
+    /**
+     * 输入框草稿。以前草稿只活在输入框自己的 rememberTextFieldState 里，
+     * 面板一旦重建（进设置/终端子页再回来）就跟着组合一起没了；状态提升到
+     * 这里之后草稿与列表/队列同寿命。
+     */
+    var draft by mutableStateOf("")
+
     /** 最近一条助手消息报告的上下文占用（tokens），没有数据时为 null。 */
     val contextUsageTokens: Long?
         get() = messages.lastOrNull { it.role == ForgeRole.Assistant }?.contextTokens
@@ -273,6 +281,44 @@ internal class ForgeChatState(
 
     /** 还没启动完就被要求在指定工作区开新对话（侧边栏工作区的「+」），start() 在拉起 server 前先把选择切过去。 */
     private var pendingWorkspaceName: String? = null
+
+    /**
+     * 面板四条一次性信号的「已消费序号」。这些序号以前用面板里的 remember 记着，
+     * 面板重建（子页往返会整块销毁重建）后初值归零，陈旧的请求就被当成新请求再执行一遍
+     * （工作区被改回、会话被拽回、空白页永久粘住）。状态活得比面板久，挪到这里才算真一次性。
+     */
+    private var handledNewConversationSignal by mutableIntStateOf(0)
+    private var handledOpenSessionSeq by mutableIntStateOf(0)
+    private var handledWorkspaceSeq by mutableIntStateOf(0)
+    private var handledStructureSignal by mutableIntStateOf(0)
+
+    /** 提问挂起期间收到过 idle（只是让出，不是结束）：回答/跳过成功后要重新挂一次确认。 */
+    private var idleDuringQuestion = false
+
+    /** 一次性信号消费：序号与上次处理的不同才执行，且立刻记下，重建后不再重放。 */
+    fun consumeNewConversationSignal(seq: Int): Boolean {
+        if (seq == handledNewConversationSignal) return false
+        handledNewConversationSignal = seq
+        return true
+    }
+
+    fun consumeOpenSessionSeq(seq: Int): Boolean {
+        if (seq == handledOpenSessionSeq) return false
+        handledOpenSessionSeq = seq
+        return true
+    }
+
+    fun consumeWorkspaceSeq(seq: Int): Boolean {
+        if (seq == handledWorkspaceSeq) return false
+        handledWorkspaceSeq = seq
+        return true
+    }
+
+    fun consumeStructureSignal(seq: Int): Boolean {
+        if (seq == handledStructureSignal) return false
+        handledStructureSignal = seq
+        return true
+    }
     private var providerId: String = ForgeConfigWriter.PROVIDER_ID
     private var modelId: String = ""
     private var eventJob: Job? = null
@@ -323,6 +369,17 @@ internal class ForgeChatState(
     /** 进入 Forge 时调用：启动 server → 拿 session → 拉全量消息 → 订阅事件。 */
     fun start() {
         if (startJob?.isActive == true) return
+        // 面板重建（子页往返会整块销毁重建）会再调一次 start()：状态已是 Ready 就直接返回，
+        // 既不重播启动遮罩，也不把当前会话重新对回「最近会话」。只把上次销毁时断掉的
+        // 事件订阅接回去——否则重建后收不到任何事件，busy 与内容都不再更新。
+        if (startup is ForgeStartup.Ready) {
+            val current = sessionId
+            if (current != null && eventJob?.isActive != true) {
+                subscribe(current)
+                alignSessionBusy(current)
+            }
+            return
+        }
         startJob = scope.launch {
             startup = ForgeStartup.Connecting
             startupStage = ForgeStartupStage.Preparing
@@ -386,7 +443,9 @@ internal class ForgeChatState(
                 return@launch
             }
             startupStage = ForgeStartupStage.Connecting
-            val id = pending ?: api.ensureSession().getOrElse { error ->
+            // 按当前工作区的 directory 找会话：以前取「全局最新会话」，切到 B 工作区也会把
+            // A 工作区的会话拉进来（消息写进 A 的目录）。workspace 为 null 时退回旧行为。
+            val id = pending ?: api.ensureSession(workspace?.linuxPath).getOrElse { error ->
                 startup = ForgeStartup.Failed(
                     context.getString(
                         R.string.forge_server_failed,
@@ -479,9 +538,7 @@ internal class ForgeChatState(
 
     /** 切工作区的公共收尾：废掉在途发送与订阅、回空白页、让 server 以当前工作区目录重启。 */
     private fun resetAndRestartServer() {
-        sendGeneration++
-        sendJob?.cancel()
-        sendJob = null
+        invalidateInFlightSend()
         openJob?.cancel()
         idleConfirmJob?.cancel()
         eventJob?.cancel()
@@ -610,6 +667,29 @@ internal class ForgeChatState(
         queuedTexts = emptyList()
     }
 
+    /**
+     * 作废在途发送：换代 → 取消协程 → 显式清 sendInFlight。
+     * 以前四处（切工作区/新建/打开会话/停止）都是「sendGeneration++ 再 cancel」，而
+     * launchSend 的 finally 是 `if (generation == sendGeneration) sendInFlight = false`：
+     * 换代之后判等恒假，sendInFlight 就永久停在 true。它唯一的消费点
+     * （alignAfterReconnect 里「发送在途不许冲掉 busy」）于是永久失效。
+     */
+    private fun invalidateInFlightSend() {
+        sendGeneration++
+        sendJob?.cancel()
+        sendJob = null
+        sendInFlight = false
+    }
+
+    /** 本轮失败/被停止时清掉排队消息，并告诉用户清了几条（0 条不打扰）。 */
+    private fun clearQueueWithNotice() {
+        val dropped = queuedSends.size
+        clearQueue()
+        if (dropped > 0) {
+            showNotice(context.getString(R.string.forge_queue_cleared, dropped))
+        }
+    }
+
     private fun launchSend(text: String, attachments: List<ForgePendingAttachment>) {
         val generation = ++sendGeneration
         sendInFlight = true
@@ -640,6 +720,9 @@ internal class ForgeChatState(
             if (!superseded()) {
                 setBusy(false, source)
                 showNotice(message)
+                // 本轮已经失败：排队消息不会再有人续发（drainQueue 只在 confirmIdle 里调），
+                // 留着只会在下一次成功后突然一起发出去，索性清掉并告知条数。
+                clearQueueWithNotice()
             }
         }
         // 发送前先对齐配置：换过 Key/服务商/模型时，这一步会把新配置写好并重启 server，
@@ -696,7 +779,9 @@ internal class ForgeChatState(
             return
         }
         if (superseded()) return
-        var id = sessionId ?: api.createSession().getOrElse { error ->
+        // 建会话也按当前工作区找：没有会话时优先复用本工作区最近的会话（跨工作区串台的另一处入口），
+        // 本工作区确实没有才新建。
+        var id = sessionId ?: api.ensureSession(workspace?.linuxPath).getOrElse { error ->
             fail(
                 "send-createfail",
                 context.getString(
@@ -880,9 +965,7 @@ internal class ForgeChatState(
             return
         }
         // 在途发送必须先掐掉：它的 404 自愈/失败回写会把刚建的新对话又劫持回旧会话。
-        sendGeneration++
-        sendJob?.cancel()
-        sendJob = null
+        invalidateInFlightSend()
         openJob?.cancel()
         idleConfirmJob?.cancel()
         eventJob?.cancel()
@@ -910,9 +993,7 @@ internal class ForgeChatState(
         if (id == sessionId) return
         // 连点两个会话时只认最后一次：取消上一个打开任务，迟到的加载结果不许覆盖。
         openJob?.cancel()
-        sendGeneration++
-        sendJob?.cancel()
-        sendJob = null
+        invalidateInFlightSend()
         idleConfirmJob?.cancel()
         clearQueue()
         openJob = scope.launch {
@@ -920,9 +1001,14 @@ internal class ForgeChatState(
             if (loaded.isFailure && loaded.exceptionOrNull().hasHttpCode(404)) {
                 // 侧边栏列表可能过期：这个会话在服务端已经没了。退回空白页并刷新列表，
                 // 别把死会话留在手里——接下来发什么都是 404。
+                // 旧订阅必须一起掐掉：它还按闭包里的旧 id 在校验，事件仍然「匹配」，
+                // 会把已删会话的 part 写进空白页、还会把 busy 顶起来。
+                eventJob?.cancel()
+                eventJob = null
                 sessionId = null
                 pendingQuestion = null
                 messages = emptyList()
+                turnError = null
                 setBusy(false, "open-gone")
                 showNotice(context.getString(R.string.forge_session_gone))
                 onSessionsChanged(null)
@@ -987,6 +1073,12 @@ internal class ForgeChatState(
             api.replyQuestion(pending, answers)
                 .onSuccess {
                     if (pendingQuestion?.id == pending.id) pendingQuestion = null
+                    // 提问期间收到过 idle（被我们压住了）：答完这一轮还要继续跑，
+                    // 没有第二个 idle 会来，重新挂一次确认，否则 busy 永远解不开。
+                    if (idleDuringQuestion) {
+                        idleDuringQuestion = false
+                        sessionId?.let { confirmIdle(it) }
+                    }
                 }
                 .onFailure { error ->
                     showNotice(
@@ -1006,6 +1098,11 @@ internal class ForgeChatState(
             api.rejectQuestion(pending)
                 .onSuccess {
                     if (pendingQuestion?.id == pending.id) pendingQuestion = null
+                    // 同 answerQuestion：跳过之后这一轮还要继续，补挂一次结束确认。
+                    if (idleDuringQuestion) {
+                        idleDuringQuestion = false
+                        sessionId?.let { confirmIdle(it) }
+                    }
                 }
                 .onFailure { error ->
                     showNotice(
@@ -1051,11 +1148,12 @@ internal class ForgeChatState(
     fun stop() {
         // 先掐断在途的发送并立刻放开 busy：以前是等 abort 请求回来才清 busy，
         // server 无响应时停止按钮等于没按，整个会话被一个 busy 永久卡死。
-        sendGeneration++
-        sendJob?.cancel()
-        sendJob = null
+        invalidateInFlightSend()
         idleConfirmJob?.cancel()
         setBusy(false, "stop")
+        // 停止 = 这一轮作废：排队消息一并清掉并告知条数。留着它们的话，下一轮成功收尾时
+        // drainQueue 会把用户已经放弃的消息偷偷发出去。
+        clearQueueWithNotice()
         // 提问卡还挂着时停止 = 这一轮作废，卡片一并撤掉，别留一张答了也没用的卡。
         pendingQuestion = null
         val id = sessionId ?: return
@@ -1081,10 +1179,14 @@ internal class ForgeChatState(
                 } catch (_: Exception) {
                     // SSE 断线：重新拉一次全量消息对齐，不自己编内容。
                     alignAfterReconnect(id)
+                    // 第二解锁通道：事件流断了就再也收不到 idle，busy 只能靠 HTTP 复核解开。
+                    if (busy && sessionId == id) confirmIdle(id)
                     delay(RECONNECT_DELAY_MS)
                     continue
                 }
                 alignAfterReconnect(id)
+                // 正常 EOF 也会让 collect 返回（服务端换进程/连接被关）：同样补一次 HTTP 复核。
+                if (busy && sessionId == id) confirmIdle(id)
                 delay(RECONNECT_DELAY_MS)
             }
         }
@@ -1140,7 +1242,8 @@ internal class ForgeChatState(
             markBusyObserved()
             // idle 事件可能已经丢了（断线间隙）：给兜底置忙的轮次也挂上结束确认，
             // 免得 busy 只能等人手动停止。确认走同一套「静默 + 服务端闲」双条件。
-            sessionId?.let { confirmIdle(it) }
+            // 发送在途时不挂：这时服务端状态本来就是 idle，挂了只会立刻误收尾。
+            if (!sendInFlight) sessionId?.let { confirmIdle(it) }
         }
     }
 
@@ -1157,31 +1260,66 @@ internal class ForgeChatState(
         idleConfirmJob?.cancel()
         idleConfirmJob = scope.launch {
             var rechecks = 0
+            var unknown = 0
             while (true) {
+                if (sessionId != session) return@launch
+                // 提问卡挂着 = 这一轮在等回答，idle 只是让出。以前这里直接 return，
+                // 而回答成功后没有任何人重新挂确认，busy 就永久挂着。现在只等，不放弃。
+                if (pendingQuestion != null) {
+                    delay(IDLE_RECHECK_DELAY_MS)
+                    continue
+                }
+                // 发送在途（消息刚提交、服务端还没开跑）时服务端状态就是 idle：不许据此收尾。
+                // 这条守卫在收尾前还要再查一次，因为等待期间状态可能变化。
+                if (sendInFlight) {
+                    delay(IDLE_RECHECK_DELAY_MS)
+                    continue
+                }
                 val activityAtWaitStart = lastActivityAtMs
                 delay(if (rechecks == 0) IDLE_CONFIRM_DELAY_MS else IDLE_RECHECK_DELAY_MS)
                 if (sessionId != session) return@launch
-                if (pendingQuestion != null) return@launch
+                if (pendingQuestion != null || sendInFlight) continue
                 if (lastActivityAtMs != activityAtWaitStart) {
                     // 等待期间又有新内容：这一轮还没完，重新等下一段静默期。
                     rechecks = 0
                     continue
                 }
-                if (api.sessionBusy(session).getOrNull() == true) {
+                val stillBusy = api.sessionBusy(session).getOrNull()
+                if (stillBusy == null) {
+                    // 查询失败（断网/超时/404）≠ 服务端不忙：以前把失败当「真闲」直接收尾，
+                    // 模型还在跑就被判结束、队列立刻补发下一条。未知就退避重查，
+                    // 连续未知到上限（约 20s）才当作结束，并留下 warn 以便事后查。
+                    unknown++
+                    if (unknown >= IDLE_UNKNOWN_MAX) {
+                        AndroidAgentLogger.warn(
+                            "Forge idle confirmed after $unknown unknown probes session=$session",
+                        )
+                        finishIdle(session)
+                        return@launch
+                    }
+                    rechecks++
+                    continue
+                }
+                if (stillBusy) {
                     if (rechecks == 0) {
                         AndroidAgentLogger.warn("Forge idle deferred: server still busy session=$session")
                     }
                     rechecks++
                     continue
                 }
-                setBusy(false, "idle-confirmed")
-                // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
-                onSessionsChanged(session)
-                maybeSetFallbackTitle(session)
-                drainQueue()
+                finishIdle(session)
                 return@launch
             }
         }
+    }
+
+    /** 一轮真正结束时的收尾：放开 busy、通知列表刷新、补标题、续发队列。 */
+    private fun finishIdle(session: String) {
+        setBusy(false, "idle-confirmed")
+        // 一轮结束时 opencode 可能刚给会话生成了标题，通知上层刷新列表。
+        onSessionsChanged(session)
+        maybeSetFallbackTitle(session)
+        drainQueue()
     }
 
     private fun handle(session: String, event: ForgeEvent) {
@@ -1207,18 +1345,23 @@ internal class ForgeChatState(
                 }
             }
 
-            is ForgeEvent.Idle -> if (event.sessionId == session) {
+            // 空 sessionID（协议没带）按当前会话处理：以前直接 Ignored，busy 就永远解不开了。
+            is ForgeEvent.Idle -> if (event.sessionId.isBlank() || event.sessionId == session) {
                 if (pendingQuestion != null) {
                     // 提问还挂着 = 这一轮在等回答，idle 只是让出，不许收尾。
-                    AndroidAgentLogger.warn("Forge idle ignored: question pending session=$session")
+                    // 记下来：回答成功后要主动重新挂一次确认，否则不会再有第二个 idle 到来。
+                    idleDuringQuestion = true
+                    AndroidAgentLogger.warn("Forge idle deferred: question pending session=$session")
                 } else {
                     confirmIdle(session)
                 }
             }
 
-            is ForgeEvent.Failed -> if (event.sessionId == session) {
+            is ForgeEvent.Failed -> if (event.sessionId.isBlank() || event.sessionId == session) {
                 idleConfirmJob?.cancel()
                 setBusy(false, "failed")
+                // 失败这一轮结束了：排队消息不会再有 confirmIdle 来续发，清掉并告知条数。
+                clearQueueWithNotice()
                 // 手动停止触发的 Aborted 不是故障，不算失败。
                 // 真失败画进对话区：错误行钉在本轮末尾（红点 + 错误原文 + 状态码），
                 // 不再只在输入框上方飘一句转瞬即逝的通知；对话区还是空的时才退回通知。
@@ -1350,6 +1493,12 @@ internal class ForgeChatState(
 
         /** idle 确认没过（还有新内容 / 服务端还报忙）时，下一拍复查的间隔。 */
         const val IDLE_RECHECK_DELAY_MS = 2_000L
+
+        /**
+         * 连续「查不出来」的次数上限：查询失败不是「不忙」，但也不能无限等下去——
+         * 断网时按 2s 一拍，约 20s 后按结束处理并打 warn，避免 busy 永久挂住。
+         */
+        const val IDLE_UNKNOWN_MAX = 10
 
         /** 打开会话后 busy 对齐失败的重试延迟。 */
         const val BUSY_ALIGN_RETRY_DELAY_MS = 600L

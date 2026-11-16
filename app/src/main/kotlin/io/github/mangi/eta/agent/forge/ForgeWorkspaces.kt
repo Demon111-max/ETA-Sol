@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.forge
 import io.github.mangi.eta.agent.terminal.SharedFolderMount
 import io.github.mangi.eta.agent.terminal.SharedFolderMounts
 import io.github.mangi.eta.config.Prefs
+import org.json.JSONObject
 import java.io.File
 
 /**
@@ -37,6 +38,12 @@ internal object ForgeWorkspaces {
 
     private const val PREFS_KEY_DEFAULT_CREATED = "forge_default_workspace_created"
 
+    /** 改名别名表 {旧挂载名: 新挂载名}：会话的 directory 不迁移，靠这张表把旧会话归到新工作区。 */
+    private const val PREFS_KEY_ALIASES = "forge_workspace_aliases"
+
+    /** 别名链最多解析这么多跳：防环，也防历史数据把链拉得过长。 */
+    private const val MAX_ALIAS_HOPS = 16
+
     private fun defaultCreated(): Boolean = runCatching {
         Prefs.localAgentPreferences()?.getBoolean(PREFS_KEY_DEFAULT_CREATED, false)
     }.getOrNull() == true
@@ -49,24 +56,128 @@ internal object ForgeWorkspaces {
     }
 
     /**
+     * 目录存在就直接过；缺失时补建并复核结果——建不出来（没存储权限等）返回 false。
+     * mkdirs 的返回值不可信（父目录已存在时也会返回 false），一律以建完之后的 isDirectory 为准。
+     */
+    private fun ensureSourceDir(path: String): Boolean {
+        val dir = File(path)
+        if (dir.isDirectory) return true
+        runCatching { dir.mkdirs() }
+        return dir.isDirectory
+    }
+
+    /** 读别名表；坏 JSON、非字符串值、自指条目一律忽略，读不到当空表。 */
+    private fun loadAliases(): Map<String, String> = runCatching {
+        val raw = Prefs.localAgentPreferences()?.getString(PREFS_KEY_ALIASES, null).orEmpty()
+        if (raw.isBlank()) {
+            emptyMap()
+        } else {
+            val json = JSONObject(raw)
+            val aliases = mutableMapOf<String, String>()
+            json.keys().forEach { key ->
+                val from = key.trim()
+                val to = json.optString(key).trim()
+                if (from.isNotEmpty() && to.isNotEmpty() && from != to) aliases[from] = to
+            }
+            aliases
+        }
+    }.getOrElse { emptyMap<String, String>() }
+
+    private fun saveAliases(aliases: Map<String, String>): Boolean = runCatching {
+        val json = JSONObject()
+        aliases.forEach { (from, to) -> json.put(from, to) }
+        Prefs.localAgentPreferences()?.edit()
+            ?.putString(PREFS_KEY_ALIASES, json.toString())?.apply()
+        true
+    }.getOrDefault(false)
+
+    /**
+     * 记录一次改名的别名：除 [oldName] → [newName] 外，还把原本指向 [oldName] 的别名统一改指 [newName]，
+     * 这样连续改名 A→B→C 不会攒出长链；[newName] 自身若曾是某条别名的起点也一并丢掉（那个旧名字不复存在）。
+     */
+    private fun recordAlias(oldName: String, newName: String) {
+        if (oldName == newName) return
+        val aliases = loadAliases().toMutableMap()
+        aliases.entries.filter { it.value == oldName }.forEach { it.setValue(newName) }
+        // 反着改回来时（B→A 之后又 A→B）会留下自指条目，读的时候虽被过滤，这里先清掉免得越攒越脏。
+        aliases.entries.removeAll { it.key == it.value }
+        aliases.remove(newName)
+        aliases[oldName] = newName
+        saveAliases(aliases)
+    }
+
+    /** 清掉值指向 [name] 的别名：工作区被删掉后不该再被别名指回来。 */
+    private fun clearAliasesPointingTo(name: String) {
+        val aliases = loadAliases()
+        val pruned = aliases.filterValues { it != name }
+        if (pruned.size != aliases.size) saveAliases(pruned)
+    }
+
+    /** 当前别名表快照（旧挂载名 → 新挂载名），只读。 */
+    fun aliases(): Map<String, String> = loadAliases()
+
+    /**
+     * 沿别名链把 [name] 解析到最终名字：最多 [MAX_ALIAS_HOPS] 跳，遇到环或断链就停在当前名字。
+     */
+    fun canonicalName(name: String): String {
+        if (name.isEmpty()) return name
+        val aliases = loadAliases()
+        if (aliases.isEmpty() || name !in aliases) return name
+        var current = name
+        val visited = mutableSetOf(current)
+        var hops = 0
+        while (hops < MAX_ALIAS_HOPS) {
+            val next = aliases[current] ?: break
+            if (!visited.add(next)) break
+            current = next
+            hops++
+        }
+        return current
+    }
+
+    /**
+     * 把一个 opencode 会话的 directory（形如 /workspace/mounts/<名>）解析到当前工作区的路径：
+     * 工作区改过名时旧会话仍记着旧挂载名，经别名表归到新名下，侧边栏才不会把它丢进「其它会话」。
+     * 不是挂载路径、层数超过一级、或解析结果不是当前挂载之一时，原样返回输入。
+     */
+    fun canonicalDirectory(directory: String): String {
+        if (directory.isBlank()) return directory
+        val prefix = "${SharedFolderMounts.LINUX_MOUNTS_ROOT}/"
+        val trimmed = directory.trim()
+        if (!trimmed.startsWith(prefix)) return directory
+        val name = trimmed.substring(prefix.length).trimEnd('/')
+        if (name.isEmpty() || '/' in name) return directory
+        val canonical = canonicalName(name)
+        if (canonical == name) return directory
+        if (SharedFolderMounts.current().none { it.name == canonical }) return directory
+        return prefix + canonical
+    }
+
+    /**
      * 确保默认工作区存在：已有同名挂载直接用；已有指向同一目录的挂载就用那条（不重复建）；
      * 都没有就建目录 + 追加挂载。动不了既有挂载。返回默认工作区，实在建不出来返回 null。
      * 只在从没建过时自动建：用户主动移除过默认工作区就别再复活它，不然永远删不掉。
+     *
+     * 目录必须先真的建出来（[ensureSourceDir]）：没有存储权限时 mkdirs 失败，此时保存挂载只会留下
+     * 一个 `cd` 不进去的工作区，所以不保存挂载、也不写 created-once 标记，让下次进 Forge 再试。
+     * 已存在的挂载同样要复核目录：缺失就补建，补不出来也不能当成可用的默认工作区（仍不写标记）。
      */
     fun ensureDefault(): ForgeWorkspace? {
         val mounts = SharedFolderMounts.current()
         mounts.firstOrNull { it.name == DEFAULT_NAME }
-            ?.let {
+            ?.let { mount ->
+                if (!ensureSourceDir(mount.sourcePath)) return null
                 markDefaultCreated()
-                return ForgeWorkspace(it.name, it.sourcePath)
+                return ForgeWorkspace(mount.name, mount.sourcePath)
             }
         mounts.firstOrNull { it.sourcePath == DEFAULT_SOURCE }
-            ?.let {
+            ?.let { mount ->
+                if (!ensureSourceDir(mount.sourcePath)) return null
                 markDefaultCreated()
-                return ForgeWorkspace(it.name, it.sourcePath)
+                return ForgeWorkspace(mount.name, mount.sourcePath)
             }
         if (defaultCreated()) return null
-        runCatching { File(DEFAULT_SOURCE).mkdirs() }
+        if (!ensureSourceDir(DEFAULT_SOURCE)) return null
         if (SharedFolderMounts.validateName(DEFAULT_NAME, mounts) != null) return null
         if (SharedFolderMounts.validateSource(DEFAULT_SOURCE, mounts) != null) return null
         val updated = mounts + SharedFolderMount(name = DEFAULT_NAME, sourcePath = DEFAULT_SOURCE)
@@ -102,6 +213,10 @@ internal object ForgeWorkspaces {
         SharedFolderMounts.validateSource(source, mounts)?.let {
             return Result.failure(IllegalArgumentException("source rejected: $it"))
         }
+        // 目录建不出来就别保存：否则「添加成功」的挂载在环境里 cd 不进去。
+        if (!ensureSourceDir(source)) {
+            return Result.failure(IllegalStateException("cannot create directory: $source"))
+        }
         var name = SharedFolderMounts.defaultName(source)
         var suffix = 2
         while (SharedFolderMounts.validateName(name, mounts) != null) {
@@ -109,13 +224,15 @@ internal object ForgeWorkspaces {
             suffix++
             if (suffix > 32) return Result.failure(IllegalArgumentException("cannot derive unique name"))
         }
-        runCatching { File(source).mkdirs() }
         val workspace = ForgeWorkspace(name = name, sourcePath = source)
         val saved = SharedFolderMounts.save(mounts + SharedFolderMount(name = name, sourcePath = source))
         return if (saved) Result.success(workspace) else Result.failure(IllegalStateException("save failed"))
     }
 
-    /** 改名：只改挂载名（Linux 路径随之变），目录内容不动；改的是当前工作区时选择跟着走。 */
+    /**
+     * 改名：只改挂载名（Linux 路径随之变），目录内容不动；改的是当前工作区时选择跟着走。
+     * 会话的 directory 不迁移（那是 server 侧数据），改为记一条别名，由 [canonicalDirectory] 归位。
+     */
     fun rename(oldName: String, newNameRaw: String): Result<ForgeWorkspace> {
         val mounts = SharedFolderMounts.current()
         val target = mounts.firstOrNull { it.name == oldName }
@@ -128,15 +245,18 @@ internal object ForgeWorkspaces {
         }
         val saved = SharedFolderMounts.save(others + SharedFolderMount(name = newName, sourcePath = target.sourcePath))
         if (!saved) return Result.failure(IllegalStateException("save failed"))
+        recordAlias(oldName, newName)
         if (wasCurrent) select(newName)
         return Result.success(ForgeWorkspace(newName, target.sourcePath))
     }
 
-    /** 移除工作区：只删挂载记录，文件夹与里面的文件都不动。 */
+    /** 移除工作区：只删挂载记录，文件夹与里面的文件都不动；指向它的别名一并清掉，免得删了又被指回来。 */
     fun remove(name: String): Boolean {
         val mounts = SharedFolderMounts.current()
         if (mounts.none { it.name == name }) return false
-        return SharedFolderMounts.save(mounts.filter { it.name != name })
+        if (!SharedFolderMounts.save(mounts.filter { it.name != name })) return false
+        clearAliasesPointingTo(name)
+        return true
     }
 
     /** 当前全部挂载的指纹：server 启动时焊入的是当时的挂载集合，指纹变了说明挂载改过、在跑的 server 看不到新挂载。 */

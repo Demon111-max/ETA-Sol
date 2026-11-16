@@ -2,6 +2,7 @@ package io.github.mangi.eta.ui.model
 
 import androidx.compose.runtime.Immutable
 import io.github.mangi.eta.agent.forge.ForgeSessionSummary
+import io.github.mangi.eta.agent.forge.ForgeWorkspaces
 import io.github.mangi.eta.data.model.forgeConversationId
 
 @Immutable
@@ -76,7 +77,11 @@ internal fun ConversationPaneUiState.withForgeConversations(
                 mode = ConversationModeUi.Chat,
                 isActiveRun = isBusy,
                 forge = true,
-                forgeDirectory = session.directory.ifBlank { null },
+                // 工作区改过名时旧会话的 directory 仍记着旧挂载名：经别名表解析到当前名字，
+                // 否则侧边栏按 directory 精确相等分组会把它们全丢进「其它会话」。
+                forgeDirectory = session.directory
+                    .ifBlank { null }
+                    ?.let { ForgeWorkspaces.canonicalDirectory(it) },
             )
         }
     val pinned = assistConversations.filter { it.isPinned }
