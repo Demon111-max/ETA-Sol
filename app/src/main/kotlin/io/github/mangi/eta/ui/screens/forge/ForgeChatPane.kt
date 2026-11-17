@@ -59,6 +59,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -234,16 +235,60 @@ internal fun ForgeChatPane(
                             request = request,
                             onAnswer = { answers -> state.answerQuestion(answers) },
                             onSkip = { state.dismissQuestion() },
+                            answering = state.questionAnswerInFlight,
                         )
                     }
-                    ForgeComposer(
-                        state = state,
-                        onSend = { text -> state.send(text) },
-                        onStop = { state.stop() },
-                    )
+                    if (state.workspace == null) {
+                        // 3.4.43（N7）：没有工作区就没有可写目录，也建不出会话。
+                        // 以前这里照样渲染输入区，一条消息发出去就会捡到全局会话、
+                        // 或者建出一个落不了盘的孤儿会话。现在直接把输入换成一句提示 + 入口。
+                        ForgeWorkspaceRequiredBar(onAddWorkspace = onOpenWorkspacePicker)
+                    } else {
+                        ForgeComposer(
+                            state = state,
+                            onSend = { text -> state.send(text) },
+                            onStop = { state.stop() },
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+/**
+ * 没有工作区时代替输入区的提示条（3.4.43 N7）：说明为什么不能发，并给一个添加入口。
+ * 输入区整个不渲染，所以不存在「点进去打字却发不出去」的半死状态。
+ */
+@Composable
+private fun ForgeWorkspaceRequiredBar(onAddWorkspace: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.FolderOpen,
+            contentDescription = null,
+            tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.forge_send_needs_workspace),
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.forge_workspace_add),
+            style = MiuixTheme.textStyles.footnote1,
+            fontWeight = FontWeight.Medium,
+            color = MiuixTheme.colorScheme.primary,
+            modifier = Modifier.clickable { onAddWorkspace() },
+        )
     }
 }
 
@@ -391,122 +436,41 @@ private fun ForgeTranscript(
                 )
             }
         } else {
-            // 空页门面：终端徽章（与启动屏 >_ 字标同一套形象）+ 标题 + 工作区卡片。
-            // 以前是一行灰字飘在白页中央，路径还会在词中间折行；现在工作区进卡片，
-            // 名字一行、路径一行截断，产出落在哪一眼看清。
+            // 空页门面（3.4.43 B2，用户明确要求）：只有一枚锻造主题徽章 + 标题，其余留白。
+            // 删掉的两样东西：两行提示废话（「直接说要改什么…」「切换工作区在侧边栏里」）
+            // 和工作区卡片——空白页不再显示当前工作区，工作区在侧边栏看。
+            // 唯一例外：一个工作区都没有时给一个「添加工作区」的入口，否则新用户连第一句话
+            // 都发不出去（N7）。
             Column(
                 modifier = Modifier.fillMaxSize().padding(top = topInset, start = 24.dp, end = 24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color(0xFF26262C), Color(0xFF545460)),
-                            ),
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = ">_",
-                        style = MiuixTheme.textStyles.title3,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
+                ForgeForgeBadge()
+                Spacer(modifier = Modifier.height(20.dp))
                 Text(
                     text = stringResource(R.string.forge_empty_title),
                     style = MiuixTheme.textStyles.title3,
                     fontWeight = FontWeight.SemiBold,
                     color = MiuixTheme.colorScheme.onSurface,
                 )
-                Spacer(modifier = Modifier.height(20.dp))
-                val workspace = state.workspace
-                Column(
-                    modifier = Modifier
-                        .widthIn(max = 320.dp)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(MiuixTheme.colorScheme.tertiaryContainer)
-                        // 空页这张卡是「产出落在哪」的唯一说明：给它一个出口，
-                        // 点一下能去侧边栏切工作区/新建工作区，而不是只能干看。
-                        .clickable { onOpenWorkspacePicker() }
-                        .padding(horizontal = 16.dp, vertical = 13.dp),
-                ) {
-                    if (workspace != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Rounded.Folder,
-                                contentDescription = null,
-                                modifier = Modifier.size(19.dp),
-                                tint = MiuixTheme.colorScheme.primary,
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = workspace.name,
-                                style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
-                                fontWeight = FontWeight.Medium,
-                                color = MiuixTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                imageVector = Icons.Rounded.KeyboardArrowRight,
-                                contentDescription = stringResource(R.string.forge_empty_switch_hint),
-                                modifier = Modifier.size(18.dp),
-                                tint = dshTertiaryColor(),
-                            )
-                        }
-                        Text(
-                            text = workspace.sourcePath,
-                            style = MiuixTheme.textStyles.footnote1.copy(fontSize = 12.sp),
-                            color = dshTertiaryColor(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 27.dp, top = 3.dp),
-                        )
-                    } else {
-                        // 一个工作区都没有：这里必须给出入口，否则新用户连第一句话都发不出去
-                        // （没有工作区就没有可写目录，会话也不该建）。
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Rounded.FolderOpen,
-                                contentDescription = null,
-                                modifier = Modifier.size(19.dp),
-                                tint = MiuixTheme.colorScheme.primary,
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = stringResource(R.string.forge_workspace_unavailable),
-                                style = MiuixTheme.textStyles.footnote1,
-                                color = dshTertiaryColor(),
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                imageVector = Icons.Rounded.KeyboardArrowRight,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                                tint = dshTertiaryColor(),
-                            )
-                        }
-                    }
+                if (state.workspace == null) {
+                    Spacer(modifier = Modifier.height(18.dp))
+                    ForgeGateAction(
+                        text = stringResource(R.string.forge_workspace_add),
+                        onClick = onOpenWorkspacePicker,
+                    )
                 }
-                Spacer(modifier = Modifier.height(14.dp))
-                ForgeCaption(text = stringResource(R.string.forge_empty_hint))
-                Spacer(modifier = Modifier.height(4.dp))
-                ForgeCaption(text = stringResource(R.string.forge_empty_switch_hint))
             }
         }
         return
     }
     // 按轮分组：一轮里 opencode 会产出多条助手消息（每步一条），必须合成一个工作过程块，
     // 否则每条消息各带一个汇总头、轮次没结束就逐个收起，和 dsh 一整段连着的样子对不上。
-    val turns = remember(messages) { messages.groupIntoTurns() }
+    // 3.4.43（N9）：走增量缓存——只有最后一轮会随 delta 变化，前面的轮次对象整批复用，
+    // 那些行在 LazyColumn 里参数没变，Compose 直接跳过重组。
+    val turnCache = remember { ForgeTurnGroupCache() }
+    val turns = remember(messages) { turnCache.group(messages) }
     val listState = rememberLazyListState()
     val lastSignature = messages.lastOrNull()?.let { message ->
         // 签名要含最后一个 part 的内容长度：流式 delta 只加长文本，part 数和 id 都不变，
@@ -724,7 +688,9 @@ private fun ForgeAssistantTurnRow(
 ) {
     // 整轮的 parts 按顺序摊平再切段：相邻的思考/工具（哪怕跨消息）连成同一个工作过程块，
     // 汇总头只在整轮结束时出现一次，轮次进行中不提前收起。
-    val segments = remember(messages) { messages.flatMap { it.parts }.toSegments() }
+    // 3.4.43（N9）：分段走增量缓存，每个 delta 只重切最后一个 part，前面的段对象原样复用。
+    val segmentCache = remember { ForgeSegmentCache() }
+    val segments = remember(messages) { segmentCache.segments(messages.flatMap { it.parts }) }
     val lastWorkSegment = segments.filterIsInstance<ForgeSegment.Work>().lastOrNull()
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -996,7 +962,9 @@ private fun queryDisplayName(context: Context, uri: Uri): String? = runCatching 
 
 /** 把选择器给的内容流复制进暂存目录，返回暂存文件；超限或读不到返回 null。 */
 private fun copyToStage(context: Context, uri: Uri, name: String, maxBytes: Long): File? {
-    val target = File(forgeStageDir(context), "${UUID.randomUUID()}-$name")
+    // 3.4.43（N11）：暂存路径也要过同一套清洗（forgeSanitizeFilename），
+    // 以前这里直接用 SAF 的 DISPLAY_NAME 原文拼路径，落盘时才清洗，两套标准。
+    val target = File(forgeStageDir(context), "${UUID.randomUUID()}-${forgeSanitizeFilename(name)}")
     return runCatching {
         val input = context.contentResolver.openInputStream(uri) ?: return null
         var total = 0L
@@ -1136,6 +1104,7 @@ private fun ForgeQuestionCard(
     request: ForgeQuestionRequest,
     onAnswer: (List<List<String>>) -> Unit,
     onSkip: () -> Unit,
+    answering: Boolean = false,
 ) {
     var selections by remember(request.id) { mutableStateOf<Map<Int, Set<String>>>(emptyMap()) }
     var customAnswers by remember(request.id) { mutableStateOf<Map<Int, String>>(emptyMap()) }
@@ -1249,21 +1218,28 @@ private fun ForgeQuestionCard(
             TextButton(
                 text = stringResource(R.string.forge_question_skip),
                 onClick = onSkip,
+                // 3.4.43（N10）：有一个请求在途就锁住两个按钮。
+                // 以前双击会并发提交，第二次拿 404 再回退，最后弹一句假的「回答失败」。
+                enabled = !answering,
             )
             TextButton(
                 text = stringResource(R.string.forge_question_submit),
                 onClick = {
                     val answers = request.questions.indices.map { index ->
                         val custom = customAnswers[index]?.trim().orEmpty()
-                        if (custom.isNotEmpty()) {
-                            listOf(custom)
-                        } else {
-                            selections[index].orEmpty().toList()
+                        val picked = selections[index].orEmpty().toList()
+                        // 3.4.43（N6）：多选时「勾的选项 + 自写答案」一起提交（去重），
+                        // 以前 custom 非空就整组替换，勾了的选项被静默丢掉，跟卡片上
+                        // 写着「多选时选项保留」自相矛盾。单选仍然互斥，以自写为准。
+                        when {
+                            custom.isEmpty() -> picked
+                            request.questions[index].multiple -> (picked + custom).distinct()
+                            else -> listOf(custom)
                         }
                     }
                     onAnswer(answers)
                 },
-                enabled = ready,
+                enabled = ready && !answering,
                 colors = ButtonDefaults.textButtonColorsPrimary(),
             )
         }
@@ -1278,6 +1254,67 @@ private fun ForgeCaption(text: String, modifier: Modifier = Modifier) {
         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         modifier = modifier,
     )
+}
+
+/**
+ * 空白页的徽章（3.4.43 B2）：原创的锻造主题图形——一块铁砧，砧面上方三粒火星，
+ * 深色圆角底 + 底部暖光。跟启动屏那个终端 `>_` 字标不是一套形象，也不再借用。
+ * 整幅图形用 Canvas 直接画（不引外部资源），缩放到任何尺寸都清晰。
+ */
+@Composable
+private fun ForgeForgeBadge(modifier: Modifier = Modifier, size: Dp = 104.dp) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(RoundedCornerShape(size * 0.28f))
+            .background(Brush.verticalGradient(listOf(Color(0xFF23201D), Color(0xFF141210)))),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = this.size.width
+            val h = this.size.height
+            // 炉火暖光：从砧座底部往上洇，让深色底不发死。
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0x59FF8A3D), Color(0x00FF8A3D)),
+                    center = Offset(w * 0.5f, h * 0.84f),
+                    radius = w * 0.5f,
+                ),
+                radius = w * 0.5f,
+                center = Offset(w * 0.5f, h * 0.84f),
+            )
+            // 铁砧：左尖砧角 → 顶面 → 收腰 → 底座，一笔闭合。
+            val anvil = Path().apply {
+                moveTo(w * 0.09f, h * 0.44f)
+                lineTo(w * 0.25f, h * 0.33f)
+                lineTo(w * 0.87f, h * 0.33f)
+                lineTo(w * 0.87f, h * 0.47f)
+                lineTo(w * 0.65f, h * 0.47f)
+                lineTo(w * 0.60f, h * 0.62f)
+                lineTo(w * 0.75f, h * 0.62f)
+                lineTo(w * 0.79f, h * 0.77f)
+                lineTo(w * 0.30f, h * 0.77f)
+                lineTo(w * 0.34f, h * 0.62f)
+                lineTo(w * 0.44f, h * 0.62f)
+                lineTo(w * 0.40f, h * 0.47f)
+                lineTo(w * 0.09f, h * 0.47f)
+                close()
+            }
+            drawPath(anvil, color = Color(0xFFC7CCD6))
+            // 砧面高光：一条稍亮的横线，交代出「面」而不是一块平色。
+            drawLine(
+                color = Color(0xFFEFF2F7),
+                start = Offset(w * 0.26f, h * 0.365f),
+                end = Offset(w * 0.86f, h * 0.365f),
+                strokeWidth = h * 0.022f,
+                cap = StrokeCap.Round,
+            )
+            // 火星：三粒，中间最大最高。
+            drawCircle(Color(0xFFFFC46B), radius = w * 0.036f, center = Offset(w * 0.29f, h * 0.20f))
+            drawCircle(Color(0xFFFFDCA6), radius = w * 0.028f, center = Offset(w * 0.5f, h * 0.12f))
+            drawCircle(Color(0xFFFFC46B), radius = w * 0.023f, center = Offset(w * 0.69f, h * 0.21f))
+        }
+    }
 }
 
 private sealed interface ForgeSegment {
@@ -1301,61 +1338,148 @@ private sealed interface ForgeSegment {
 private fun List<ForgePart>.toSegments(): List<ForgeSegment> {
     val segments = mutableListOf<ForgeSegment>()
     val work = mutableListOf<AgentChatMessageUi>()
-    fun flushWork() {
-        if (work.isEmpty()) return
-        // key 只用首条 part 的 id：以前还拼段数，流式期间段数一变 key 就变，
-        // 工作块的展开状态（rememberSaveable 按 key 存）被重置、自己收起又展开。
-        segments += ForgeSegment.Work(key = "work-${work.first().id}", items = work.toList())
-        work.clear()
-    }
-    forEach { part ->
-        when (part) {
-            is ForgePart.Reasoning -> work += ThinkingMessageUi(
-                id = part.id,
-                content = part.text,
-                isStreaming = !part.ended,
+    forEach { part -> part.appendSegment(segments, work) }
+    flushWork(segments, work)
+    return segments
+}
+
+/** 把攒着的工作项收成一个工作块（key 只用首条 part 的 id）。 */
+private fun flushWork(segments: MutableList<ForgeSegment>, work: MutableList<AgentChatMessageUi>) {
+    if (work.isEmpty()) return
+    // key 只用首条 part 的 id：以前还拼段数，流式期间段数一变 key 就变，
+    // 工作块的展开状态（rememberSaveable 按 key 存）被重置、自己收起又展开。
+    segments += ForgeSegment.Work(key = "work-${work.first().id}", items = work.toList())
+    work.clear()
+}
+
+/**
+ * 单个 part 的切段动作（3.4.43 N9）。原来整段逻辑写在 [toSegments] 里，
+ * 抽出来是为了让分段缓存（[ForgeSegmentCache]）能「从上次的状态接着往后切」：
+ * 一遍左折叠的状态只有 (segments, work) 两项，缓存住这两项就能精确续算，
+ * 结果与从头全量切逐字节相同。
+ */
+private fun ForgePart.appendSegment(
+    segments: MutableList<ForgeSegment>,
+    work: MutableList<AgentChatMessageUi>,
+) {
+    when (this) {
+        is ForgePart.Reasoning -> work += ThinkingMessageUi(
+            id = id,
+            content = text,
+            isStreaming = !ended,
+        )
+
+        is ForgePart.Tool -> work += toToolActivity()
+
+        is ForgePart.Text -> if (text.isNotBlank()) {
+            flushWork(segments, work)
+            segments += ForgeSegment.Body(
+                id = id,
+                text = text,
+                streaming = !ended,
             )
+        }
 
-            is ForgePart.Tool -> work += part.toToolActivity()
-
-            is ForgePart.Text -> if (part.text.isNotBlank()) {
-                flushWork()
-                segments += ForgeSegment.Body(
-                    id = part.id,
-                    text = part.text,
-                    streaming = !part.ended,
+        is ForgePart.Retry -> {
+            // 紧挨着的重试并成一行（次数取最大）；中间隔了思考/工具就另起一行，
+            // 保持重试在时间线上的真实位置。
+            val lastSegment = segments.lastOrNull()
+            if (work.isEmpty() && lastSegment is ForgeSegment.Retry) {
+                segments[segments.lastIndex] = lastSegment.copy(
+                    attempt = maxOf(lastSegment.attempt, attempt),
+                    errorMessage = errorMessage ?: lastSegment.errorMessage,
+                    statusCode = statusCode ?: lastSegment.statusCode,
+                )
+            } else {
+                flushWork(segments, work)
+                segments += ForgeSegment.Retry(
+                    id = id,
+                    attempt = attempt,
+                    errorMessage = errorMessage,
+                    statusCode = statusCode,
                 )
             }
-
-            is ForgePart.Retry -> {
-                // 紧挨着的重试并成一行（次数取最大）；中间隔了思考/工具就另起一行，
-                // 保持重试在时间线上的真实位置。
-                val lastSegment = segments.lastOrNull()
-                if (work.isEmpty() && lastSegment is ForgeSegment.Retry) {
-                    segments[segments.lastIndex] = lastSegment.copy(
-                        attempt = maxOf(lastSegment.attempt, part.attempt),
-                        errorMessage = part.errorMessage ?: lastSegment.errorMessage,
-                        statusCode = part.statusCode ?: lastSegment.statusCode,
-                    )
-                } else {
-                    flushWork()
-                    segments += ForgeSegment.Retry(
-                        id = part.id,
-                        attempt = part.attempt,
-                        errorMessage = part.errorMessage,
-                        statusCode = part.statusCode,
-                    )
-                }
-            }
-
-            // 助手侧的附件 part 不单独成行（上下文文件由工具行体现），用户侧在 ForgeUserRow 处理。
-            is ForgePart.Attachment -> Unit
-
-            is ForgePart.Other -> Unit
         }
+
+        // 助手侧的附件 part 不单独成行（上下文文件由工具行体现），用户侧在 ForgeUserRow 处理。
+        is ForgePart.Attachment -> Unit
+
+        is ForgePart.Other -> Unit
     }
-    flushWork()
-    return segments
+}
+
+/**
+ * 影响某个 part 切段结果的全部字段做成的签名（3.4.43 N9）。
+ * String.hashCode 首次计算后由 String 自己缓存，重复取是 O(1)，所以拼这个签名
+ * 比重新造一遍 UI 对象便宜得多；字段一旦有变化签名必变，不会出现「该重算没重算」。
+ */
+private fun ForgePart.cacheSignature(): String = when (this) {
+    is ForgePart.Reasoning -> "r:$id:${text.hashCode()}:${text.length}:$ended"
+    is ForgePart.Text -> "t:$id:${text.hashCode()}:${text.length}:$ended"
+    is ForgePart.Tool ->
+        "k:$id:$tool:$status:${title?.hashCode()}:${input?.hashCode()}:${output?.hashCode()}:${error?.hashCode()}"
+
+    is ForgePart.Retry -> "y:$id:$attempt:${errorMessage?.hashCode()}:$statusCode"
+    is ForgePart.Attachment -> "a:$id"
+    is ForgePart.Other -> "o:$id"
+}
+
+/**
+ * 一轮内的分段缓存（3.4.43 N9）：只重算「最后一个 part」，前面的 part 复用上次的折叠状态。
+ * 流式期间每个 delta 只让最后一个 part 变长，所以每个 delta 的代价从「整轮全部 part」
+ * 降到「一个 part」。缓存键是前面各 part 的签名列表，任何不在这条 tail 上的变化都会重算。
+ */
+private class ForgeSegmentCache {
+    private var headKey: List<String> = emptyList()
+    private var headSegments: List<ForgeSegment> = emptyList()
+    private var headWork: List<AgentChatMessageUi> = emptyList()
+
+    fun segments(parts: List<ForgePart>): List<ForgeSegment> {
+        if (parts.isEmpty()) {
+            headKey = emptyList()
+            headSegments = emptyList()
+            headWork = emptyList()
+            return emptyList()
+        }
+        val head = parts.subList(0, parts.size - 1)
+        val key = head.map { it.cacheSignature() }
+        if (key != headKey) {
+            val segments = mutableListOf<ForgeSegment>()
+            val work = mutableListOf<AgentChatMessageUi>()
+            head.forEach { it.appendSegment(segments, work) }
+            headKey = key
+            headSegments = segments.toList()
+            headWork = work.toList()
+        }
+        val segments = headSegments.toMutableList()
+        val work = headWork.toMutableList()
+        parts.last().appendSegment(segments, work)
+        flushWork(segments, work)
+        return segments
+    }
+}
+
+/**
+ * 转录分组缓存（3.4.43 N9）：分组只按「消息 id + 角色」切，最后一轮之后不会再变。
+ * 流式期间把最后一个用户消息之前的轮次整批复用（对象相同 → LazyColumn 里那几项
+ * 参数相等，Compose 直接跳过重组，连分段都不会重算），只重算最后一轮。
+ */
+private class ForgeTurnGroupCache {
+    private var prefixKey: List<String> = emptyList()
+    private var prefixTurns: List<ForgeTurn> = emptyList()
+
+    fun group(messages: List<ForgeChatMessage>): List<ForgeTurn> {
+        if (messages.isEmpty()) return emptyList()
+        // 最后一轮 = 最后一个用户消息起（一条用户消息都没有时整段都算最后一轮）。
+        val lastUserIndex = messages.indexOfLast { it.role == ForgeRole.User }
+        val prefixEnd = if (lastUserIndex >= 0) lastUserIndex else 0
+        val key = messages.subList(0, prefixEnd).map { "${it.id}:${it.role}" }
+        if (key != prefixKey) {
+            prefixKey = key
+            prefixTurns = messages.subList(0, prefixEnd).groupIntoTurns()
+        }
+        return prefixTurns + messages.subList(prefixEnd, messages.size).groupIntoTurns()
+    }
 }
 
 private fun ForgePart.Tool.toToolActivity(): ToolActivityMessageUi = ToolActivityMessageUi(

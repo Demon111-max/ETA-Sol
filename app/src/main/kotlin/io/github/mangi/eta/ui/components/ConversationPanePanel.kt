@@ -98,6 +98,7 @@ import io.github.mangi.eta.agent.forge.ForgeWorkspaces
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.ForgeChatMode
 import io.github.mangi.eta.data.model.forgeSessionIdOf
+import io.github.mangi.eta.ui.app.ConversationTimeLabels
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.coui.CouiIcon
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
@@ -263,16 +264,20 @@ internal fun ConversationPanePanel(
                             verticalArrangement = Arrangement.spacedBy(ConversationPanelMetrics.RowGap),
                             overscrollEffect = null,
                         ) {
+                            // 3.4.43（N13）：搜索时**模式切换段照常显示**（用户选的是这一条：
+                            // 搜索词保留，但不再把 Assist/Forge 切换藏起来——以前搜索中整段消失，
+                            // 用户想「在 Forge 里搜」得先清空搜索词）。工作台仍只在非搜索态出现：
+                            // 搜索结果是会话列表，工作台入口与搜索无关（也符合既有测试的期望）。
+                            item(key = "pane_mode_switch") {
+                                AssistForgeSwitch(
+                                    mode = chatMode,
+                                    onModeSelected = onChatModeSelected,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = ConversationPanelMetrics.PaneHorizontalPadding),
+                                )
+                            }
                             if (!isSearching) {
-                                item(key = "pane_mode_switch") {
-                                    AssistForgeSwitch(
-                                        mode = chatMode,
-                                        onModeSelected = onChatModeSelected,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = ConversationPanelMetrics.PaneHorizontalPadding),
-                                    )
-                                }
                                 item(key = "pane_workbench") {
                                     PaneWorkbenchSection(
                                         activeModelLabel = activeModelLabel,
@@ -376,7 +381,7 @@ internal fun ConversationPanePanel(
                                 }
                             } else {
                                 groups.forEachIndexed { groupIndex, group ->
-                                    item(key = "section-${group.section}") {
+                                    item(key = "section-${sectionKey(group.section)}") {
                                         ConversationSectionHeader(
                                             group = group,
                                             isFirstSection = groupIndex == 0,
@@ -466,6 +471,32 @@ internal fun ConversationPanePanel(
             val workspaceRenameFailedText = stringResource(R.string.forge_workspace_rename_failed)
             val workspaceRemoveFailedText = stringResource(R.string.forge_workspace_remove_failed)
             val workspaceRemovedNoticeText = stringResource(R.string.forge_workspace_removed_notice)
+            // 3.4.43（N18）：底层原因分得很清（WorkspaceFailure 枚举），文案不该全塌缩成一句
+            // 「无法添加」。这里预解析各条人话，按原因挑。
+            val addFailedDuplicateText = stringResource(R.string.forge_workspace_add_failed_duplicate)
+            val addFailedForbiddenText = stringResource(R.string.forge_workspace_add_failed_forbidden)
+            val addFailedInvalidText = stringResource(R.string.forge_workspace_add_failed_invalid)
+            val addFailedLimitText = stringResource(R.string.forge_workspace_add_failed_limit)
+            val addFailedDirText = stringResource(R.string.forge_workspace_add_failed_dir)
+            val renameFailedDuplicateText = stringResource(R.string.forge_workspace_rename_failed_duplicate)
+            val renameFailedInvalidText = stringResource(R.string.forge_workspace_rename_failed_invalid)
+            val renameFailedNotFoundText = stringResource(R.string.forge_workspace_rename_failed_not_found)
+            fun addFailureText(error: Throwable): String =
+                when ((error as? ForgeWorkspaces.ForgeWorkspaceException)?.reason) {
+                    ForgeWorkspaces.WorkspaceFailure.SOURCE_DUPLICATE -> addFailedDuplicateText
+                    ForgeWorkspaces.WorkspaceFailure.SOURCE_FORBIDDEN -> addFailedForbiddenText
+                    ForgeWorkspaces.WorkspaceFailure.SOURCE_INVALID -> addFailedInvalidText
+                    ForgeWorkspaces.WorkspaceFailure.TOO_MANY -> addFailedLimitText
+                    ForgeWorkspaces.WorkspaceFailure.DIR_UNAVAILABLE -> addFailedDirText
+                    else -> workspaceAddFailedText
+                }
+            fun renameFailureText(error: Throwable): String =
+                when ((error as? ForgeWorkspaces.ForgeWorkspaceException)?.reason) {
+                    ForgeWorkspaces.WorkspaceFailure.NAME_DUPLICATE -> renameFailedDuplicateText
+                    ForgeWorkspaces.WorkspaceFailure.NAME_INVALID -> renameFailedInvalidText
+                    ForgeWorkspaces.WorkspaceFailure.NOT_FOUND -> renameFailedNotFoundText
+                    else -> workspaceRenameFailedText
+                }
             if (folderPickerOpen) {
                 FolderPickerDialog(
                     onDismiss = { folderPickerOpen = false },
@@ -476,7 +507,7 @@ internal fun ConversationPanePanel(
                                 onForgeWorkspacesChanged()
                                 onForgeNewConversationInWorkspace(created.name)
                             }
-                            .onFailure { workspaceError = workspaceAddFailedText }
+                            .onFailure { error -> workspaceError = addFailureText(error) }
                     },
                 )
             }
@@ -502,7 +533,7 @@ internal fun ConversationPanePanel(
                         workspaceRenameTarget = null
                         ForgeWorkspaces.rename(workspace.name, newName)
                             .onSuccess { onForgeWorkspacesChanged() }
-                            .onFailure { workspaceError = workspaceRenameFailedText }
+                            .onFailure { error -> workspaceError = renameFailureText(error) }
                     },
                 )
             }
@@ -1354,23 +1385,40 @@ private data class ConversationDrawerGroup(
 
 private sealed interface ConversationDrawerSection {
     data object Pinned : ConversationDrawerSection
-    data object Today : ConversationDrawerSection
-    data class Dated(val label: String) : ConversationDrawerSection
+
+    /**
+     * 按**本地日期**归一的分组（3.4.43 B1）。
+     *
+     * 以前分组键直接是条目的 `timeLabel` 字符串：Assist 的标签来自 ConversationTimeLabels
+     * （昨天 / 星期三 / M月d日），Forge 的 forgeTimeLabel 非今天一律 `MM-dd`。同一天里两种
+     * 会话都有时，标签不同就裂成两个组头（今天的 11-17 侧边栏里同时出现「11-16」和「昨天」）。
+     * 现在键只有 [epochDay] 一个维度，标签在渲染时统一生成。
+     */
+    data class Day(val epochDay: Long, val sampleMillis: Long) : ConversationDrawerSection
 }
 
 @Composable
 private fun ConversationDrawerGroup.localizedLabel(): String = when (val value = section) {
     ConversationDrawerSection.Pinned -> stringResource(R.string.conversation_section_pinned)
-    ConversationDrawerSection.Today -> stringResource(R.string.conversation_section_today)
-    is ConversationDrawerSection.Dated -> value.label
+    is ConversationDrawerSection.Day -> {
+        val todayEpochDay = localEpochDay(System.currentTimeMillis())
+        when (value.epochDay) {
+            // 相对标签优先：今天 / 昨天。
+            todayEpochDay -> stringResource(R.string.conversation_section_today)
+            todayEpochDay - 1 -> stringResource(R.string.conversation_section_yesterday)
+            // 其余交给统一的时间标签规则（一周内是星期几，同一年是 M月d日 / MMM d）。
+            else -> ConversationTimeLabels.label(timestampMillis = value.sampleMillis)
+        }
+    }
 }
 
 private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawerGroup> {
     if (isEmpty()) return emptyList()
     // 必须按 section 全量归并，不能只合并相邻项：列表按更新时间排序，
     // 但 section 还看 isActiveRun / 时间是否为 0——一个正在后台跑的旧对话
-    // 或时间缺失的条目会被判进 Today 却排在旧日期分组中间，只合并相邻项
+    // 或时间缺失的条目会被判进「今天」却排在旧日期分组中间，只合并相邻项
     // 就会把同一 section 切成两组，LazyColumn 里两个组头 key 相同直接闪退。
+    // 键只用「置顶 / 日期」两态：同一天的不同标签不会再分成两组（B1）。
     val bySection = LinkedHashMap<ConversationDrawerSection, MutableList<ConversationSummaryUi>>()
     for (conversation in this) {
         bySection.getOrPut(conversation.drawerSection()) { mutableListOf() } += conversation
@@ -1380,19 +1428,29 @@ private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawe
     }
 }
 
-private fun ConversationSummaryUi.drawerSection(): ConversationDrawerSection = when {
-    isPinned -> ConversationDrawerSection.Pinned
-    isActiveRun || isUpdatedToday(updatedAtMillis) -> ConversationDrawerSection.Today
-    else -> ConversationDrawerSection.Dated(timeLabel)
+private fun ConversationSummaryUi.drawerSection(): ConversationDrawerSection {
+    if (isPinned) return ConversationDrawerSection.Pinned
+    // isActiveRun 的条目 updatedAtMillis 就是现在，自然落在今天这一组；时间缺失按今天算。
+    val epochDay = localEpochDay(updatedAtMillis)
+    return ConversationDrawerSection.Day(epochDay = epochDay, sampleMillis = updatedAtMillis)
 }
 
-private fun isUpdatedToday(timestampMillis: Long): Boolean {
-    if (timestampMillis <= 0L) return true
-    val now = java.util.Calendar.getInstance()
-    val target = java.util.Calendar.getInstance().apply { timeInMillis = timestampMillis }
-    return now.get(java.util.Calendar.ERA) == target.get(java.util.Calendar.ERA) &&
-        now.get(java.util.Calendar.YEAR) == target.get(java.util.Calendar.YEAR) &&
-        now.get(java.util.Calendar.DAY_OF_YEAR) == target.get(java.util.Calendar.DAY_OF_YEAR)
+/**
+ * 组头的 LazyColumn key：只用「置顶 / 日期」这两态+日期序号，**不含** sampleMillis——
+ * 否则同一天里一条会话更新了时间就会换 key，组头被当成新条目重建（闪一下）。
+ */
+private fun sectionKey(section: ConversationDrawerSection): String = when (section) {
+    ConversationDrawerSection.Pinned -> "pinned"
+    is ConversationDrawerSection.Day -> "day-${section.epochDay}"
+}
+
+/** 时间戳 → 本地时区下的「天」序号；<=0（无时间）按今天算，和 3.4.42 的既有行为一致。 */
+private fun localEpochDay(timestampMillis: Long): Long {
+    if (timestampMillis <= 0L) return localEpochDay(System.currentTimeMillis())
+    return java.time.Instant.ofEpochMilli(timestampMillis)
+        .atZone(java.time.ZoneId.systemDefault())
+        .toLocalDate()
+        .toEpochDay()
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,7 +1602,8 @@ private fun ForgeWorkspaceGroupHeader(
         )
         Spacer(modifier = Modifier.width(9.dp))
         Text(
-            text = workspace.name,
+            // B3：展示名用 displayName（保留用户原文，可含空格），挂载名/linuxPath 仍用 name。
+            text = workspace.displayName,
             style = MiuixTheme.textStyles.body1.copy(fontSize = 15.sp),
             fontWeight = FontWeight.Medium,
             color = colors.onSurface,
@@ -1665,7 +1724,8 @@ private fun ForgeWorkspaceActionDialog(
 ) {
     ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
         Text(
-            text = workspace.name,
+            // B3：弹窗标题同样是展示名。
+            text = workspace.displayName,
             style = MiuixTheme.textStyles.title4,
             color = MiuixTheme.colorScheme.onSurface,
             maxLines = 1,
@@ -1708,7 +1768,8 @@ private fun ForgeWorkspaceRenameDialog(
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var name by remember(workspace.name) { mutableStateOf(workspace.name) }
+    // B3：改名改的是显示名，输入框预填当前显示名（可含空格）。
+    var name by remember(workspace.name) { mutableStateOf(workspace.displayName) }
     ForgeWorkspaceDialogContainer(onDismiss = onDismiss) {
         Text(
             text = stringResource(R.string.forge_workspace_rename_title),
@@ -1760,7 +1821,7 @@ private fun ForgeWorkspaceRemoveDialog(
             color = MiuixTheme.colorScheme.onSurface,
         )
         Text(
-            text = stringResource(R.string.forge_workspace_remove_confirm_body, workspace.name),
+            text = stringResource(R.string.forge_workspace_remove_confirm_body, workspace.displayName),
             style = MiuixTheme.textStyles.body2,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             modifier = Modifier.padding(top = 8.dp),

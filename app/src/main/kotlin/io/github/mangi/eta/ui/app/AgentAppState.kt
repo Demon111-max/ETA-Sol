@@ -2265,6 +2265,15 @@ internal class AgentAppState(
             }
             return
         }
+        // 3.4.43（B0）：Assist 侧同样的在途问题——用户按下停止后，运行时已经发出、还躺在
+        // 管道里的流式增量照样会被应用，界面上文字继续往外冒一段才停。停止请求一旦立起来，
+        // 纯流式增量（正文/思考 delta、子代理进度）一律丢弃不渲染；结构化轨迹事件照常应用，
+        // 收尾结算走 applyRunResult，不会因为这里丢事件而卡在运行中。
+        if (runStore.isStopRequested(runId) &&
+            (event is AgentEvent.AssistantBlockDelta || event is AgentEvent.SubagentProgress)
+        ) {
+            return
+        }
         when (event) {
             is AgentEvent.GuiControlChanged -> {
                 runStore.updateGuiStatus(runId, event.status)

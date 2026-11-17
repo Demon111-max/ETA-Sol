@@ -609,6 +609,8 @@ fun AgentAppRoot(
                 untitledTitle = forgeTitle,
                 busySessionIds = forgeBusySessionIds,
                 forgeListHint = forgeListHint,
+                // N12：归档过滤在混合列表里也要生效，否则归档的 Forge 会话切到 Assist 又「复活」。
+                archivedSessionIds = ForgeArchivedSessions.all(),
             ),
             isConversationPaneOpen = conversationPaneOpen,
             onBack = { popRoute() },

@@ -45,41 +45,13 @@ internal class ForgeApiClient(
             .build()
     }
 
-    /**
-     * 已有会话就沿用最近更新的一个，没有就新建一个。
-     *
-     * [directory] 非空时只在同一个目录（工作区）的会话里挑更新的那个：opencode 的会话列表是全局的，
-     * 不按目录过滤就会在切到工作区 B 时打开工作区 A 的会话。此时改用 [listSessions] 过滤
-     * [ForgeSessionSummary.directory]（两边都经 [ForgeWorkspaces.canonicalDirectory] 归一，
-     * 工作区改过名时旧会话仍记着旧挂载名，不归一会当成"没有会话"而白新建一个）；
-     * [directory] 为 null 时保持旧的全局最新行为。
-     * 列表拉不到（服务不可达等）按失败返回，只有确实没有会话才新建。
-     */
-    suspend fun ensureSession(directory: String? = null): Result<String> {
-        if (directory.isNullOrBlank()) {
-            val existing = runCatching { latestSession() }
-            existing.getOrNull()?.let { return Result.success(it) }
-            if (existing.isFailure && (existing.exceptionOrNull() as? IOException) != null) {
-                return Result.failure(existing.exceptionOrNull()!!)
-            }
-            return createSession()
-        }
-        val summaries = listSessions().getOrElse { failure -> return Result.failure(failure) }
-        val target = ForgeWorkspaces.canonicalDirectory(directory)
-        val latest = summaries
-            .filter { ForgeWorkspaces.canonicalDirectory(it.directory) == target }
-            .maxByOrNull { it.updatedAtMillis }
-        return latest?.let { Result.success(it.id) } ?: createSession()
-    }
-
-    private suspend fun latestSession(): String? = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url("$baseUrl/session").get().build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            val body = response.body.string().orEmpty()
-            ForgeProtocol.parseLatestSessionId(Json.parseToJsonElement(body))
-        }
-    }
+    // 3.4.43（B4）：这里原本有 ensureSession(directory) ——「有会话就沿用本目录最近更新的那条，
+    // 没有才新建」。它是「新会话其实没建新会话」的根因：newConversation() 只是把 sessionId 置空，
+    // 首条消息发送时又按目录把上一个会话捡回来续聊（旧历史全量进上下文，所以还特别慢）。
+    // 现在整条「捡已有会话」的路径已经删掉：
+    //   · 显式新建的对话（空白页）→ 首条消息一律 createSession() 新建；
+    //   · 恢复某条会话 → 只允许按已知的具体 sessionId 走 openSession(id)（侧边栏点开）。
+    // 谁都不许再按目录/全局「最近一条」去挑已有会话。
 
     /** 拉全部会话给侧边栏列表用（标题、更新时间都在里面）。 */
     suspend fun listSessions(): Result<List<ForgeSessionSummary>> = withContext(Dispatchers.IO) {

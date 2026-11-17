@@ -16,9 +16,21 @@ internal object PrefsWriteLock {
 }
 
 /** 一条共享文件夹配置：Android 侧目录 [sourcePath] 在 Linux 环境中出现在 /workspace/mounts/[name]。 */
+/**
+ * 一条共享文件夹挂载。
+ *
+ * 3.4.43（B3）：[name] 是**挂载名**——它会拼进 `/workspace/mounts/<name>` 与 bind mount 参数，
+ * 只能是 [SharedFolderMounts.NAME_PATTERN] 允许的字符（无空白），所以源目录叫 `ETA Sol`
+ * 时它只能清洗成 `ETASolWorkspace` 这类形态。
+ * [displayName] 是**显示名**——保留用户原文（可以带空格），只用于界面展示；为 null 时
+ * 由 [SharedFolderMounts.displayNameOf] 从源目录 basename 推导。
+ * 旧数据没有 displayName 字段，解码后为 null，展示层会自动回落到源目录原名，
+ * 所以历史挂载也能立刻显示成 `ETA Sol` 而不是 `ETASolWorkspace`。
+ */
 internal data class SharedFolderMount(
     val name: String,
     val sourcePath: String,
+    val displayName: String? = null,
 )
 
 /**
@@ -136,6 +148,52 @@ internal object SharedFolderMounts {
         return null
     }
 
+    /** 显示名长度上限：与挂载名一致，够放下整个目录原名。 */
+    const val DISPLAY_NAME_MAX = 48
+
+    /**
+     * 从源目录 basename 推导「显示名」：**保留原文**（含空格、汉字、标点），只做必要的安全清洗。
+     *
+     * 3.4.43（B3）：以前显示名就是挂载名，而挂载名必须剔除空白，于是
+     * `/storage/emulated/0/AI_Workspace/ETA Sol` 在界面上显示成 `ETASolWorkspace`。
+     * 显示名不参与任何路径拼接，所以空白可以留；只剔掉会破坏界面/路径解析的字符
+     * （`/`、`\`、控制字符），并把长度截到 [DISPLAY_NAME_MAX]。
+     */
+    fun sourceDisplayName(sourcePath: String): String {
+        val base = sourcePath.trimEnd('/').substringAfterLast('/').trim()
+        val cleaned = base.filter { char -> char != '/' && char != '\\' && !char.isISOControl() }
+            .trim()
+            .take(DISPLAY_NAME_MAX)
+        return cleaned.ifBlank { defaultName(sourcePath) }
+    }
+
+    /** 一条挂载的展示名：有 displayName 用它，否则回落到源目录原名（旧数据/未设过都走这里）。 */
+    fun displayNameOf(mount: SharedFolderMount): String {
+        val explicit = mount.displayName?.trim().orEmpty()
+        return explicit.ifBlank { sourceDisplayName(mount.sourcePath) }
+    }
+
+    /**
+     * 用户输入的新显示名校验：允许空白与任意 Unicode（中文照旧保留），
+     * 只拒绝空、超长、含路径分隔符/控制字符、`.`/`..`，以及在**其它**挂载上重复。
+     * 挂载名与它无关，所以不套 [NAME_PATTERN]。
+     */
+    fun validateDisplayName(
+        displayName: String,
+        existing: List<SharedFolderMount>,
+        selfName: String? = null,
+    ): NameError? {
+        val trimmed = displayName.trim()
+        if (trimmed.isEmpty() || trimmed.length > DISPLAY_NAME_MAX) return NameError.INVALID
+        if (trimmed == "." || trimmed == "..") return NameError.INVALID
+        if (trimmed.any { it == '/' || it == '\\' || it.isISOControl() }) return NameError.INVALID
+        val clash = existing.any { other ->
+            other.name != selfName && displayNameOf(other) == trimmed
+        }
+        if (clash) return NameError.DUPLICATE
+        return null
+    }
+
     /**
      * 从源目录 basename 推导默认挂载名。
      *
@@ -161,11 +219,13 @@ internal object SharedFolderMounts {
     fun encode(mounts: List<SharedFolderMount>): String {
         val array = JSONArray()
         mounts.forEach { mount ->
-            array.put(
-                JSONObject()
-                    .put("name", mount.name)
-                    .put("source", mount.sourcePath)
-            )
+            val item = JSONObject()
+                .put("name", mount.name)
+                .put("source", mount.sourcePath)
+            // B3：只在显式设过、且确实不等于挂载名时写 display，旧格式保持原样（不留冗余字段）。
+            val display = mount.displayName?.trim().orEmpty()
+            if (display.isNotEmpty() && display != mount.name) item.put("display", display)
+            array.put(item)
         }
         return array.toString()
     }
@@ -181,7 +241,13 @@ internal object SharedFolderMounts {
             val source = normalizeSourcePath(item.optString("source")) ?: continue
             if (!NAME_PATTERN.matches(name) || name == "." || name == "..") continue
             if (mounts.any { it.name == name || it.sourcePath == source }) continue
-            mounts += SharedFolderMount(name = name, sourcePath = source)
+            // 显示名宽松清洗：坏值（含分隔符/控制字符/超长）当没设过，由 displayNameOf 回落到源目录名。
+            val display = item.optString("display").trim()
+                .filter { it != '/' && it != '\\' && !it.isISOControl() }
+                .trim()
+                .take(DISPLAY_NAME_MAX)
+                .takeIf { it.isNotEmpty() && it != "." && it != ".." && it != name }
+            mounts += SharedFolderMount(name = name, sourcePath = source, displayName = display)
         }
         // 写入侧已拒绝超限，这里超限只可能是历史数据或外部改的 prefs：兜底截断但留一条日志，
         // 别让「第 17 条静默消失」无从追查。decode 也会在 JVM 单测里跑，android.util.Log 在单测里

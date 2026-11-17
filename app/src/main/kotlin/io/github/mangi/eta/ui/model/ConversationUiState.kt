@@ -52,11 +52,31 @@ internal fun ConversationPaneUiState.withForgeConversations(
     untitledTitle: String,
     busySessionIds: Set<String> = emptySet(),
     forgeListHint: String? = null,
+    /**
+     * 已归档的 opencode 会话 id（3.4.43 N12）。以前归档过滤只在面板的 Forge 分支里做，
+     * 混合列表（Assist 模式）照样把归档会话摆出来，表现成「归档了、切到 Assist 又复活」。
+     * 现在混排时同样过滤，豁免规则与 Forge 视图一致：当前打开着的那条永远显示。
+     */
+    archivedSessionIds: Set<String> = emptySet(),
 ): ConversationPaneUiState {
     val query = searchQuery.trim()
     val assistConversations = conversations.filterNot { it.forge }
     val forgeEntries = sessions
-        .filter { query.isEmpty() || it.title.contains(query, ignoreCase = true) }
+        .filter { session ->
+            // 归档过滤：与 Forge 视图同一套豁免规则（当前打开的那条不隐藏）。
+            session.id !in archivedSessionIds || session.id == activeSessionId
+        }
+        .filter { session ->
+            if (query.isEmpty()) {
+                true
+            } else {
+                // 3.4.43（N15）：Forge 会话在本地没有正文摘要（要搜正文必须走服务端索引），
+                // 所以至少把「标题 + 工作区名」纳入匹配——按工作区找会话已经可用了。
+                val directoryLabel = session.directory.trimEnd('/').substringAfterLast('/')
+                session.title.contains(query, ignoreCase = true) ||
+                    directoryLabel.contains(query, ignoreCase = true)
+            }
+        }
         .map { session ->
             // 正在跑的会话顶到列表前部并显示运行圆点（与 Assist 的活跃会话同款处理），
             // 更新时间按当前时刻算，免得它被判进旧日期分组、把「今天」组从中间截断。

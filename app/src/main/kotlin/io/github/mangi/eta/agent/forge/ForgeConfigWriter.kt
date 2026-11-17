@@ -153,10 +153,20 @@ internal object ForgeConfigWriter {
     /**
      * 用 heredoc 落盘，避免把 Key 拼进会回显的命令行；写完立即收权限到 600。
      *
-     * 两份文件都先写同目录 `.tmp` 再 `mv -f` 原子覆盖：写到一半被杀/超时只坏临时文件，
+     * 两份文件都先写同目录 `.tmp` 再原子替换：写到一半被杀/超时只坏临时文件，
      * 正式文件要么还是上一版完整的、要么已是新的一版，不会留下截断的 JSON。
-     * 覆盖前先探测旧文件能否解析（jq 优先；精简环境里没有 jq 时退化为首尾花括号判据），
-     * 解析不了说明是上次写坏的残留：先 `mv` 成 `.bak` 再覆盖，让坏文件在下一次写入时自愈。
+     *
+     * 3.4.43（N20）合并写入：以前是整表覆盖——`opencode.json` 里用户手改的 provider/agent/
+     * 主题设置、`auth.json` 里用户用 `opencode auth login` 存的别家凭据，换一次 Key/服务商/
+     * 模型就被静默抹掉。现在改成：
+     * 1. 旧文件存在且是合法 JSON 且环境里有 jq → `jq -s '.[0] * .[1]'` 递归合并，
+     *    App 管的字段（provider.<id>、model、permission 等）以 App 为准（右侧覆盖左侧），
+     *    App 不管的键与别家服务商条目原样保留；
+     * 2. 没有 jq 的极简环境 → 先把旧文件复制成 `.bak`，再整份覆盖：合并做不到，
+     *    但至少用户手改的东西能捞回来，不会静默消失；
+     * 3. 旧文件本身解析不了（上次写坏的残留）→ 由 `eta_forge_backup_if_corrupt` 先 `mv` 成
+     *    `.bak` 让坏文件自愈，随后按「文件不存在」直接落新文件。
+     * 合并只做「深合并到对象」这一层，数组整段取 App 的值（不拼接），语义写在此处备查。
      */
     internal fun writeCommand(configJson: String, authJson: String): String = buildString {
         append("set -e\n")
@@ -175,17 +185,38 @@ internal object ForgeConfigWriter {
         append("  fi\n")
         append("  mv -f \"${'$'}1\" \"${'$'}1.bak\"\n")
         append("}\n")
+        // $1 = 正式文件，$2 = 刚写好的 .tmp（新内容）。
+        append("eta_forge_install() {\n")
+        append("  if [ ! -f \"${'$'}1\" ]; then\n")
+        append("    mv -f \"${'$'}2\" \"${'$'}1\"\n")
+        append("    return 0\n")
+        append("  fi\n")
+        append("  if command -v jq >/dev/null 2>&1; then\n")
+        // 递归合并成「旧 ← 新」：新内容里出现的键以 App 为准，其余键保留。
+        append("    if jq -s '.[0] * .[1]' \"${'$'}1\" \"${'$'}2\" > \"${'$'}2.merged\"; then\n")
+        append("      mv -f \"${'$'}2.merged\" \"${'$'}1\"\n")
+        append("      rm -f \"${'$'}2\"\n")
+        append("      return 0\n")
+        append("    fi\n")
+        append("    rm -f \"${'$'}2.merged\"\n")
+        append("  fi\n")
+        // 合并失败或没有 jq：留一份 .bak 再整份覆盖，绝不静默丢配置。
+        append("  cp -f \"${'$'}1\" \"${'$'}1.bak\"\n")
+        append("  mv -f \"${'$'}2\" \"${'$'}1\"\n")
+        append("}\n")
         append("eta_forge_backup_if_corrupt \"${'$'}eta_forge_config\"\n")
         append("cat > \"${'$'}eta_forge_config.tmp\" <<'ETA_FORGE_CONFIG_EOF'\n")
         append(configJson).append('\n')
         append("ETA_FORGE_CONFIG_EOF\n")
         append("chmod 600 \"${'$'}eta_forge_config.tmp\"\n")
-        append("mv -f \"${'$'}eta_forge_config.tmp\" \"${'$'}eta_forge_config\"\n")
+        append("eta_forge_install \"${'$'}eta_forge_config\" \"${'$'}eta_forge_config.tmp\"\n")
+        append("chmod 600 \"${'$'}eta_forge_config\"\n")
         append("eta_forge_backup_if_corrupt \"${'$'}eta_forge_auth\"\n")
         append("cat > \"${'$'}eta_forge_auth.tmp\" <<'ETA_FORGE_AUTH_EOF'\n")
         append(authJson).append('\n')
         append("ETA_FORGE_AUTH_EOF\n")
         append("chmod 600 \"${'$'}eta_forge_auth.tmp\"\n")
-        append("mv -f \"${'$'}eta_forge_auth.tmp\" \"${'$'}eta_forge_auth\"\n")
+        append("eta_forge_install \"${'$'}eta_forge_auth\" \"${'$'}eta_forge_auth.tmp\"\n")
+        append("chmod 600 \"${'$'}eta_forge_auth\"\n")
     }
 }

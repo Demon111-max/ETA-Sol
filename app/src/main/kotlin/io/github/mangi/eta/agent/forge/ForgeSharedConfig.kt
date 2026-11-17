@@ -25,7 +25,37 @@ internal sealed interface ForgeSharedConfig {
         val credentials: ForgeCredentials,
     ) : ForgeSharedConfig
 
-    data object NotConfigured : ForgeSharedConfig
+    /**
+     * 配置没就绪，且**带原因**（3.4.43 N19）。
+     *
+     * 以前是个无字段的 object：服务商被禁用、类型不是 OpenAI 兼容、用 OAuth、没有模型、
+     * Base URL/Key/模型 ID 为空，六条完全不同的路全塌缩成同一句「还没配置」，
+     * 用户根本不知道该去哪儿改哪一项。
+     */
+    data class NotConfigured(val reason: Reason) : ForgeSharedConfig {
+        enum class Reason {
+            /** 选中的服务商不存在或被禁用。 */
+            PROVIDER_DISABLED,
+
+            /** 服务商类型不是 OpenAI 兼容（Anthropic / Gemini 等）。 */
+            PROVIDER_INCOMPATIBLE,
+
+            /** 服务商用的是 OAuth 等非 API Key 认证。 */
+            AUTH_MODE_UNSUPPORTED,
+
+            /** 服务商下没有可用模型。 */
+            NO_MODEL,
+
+            /** Base URL 为空。 */
+            MISSING_BASE_URL,
+
+            /** API Key 为空。 */
+            MISSING_API_KEY,
+
+            /** 模型 ID 为空。 */
+            MISSING_MODEL_ID,
+        }
+    }
 }
 
 internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
@@ -34,18 +64,39 @@ internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
     // 只认用户选中的那一个：选中项被禁用/未配置就是 NotConfigured，绝不回落到"第一个启用的服务商"，
     // 否则用户代码会被发往没选过的厂商。服务商内部仍可回落到它自己的第一个可用模型（selectedOrFirstModel）。
     val provider = providers.firstOrNull { it.id == selection.selectedProviderId && it.isEnabled }
-        ?: return ForgeSharedConfig.NotConfigured
+        ?: return ForgeSharedConfig.NotConfigured(
+            ForgeSharedConfig.NotConfigured.Reason.PROVIDER_DISABLED,
+        )
     if (provider.runtimeProviderType != ProviderTypes.OPENAI_COMPATIBLE) {
-        return ForgeSharedConfig.NotConfigured
+        return ForgeSharedConfig.NotConfigured(
+            ForgeSharedConfig.NotConfigured.Reason.PROVIDER_INCOMPATIBLE,
+        )
     }
-    if (provider.authMode != ProviderAuthModes.API_KEY) return ForgeSharedConfig.NotConfigured
+    if (provider.authMode != ProviderAuthModes.API_KEY) {
+        return ForgeSharedConfig.NotConfigured(
+            ForgeSharedConfig.NotConfigured.Reason.AUTH_MODE_UNSUPPORTED,
+        )
+    }
     val model = provider.selectedOrFirstModel(selection.selectedModelId)
-        ?: return ForgeSharedConfig.NotConfigured
+        ?: return ForgeSharedConfig.NotConfigured(ForgeSharedConfig.NotConfigured.Reason.NO_MODEL)
     val baseUrl = provider.baseUrl.trim()
     val apiKey = provider.apiKey.trim()
     val modelId = model.modelId.trim()
-    if (baseUrl.isEmpty() || apiKey.isEmpty() || modelId.isEmpty()) {
-        return ForgeSharedConfig.NotConfigured
+    // 分开报：三条空值里到底缺哪一个，用户要能一眼看出来。
+    if (baseUrl.isEmpty()) {
+        return ForgeSharedConfig.NotConfigured(
+            ForgeSharedConfig.NotConfigured.Reason.MISSING_BASE_URL,
+        )
+    }
+    if (apiKey.isEmpty()) {
+        return ForgeSharedConfig.NotConfigured(
+            ForgeSharedConfig.NotConfigured.Reason.MISSING_API_KEY,
+        )
+    }
+    if (modelId.isEmpty()) {
+        return ForgeSharedConfig.NotConfigured(
+            ForgeSharedConfig.NotConfigured.Reason.MISSING_MODEL_ID,
+        )
     }
     // 协议（Chat Completions / Responses）长在服务商自己的 endpointMode 上：
     // runtimeProviderType 对这两类服务商都只报 OPENAI_COMPATIBLE，不看协议，

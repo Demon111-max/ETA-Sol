@@ -28,6 +28,8 @@ import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.LinuxPackageProfiles
 import io.github.mangi.eta.agent.terminal.linuxPackageProfileReady
+import io.github.mangi.eta.agent.terminal.terminalEnvironment
+import io.github.mangi.eta.agent.forge.ForgeServerManager
 import io.github.mangi.eta.agent.forge.ForgeSharedConfig
 import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
 import io.github.mangi.eta.data.model.AppearanceUiStyle
@@ -195,8 +197,13 @@ private fun checkForgeGate(context: android.content.Context): ForgeGateState {
         return ForgeGateState.Missing(ForgePrerequisite.LinuxEnvironment)
     }
     // opencode 就绪判定：标记文件之外再看二进制本体——标记丢了但手动装过的不该误判未装，
-    // 标记还在但二进制被删的也不能放行（装到 $HOME/.opencode/bin，root 身份即 rootfs/root）。
-    val binaryPresent = File(rootfs, "root/.opencode/bin/opencode").isFile
+    // 标记还在但二进制被删的也不能放行。
+    // 3.4.43（N17）：路径不再写死 `rootfs/root/...`，改为按 server 启动命令同源的家目录解析
+    // （`$HOME/.opencode/bin/opencode` 是 COMMAND 里加进 PATH 的那份）。普通身份手动装到
+    // 自己家目录的 opencode 不会再被永久挡在门禁外。
+    val environment = LinuxEnvironmentSettingsRepository.current(context).terminalEnvironment
+    val manager = ForgeServerManager.default(context)
+    val binaryPresent = manager.opencodeBinaryCandidates(environment, rootfs.absolutePath).any { it.isFile }
     if (!linuxPackageProfileReady(rootfs, LinuxPackageProfiles.OPENCODE) && !binaryPresent) {
         return ForgeGateState.Missing(ForgePrerequisite.Opencode)
     }

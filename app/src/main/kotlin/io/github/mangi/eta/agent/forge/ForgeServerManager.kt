@@ -9,10 +9,12 @@ import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.SharedFolderMounts
 import io.github.mangi.eta.agent.terminal.TerminalEnvironment
 import io.github.mangi.eta.agent.terminal.TerminalRuntime
+import io.github.mangi.eta.agent.terminal.isLinux
 import io.github.mangi.eta.agent.terminal.terminalEnvironment
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -98,6 +100,33 @@ internal class ForgeServerManager(
     /** 当前选择的发行版对应的终端环境；没有 Linux 发行版时退回默认。 */
     suspend fun environment(): TerminalEnvironment = withContext(Dispatchers.IO) {
         LinuxEnvironmentSettingsRepository.current(context).terminalEnvironment
+    }
+
+    /**
+     * server 进程在环境内的 `$HOME`（3.4.43 N17）。
+     *
+     * 门禁检查必须和 [COMMAND] 的 `export PATH="$HOME/.opencode/bin:$PATH"` **同源**：
+     * 以前 ForgeScreen 把路径写死成 `rootfs/root/.opencode/bin/opencode`，跟启动命令实际用的
+     * 身份家目录不是一处，普通身份（user）手动装到自己家目录的 opencode 明明能跑，却永久
+     * 被挡在门禁外。现在两边都从这里取。
+     *
+     * 身份 → 家目录的对应关系与 ShellProcessSupervisor 一致：
+     * · Linux + proot 后端：身份是 user，但 proot 里 HOME 被写死成 `/root`（ProotCommandBuilder），
+     *   映射到 rootfs 内的 `root/`；
+     * · Linux 其它后端：身份是 root，HOME 同样是 rootfs 内的 `root/`；
+     * · 非 Linux（Android 环境）：身份 user 时 HOME 是应用私有 workspace。
+     */
+    fun serverHomeDir(environment: TerminalEnvironment, rootfsPath: String?): File {
+        if (!environment.isLinux || rootfsPath.isNullOrBlank()) {
+            return File(TerminalRuntime.userWorkspacePath)
+        }
+        return File(rootfsPath, "root")
+    }
+
+    /** opencode 二进制在环境内的可能位置：门禁与「装了吗」的判断都按这份清单。 */
+    fun opencodeBinaryCandidates(environment: TerminalEnvironment, rootfsPath: String?): List<File> {
+        val home = serverHomeDir(environment, rootfsPath)
+        return listOf(File(home, ".opencode/bin/opencode"))
     }
 
     /** `GET /session` 返回 200 即视为就绪。 */

@@ -161,7 +161,8 @@ internal fun SharedFoldersScreen(
                     mounts.forEach { mount ->
                         val missing = sourceExists[mount.sourcePath] == false
                         CouiPreference(
-                            title = mount.name,
+                            // B3：列表标题显示 displayName（保留用户原文，可含空格）；挂载点路径仍用清洗后的 mount.name。
+                            title = SharedFolderMounts.displayNameOf(mount),
                             summary = buildString {
                                 append(mount.sourcePath)
                                 append("\n")
@@ -244,7 +245,7 @@ internal fun SharedFoldersScreen(
                         mounts.forEach { mount ->
                             val missing = sourceExists[mount.sourcePath] == false
                             BasicComponent(
-                                title = mount.name,
+                                title = SharedFolderMounts.displayNameOf(mount),
                                 summary = buildString {
                                     append(mount.sourcePath)
                                     append("\n")
@@ -347,7 +348,7 @@ internal fun SharedFoldersScreen(
     }
 
     removeTarget?.let { target ->
-        val message = stringResource(R.string.shared_folders_remove_message, target.name, target.sourcePath)
+        val message = stringResource(R.string.shared_folders_remove_message, SharedFolderMounts.displayNameOf(target), target.sourcePath)
         val onConfirmRemove: () -> Unit = {
             val updated = mounts.filterNot { it.name == target.name }
             if (SharedFolderMounts.save(updated)) {

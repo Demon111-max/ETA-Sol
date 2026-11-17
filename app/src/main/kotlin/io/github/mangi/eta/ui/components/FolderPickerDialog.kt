@@ -46,12 +46,33 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-/** 选择器固定起点：共享存储根目录，往上不再走（工作区只会落在共享存储里）。 */
+/** 选择器默认起点：共享存储根目录（外置 SD 卡由存储设备切换列出，往上仍不再走）。 */
 private const val PICKER_ROOT = "/sdcard"
 
 /**
- * 文件夹选择器（dsh 式）：面包屑逐级浏览、新建文件夹、显示隐藏文件开关，
- * 底部「取消 / 打开」把当前目录交出去。不让用户手输路径，更不用去文件管理器复制。
+ * 列出可以浏览的存储根：共享存储 + 外置 SD（`/storage/XXXX-XXXX` 这种卷）。
+ *
+ * 3.4.43（N21）：以前起点写死 `/sdcard` 且没有手输路径入口，外置 SD 卡上的目录
+ * 根本没有入口可选（校验层 `SharedFolderMounts.validateSource` 本身是允许 `/storage`
+ * 子目录的）。这里把可见的卷都列出来给切换，最小改动补齐这条路。
+ */
+private fun detectStorageRoots(): List<String> {
+    val roots = mutableListOf(PICKER_ROOT)
+    val external = runCatching {
+        File("/storage").listFiles()
+            ?.filter { it.isDirectory && it.absolutePath != PICKER_ROOT }
+            // /storage/emulated 只是共享存储的上级目录（/sdcard 就在它下面），/storage/self 同理，
+            // 列出来只会让用户看到两个指向同一处的入口。
+            ?.filter { it.name != "emulated" && it.name != "self" }
+            ?.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    }.getOrNull().orEmpty()
+    external.forEach { roots += it.absolutePath }
+    return roots
+}
+
+/**
+ * 文件夹选择器（dsh 式）：存储设备切换 + 面包屑逐级浏览、新建文件夹、显示隐藏文件开关，
+ * 底部「取消 / 打开」把当前目录交出去。不用去文件管理器复制路径。
  * 按钮规矩：相邻按钮留 10dp 间隔、短按钮全圆角。
  */
 @Composable
@@ -61,8 +82,14 @@ internal fun FolderPickerDialog(
 ) {
     val colors = MiuixTheme.colorScheme
     // 当前目录与隐藏文件开关要能扛住配置变更/进程重建（rememberSaveable），
-    // 否则转屏后选择器会跳回 /sdcard。
+    // 否则转屏后选择器会跳回根目录。
+    var currentRoot by rememberSaveable { mutableStateOf(PICKER_ROOT) }
     var currentPath by rememberSaveable { mutableStateOf(PICKER_ROOT) }
+    // 可选存储设备（共享存储 / 外置 SD）：首次组合时在 IO 线程探一次，探不到就只剩共享存储。
+    var storageRoots by remember { mutableStateOf(listOf(PICKER_ROOT)) }
+    LaunchedEffect(Unit) {
+        storageRoots = withContext(Dispatchers.IO) { detectStorageRoots() }
+    }
     var entries by remember { mutableStateOf<List<File>>(emptyList()) }
     var loadFailed by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
@@ -98,11 +125,11 @@ internal fun FolderPickerDialog(
         loaded = true
     }
 
-    val segments = remember(currentPath) {
-        currentPath.removePrefix(PICKER_ROOT).split('/').filter { it.isNotBlank() }
+    val segments = remember(currentPath, currentRoot) {
+        currentPath.removePrefix(currentRoot).split('/').filter { it.isNotBlank() }
     }
-    // 「打开」的前置条件：列表已读完且没失败，且不能是共享存储根目录本身（那是目录树起点，不是工程目录）。
-    val atStorageRoot = currentPath == PICKER_ROOT
+    // 「打开」的前置条件：列表已读完且没失败，且不能是存储根目录本身（那是目录树起点，不是工程目录）。
+    val atStorageRoot = currentPath == currentRoot
     val canConfirm = loaded && !loadFailed && !atStorageRoot
     val rootNotAllowedText = stringResource(R.string.forge_folder_root_not_allowed)
     val unreadableText = stringResource(R.string.forge_folder_unreadable)
@@ -121,6 +148,31 @@ internal fun FolderPickerDialog(
                 style = MiuixTheme.textStyles.title4,
                 color = colors.onSurface,
             )
+            // 存储设备切换（只在真有第二个卷时才出现，单存储设备时界面与以前完全一致）。
+            if (storageRoots.size > 1) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    storageRoots.forEach { root ->
+                        val label = if (root == PICKER_ROOT) {
+                            stringResource(R.string.folder_picker_storage_root)
+                        } else {
+                            root.trimEnd('/').substringAfterLast('/')
+                        }
+                        PickerCrumb(
+                            label = label,
+                            isCurrent = currentRoot == root,
+                            onClick = {
+                                currentRoot = root
+                                currentPath = root
+                            },
+                        )
+                    }
+                }
+            }
             // 面包屑：手机存储 › 一级 › 二级，点任意一级直接跳回去。
             Row(
                 modifier = Modifier
@@ -128,10 +180,15 @@ internal fun FolderPickerDialog(
                     .padding(top = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                val rootLabel = if (currentRoot == PICKER_ROOT) {
+                    stringResource(R.string.folder_picker_storage_root)
+                } else {
+                    currentRoot.trimEnd('/').substringAfterLast('/')
+                }
                 PickerCrumb(
-                    label = stringResource(R.string.folder_picker_storage_root),
+                    label = rootLabel,
                     isCurrent = segments.isEmpty(),
-                    onClick = { currentPath = PICKER_ROOT },
+                    onClick = { currentPath = currentRoot },
                 )
                 segments.forEachIndexed { index, segment ->
                     Icon(
@@ -144,7 +201,7 @@ internal fun FolderPickerDialog(
                         label = segment,
                         isCurrent = index == segments.lastIndex,
                         onClick = {
-                            currentPath = PICKER_ROOT + segments.take(index + 1)
+                            currentPath = currentRoot + segments.take(index + 1)
                                 .joinToString(separator = "/", prefix = "/")
                         },
                     )
