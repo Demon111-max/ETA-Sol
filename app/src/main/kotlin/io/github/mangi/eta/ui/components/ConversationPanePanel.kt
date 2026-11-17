@@ -1378,23 +1378,36 @@ private fun ForgeEmptyHint(text: String) {
     )
 }
 
-private data class ConversationDrawerGroup(
+/** 一个抽屉分组：置顶单组 + 每个本地日期一组（见 [ConversationDrawerSection]）。internal 便于单测直接断言分组结果。 */
+internal data class ConversationDrawerGroup(
     val section: ConversationDrawerSection,
     val items: List<ConversationSummaryUi>,
 )
 
-private sealed interface ConversationDrawerSection {
+/**
+ * 侧边栏分组的身份。
+ *
+ * 3.4.43（B1）先把分组键从 `timeLabel` 字符串换成日期：以前 Assist 的标签来自
+ * ConversationTimeLabels（昨天 / 星期三 / M月d日），Forge 的 forgeTimeLabel 非今天一律 `MM-dd`，
+ * 同一天里两种会话都有就裂成两个组头。
+ *
+ * 3.4.44（C1）：日期组只持有 [Day.epochDay]。这里**绝不能再带样本时间**
+ * （3.4.43 曾是 `Day(epochDay, sampleMillis)`）：它同时是 [groupForDrawer] 里 LinkedHashMap 的
+ * 归并键，data class 的相等性会把 sampleMillis 一起算进去——同一天里 updatedAtMillis 不同的
+ * 两条会话就得到两个「不相等」的 Day，归并当场失败、同一天裂成多个组；而渲染处的 LazyColumn key
+ * 由 [sectionKey] 生成、只含 epochDay，于是多个组头算出同一个 key，
+ * LazyColumn 抛 `Key "section-day-…" was used multiple times` 直接闪退
+ * （Forge 模式点 Assist 必现：那一跳才第一次组合到这套分组 + key）。
+ *
+ * 比 3.4.43 更早的版本还有第二个坑：只合并相邻项，而列表按更新时间排序、
+ * 却有 isActiveRun / 时间缺失的条目会被判进「今天」，同样会把同一 section 切成两组。
+ * 所以 [groupForDrawer] 必须按 section 全量归并，不能只合并相邻项。
+ */
+internal sealed interface ConversationDrawerSection {
     data object Pinned : ConversationDrawerSection
 
-    /**
-     * 按**本地日期**归一的分组（3.4.43 B1）。
-     *
-     * 以前分组键直接是条目的 `timeLabel` 字符串：Assist 的标签来自 ConversationTimeLabels
-     * （昨天 / 星期三 / M月d日），Forge 的 forgeTimeLabel 非今天一律 `MM-dd`。同一天里两种
-     * 会话都有时，标签不同就裂成两个组头（今天的 11-17 侧边栏里同时出现「11-16」和「昨天」）。
-     * 现在键只有 [epochDay] 一个维度，标签在渲染时统一生成。
-     */
-    data class Day(val epochDay: Long, val sampleMillis: Long) : ConversationDrawerSection
+    /** 按**本地日期**归一的分组；标签（今天/昨天/星期几/M月d日）在渲染时由 [localizedLabel] 现算。 */
+    data class Day(val epochDay: Long) : ConversationDrawerSection
 }
 
 @Composable
@@ -1407,18 +1420,27 @@ private fun ConversationDrawerGroup.localizedLabel(): String = when (val value =
             todayEpochDay -> stringResource(R.string.conversation_section_today)
             todayEpochDay - 1 -> stringResource(R.string.conversation_section_yesterday)
             // 其余交给统一的时间标签规则（一周内是星期几，同一年是 M月d日 / MMM d）。
-            else -> ConversationTimeLabels.label(timestampMillis = value.sampleMillis)
+            // 3.4.44（C1）：标签时间不挂在 section 上（它不能参与相等性），
+            // 从组内最新一条取——同一天的所有条目都落在同一天里，取任一条都能算出同一个标签。
+            else -> ConversationTimeLabels.label(
+                timestampMillis = items.maxOfOrNull { it.updatedAtMillis } ?: 0L,
+            )
         }
     }
 }
 
-private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawerGroup> {
+internal fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawerGroup> {
     if (isEmpty()) return emptyList()
     // 必须按 section 全量归并，不能只合并相邻项：列表按更新时间排序，
     // 但 section 还看 isActiveRun / 时间是否为 0——一个正在后台跑的旧对话
     // 或时间缺失的条目会被判进「今天」却排在旧日期分组中间，只合并相邻项
     // 就会把同一 section 切成两组，LazyColumn 里两个组头 key 相同直接闪退。
-    // 键只用「置顶 / 日期」两态：同一天的不同标签不会再分成两组（B1）。
+    // 键只用「置顶 / 本地日期天」两态：同一天的不同标签不会再分成两组（B1）。
+    //
+    // 3.4.44（C1）：归并键里**不许出现样本时间**。这里 getOrPut 用的就是 section 的相等性，
+    // 3.4.43 的 `Day(epochDay, sampleMillis)` 把 updatedAtMillis 也算了进去，导致同一天的
+    // 两条会话得到两个不相等的键 → 同一天裂成多组 → 而 LazyColumn key 只含 epochDay
+    // → 撞 key 闪退。现在 Day 只持有 epochDay，这一层才真正按天归并。
     val bySection = LinkedHashMap<ConversationDrawerSection, MutableList<ConversationSummaryUi>>()
     for (conversation in this) {
         bySection.getOrPut(conversation.drawerSection()) { mutableListOf() } += conversation
@@ -1431,15 +1453,14 @@ private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawe
 private fun ConversationSummaryUi.drawerSection(): ConversationDrawerSection {
     if (isPinned) return ConversationDrawerSection.Pinned
     // isActiveRun 的条目 updatedAtMillis 就是现在，自然落在今天这一组；时间缺失按今天算。
-    val epochDay = localEpochDay(updatedAtMillis)
-    return ConversationDrawerSection.Day(epochDay = epochDay, sampleMillis = updatedAtMillis)
+    return ConversationDrawerSection.Day(epochDay = localEpochDay(updatedAtMillis))
 }
 
 /**
  * 组头的 LazyColumn key：只用「置顶 / 日期」这两态+日期序号，**不含** sampleMillis——
  * 否则同一天里一条会话更新了时间就会换 key，组头被当成新条目重建（闪一下）。
  */
-private fun sectionKey(section: ConversationDrawerSection): String = when (section) {
+internal fun sectionKey(section: ConversationDrawerSection): String = when (section) {
     ConversationDrawerSection.Pinned -> "pinned"
     is ConversationDrawerSection.Day -> "day-${section.epochDay}"
 }

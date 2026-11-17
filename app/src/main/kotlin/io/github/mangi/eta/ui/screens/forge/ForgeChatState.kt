@@ -1535,6 +1535,14 @@ internal class ForgeChatState(
         idleConfirmJob = scope.launch {
             var rechecks = 0
             var unknown = 0
+            // 3.4.44（C2）：Idle 事件到达后的**第一探不等待**。
+            // 用户口径：倒计时必须跟着模型输出完毕消失，不许输出完了还挂着转一两秒。
+            // 以前第一拍先 delay(IDLE_CONFIRM_DELAY_MS=800) 才去问服务端，服务端那一拍
+            // 还报忙（opencode 收尾慢半拍很常见）就再等 2000ms 下一拍，正常一轮结束后
+            // 倒计时还要多挂 0.8–2.8 秒。现在第一探立即查一次：明确不忙就当场收尾
+            // （只剩一次 localhost 往返）；报忙 / 查询未知才进入下面的「静默期 + 复查」慢路径，
+            // 那 800/2000 的节奏从此只用于这种异常情况。
+            var probeImmediately = true
             while (true) {
                 if (sessionId != session) return@launch
                 // 提问卡挂着 = 这一轮在等回答，idle 只是让出。以前这里直接 return，
@@ -1550,6 +1558,39 @@ internal class ForgeChatState(
                     continue
                 }
                 val activityAtWaitStart = lastActivityAtMs
+                if (probeImmediately) {
+                    probeImmediately = false
+                    // 首探：不等待，立即问一次服务端（一次 localhost 往返）。
+                    val immediateBusy = api.sessionBusy(session).getOrNull()
+                    // 查询在途期间状态可能变化：收尾前把守卫再查一遍（与慢路径同源，不削弱防误收）。
+                    if (sessionId != session) return@launch
+                    if (pendingQuestion != null || sendInFlight) continue
+                    if (lastActivityAtMs != activityAtWaitStart) {
+                        // 查询期间又来了新内容（末段 part 还在流）：这一轮还没完，撤销收尾，
+                        // 落到下面的静默期复查。
+                        continue
+                    }
+                    if (immediateBusy == false) {
+                        // 服务端明确不忙：立即收尾，倒计时随 idle 事件当场熄灭。
+                        finishIdle(session)
+                        return@launch
+                    }
+                    if (immediateBusy == null) {
+                        // 未知 ≠ 不忙：计入未知次数，攒够上限仍按结束处理（与慢路径同一口径）。
+                        unknown++
+                        if (unknown >= IDLE_UNKNOWN_MAX) {
+                            AndroidAgentLogger.warn(
+                                "Forge idle confirmed after $unknown unknown probes session=$session",
+                            )
+                            finishIdle(session)
+                            return@launch
+                        }
+                    } else if (rechecks == 0) {
+                        AndroidAgentLogger.warn("Forge idle deferred: server still busy session=$session")
+                    }
+                    // 报忙或未知：转入静默期复查。rechecks 保持 0，首次静默期仍是 800ms。
+                    continue
+                }
                 delay(if (rechecks == 0) IDLE_CONFIRM_DELAY_MS else IDLE_RECHECK_DELAY_MS)
                 if (sessionId != session) return@launch
                 if (pendingQuestion != null || sendInFlight) continue

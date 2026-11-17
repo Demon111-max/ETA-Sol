@@ -2378,9 +2378,14 @@ internal class AgentAppState(
             }
         )
         scope.launch {
+            // 3.4.44（C2）：等待行跟着「结果到达」熄灭，不等落盘。
+            // 以前这里是 saved.await()（等所有会话 JSON 写盘完成）之后才放开 isStreaming，
+            // 会话越大、写盘越慢，模型明明已经输出完，底部还要多转一截。
+            // 落盘只是持久化收尾，不影响「这一轮已经结束」这个事实；这里只提前放开 isStreaming，
+            // 回执（ackResult）、队列续发、删除收尾等判断仍严格排在 await 之后，语义不变。
+            setConversationStreaming(runId, false)
             val resultSaved = saved.await() && result.contextSnapshotRef.isBlank()
             val stoppedDuringSettlement = runStore.wasStoppedByUser(runId)
-            setConversationStreaming(runId, false)
             runStore.remove(runId)
             refreshConversationSummaries()
             if (conversationId in pendingConversationDeletes) {
