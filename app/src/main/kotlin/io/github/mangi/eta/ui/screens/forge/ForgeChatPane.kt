@@ -57,6 +57,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -94,6 +96,7 @@ import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.QueuedMessageUi
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -111,6 +114,7 @@ import io.github.mangi.eta.ui.components.dshFoldExit
 import io.github.mangi.eta.ui.components.dshTertiaryColor
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentContextUsageUi
+import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
@@ -141,11 +145,23 @@ internal fun ForgeChatPane(
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
     /** 打开侧边栏（工作区列表在那里）：空页的工作区卡片点一下就走到这。 */
     onOpenWorkspacePicker: () -> Unit = {},
+    /** 共用模型选择（与 Assist 同一份）：输入栏合并控件用；切换后 Forge 按新选择重新对齐配置。 */
+    modelPickerState: AgentModelPickerUiState? = null,
+    onModelSelected: (String) -> Unit = {},
 ) {
     // 状态由 AgentAppRoot 持有后传进来：面板整块销毁重建（进设置/终端子页再回来）时
     // 草稿、待发附件、排队消息、当前会话都跟着状态活着。start() 自己会在已 Ready 时
     // 直接返回（并把断掉的事件订阅接回去），所以这里无条件调用是安全的。
     LaunchedEffect(Unit) { state.start() }
+    // 合并控件里切了模型：不等下一次发送，立刻按新选择对齐共用配置（能力与档位上限也随之换）。
+    LaunchedEffect(modelPickerState?.selectedModel?.id) {
+        if (modelPickerState != null) state.onSharedSelectionChanged()
+    }
+    // 轮次进行中来的选择变化会被 onSharedSelectionChanged 推迟（怕重启 server 打断轮次）：
+    // busy 落下时补对齐一次，别让那次变化只能等下一次发送才生效。
+    LaunchedEffect(state.busy) {
+        if (!state.busy && modelPickerState != null) state.onSharedSelectionChanged()
+    }
     // 运行状态同步给上层：侧边栏要在正在跑的 Forge 会话条目上显示运行圆点。
     LaunchedEffect(state.busy, state.sessionId) { onBusyChanged(state.sessionId, state.busy) }
     DisposableEffect(Unit) {
@@ -248,6 +264,8 @@ internal fun ForgeChatPane(
                             state = state,
                             onSend = { text -> state.send(text) },
                             onStop = { state.stop() },
+                            modelPickerState = modelPickerState,
+                            onModelSelected = onModelSelected,
                         )
                     }
                 }
@@ -658,17 +676,25 @@ private fun List<ForgeChatMessage>.groupIntoTurns(): List<ForgeTurn> {
 
 @Composable
 private fun ForgeUserRow(message: ForgeChatMessage) {
-    // 只有附件没有文字的消息也要有可见内容：把附件名逐行摆进气泡，别渲染成一个空气泡。
+    // 合成文本不是用户打的字（opencode 把图片降级成的 Read 提示等），不进气泡。
     val text = message.parts
         .filterIsInstance<ForgePart.Text>()
+        .filter { !it.synthetic }
         .joinToString("\n") { it.text }
-    val attachmentNames = message.parts
-        .filterIsInstance<ForgePart.Attachment>()
+    val attachments = message.parts.filterIsInstance<ForgePart.Attachment>()
+    // 图片附件带 data: URL 的走 Assist 同款图片渲染（气泡内预览 + 点开看图）；
+    // 其余附件（文件、文件夹、无 data 的大图）才把文件名摆进气泡，别渲染成一个空气泡。
+    val imageUrls = attachments
+        .filter { it.mime?.startsWith("image/") == true && it.url?.startsWith("data:") == true }
+        .mapNotNull { it.url }
+    val attachmentNames = attachments
+        .filterNot { it.mime?.startsWith("image/") == true && it.url?.startsWith("data:") == true }
         .map { it.filename?.takeIf(String::isNotBlank) ?: it.mime ?: "file" }
     val content = listOf(text) + attachmentNames
     ChatMessageItem(
         message = UserMessageUi(
             id = message.id,
+            images = imageUrls,
             content = content.filter { it.isNotBlank() }.joinToString("\n"),
         ),
         onSuggestionClick = {},
@@ -833,6 +859,8 @@ private fun ForgeComposer(
     state: ForgeChatState,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
+    modelPickerState: AgentModelPickerUiState? = null,
+    onModelSelected: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -888,14 +916,22 @@ private fun ForgeComposer(
                 showContextUsage = true,
                 isStreaming = state.busy,
                 reasoningEffort = state.reasoningEffort,
-                availableReasoningEfforts = ForgeReasoningEfforts,
+                // 档位上限与 Assist 同源：解析出的能力声明（与 Assist 同一个解析入口）；
+                // 明确不支持思考 → 空列表（控件只剩模型名）；能力未知才回落写死 7 档（控件再收敛成 Sol 5 档）。
+                availableReasoningEfforts = when {
+                    state.reasoningDisabled -> emptyList()
+                    state.reasoningCapabilities != null -> state.reasoningCapabilities.selectableEfforts
+                    else -> ForgeReasoningEfforts
+                },
+                modelPickerState = modelPickerState,
+                onModelSelected = onModelSelected,
                 pendingImages = pendingImages,
                 pendingFileReferences = pendingFiles,
                 queuedMessages = queuedMessages,
                 isEditingMessage = false,
                 editHasLaterTurns = false,
                 preserveFollowingMessages = false,
-                onReasoningEffortChange = { state.reasoningEffort = it },
+                onReasoningEffortChange = { state.updateReasoningEffort(it) },
                 onCompactContext = {},
                 canCompactContext = false,
                 onSubmit = onSend,
@@ -930,8 +966,14 @@ private fun ForgeComposer(
                     }
                 },
                 onAttachFilePath = { path ->
-                    materializePathEntry(context, path)?.let { state.addAttachment(it) }
-                        ?: state.notify(context.getString(R.string.forge_attachment_add_failed))
+                    // 路径入口要读文件生成图片预览，切到 IO 线程，别在主线程解码大图。
+                    scope.launch {
+                        val attachment = withContext(Dispatchers.IO) {
+                            materializePathEntry(context, path)
+                        }
+                        attachment?.let { state.addAttachment(it) }
+                            ?: state.notify(context.getString(R.string.forge_attachment_add_failed))
+                    }
                 },
                 onRemoveFileReference = { id -> state.removeAttachment(id) },
                 onCancelMessageEdit = {},
@@ -998,24 +1040,50 @@ private suspend fun materializePickedImage(context: Context, uriString: String):
         val name = queryDisplayName(context, uri)
             ?: "image-${System.currentTimeMillis()}.${MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "jpg"}"
         val staged = copyToStage(context, uri, name, MAX_STAGED_ATTACHMENT_BYTES) ?: return@withContext null
-        // 小图顺手做一张预览（输入栏图片条要的 dataUrl）；大图跳过，条上只显示占位框。
-        val preview = runCatching {
-            val bytes = staged.readBytes()
-            if (bytes.size <= MAX_PREVIEW_BYTES) {
-                "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
-            } else {
-                null
-            }
-        }.getOrNull()
         ForgePendingAttachment(
             id = "att-${UUID.randomUUID()}",
             displayName = name,
             mime = mime,
             source = staged.absolutePath,
             isImage = true,
-            previewDataUrl = preview,
+            previewDataUrl = buildImagePreviewDataUrl(staged, mime),
         )
     }
+
+/**
+ * 图片预览 dataUrl：三条附件入口（图片/文件/路径）共用同一份生成口径，不许各写一份——
+ * 只有图片入口生成预览时，另外两条入口选到的图永远拿不到 dataUrl，发送时回落 file://，
+ * 气泡没预览、模型也被降级成读文件（3.4.45 审计实证的链式反应断点）。
+ * 小图原样 Base64；大图降采样解码后转 JPEG（原图文件本身仍按原样落工作区，不受影响）。
+ */
+private fun buildImagePreviewDataUrl(file: File, mime: String): String? = runCatching {
+    if (file.length() <= MAX_PREVIEW_BYTES) {
+        val bytes = file.readBytes()
+        return@runCatching "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+    }
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= MAX_PREVIEW_EDGE_PX &&
+        bounds.outHeight / (sample * 2) >= MAX_PREVIEW_EDGE_PX
+    ) {
+        sample *= 2
+    }
+    val bitmap = BitmapFactory.decodeFile(
+        file.absolutePath,
+        BitmapFactory.Options().apply { inSampleSize = sample },
+    ) ?: return@runCatching null
+    val stream = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+    bitmap.recycle()
+    val jpeg = stream.toByteArray()
+    if (jpeg.size > MAX_SCALED_PREVIEW_BYTES) {
+        null
+    } else {
+        "data:image/jpeg;base64,${Base64.encodeToString(jpeg, Base64.NO_WRAP)}"
+    }
+}.getOrNull()
 
 private suspend fun materializePickedFile(context: Context, uriString: String): ForgePendingAttachment? =
     withContext(Dispatchers.IO) {
@@ -1029,13 +1097,21 @@ private suspend fun materializePickedFile(context: Context, uriString: String): 
             )
             ?: "application/octet-stream"
         val staged = copyToStage(context, uri, name, MAX_STAGED_ATTACHMENT_BYTES)
+        // 文件入口选到的也可能是图片：按 mime 如实登记并生成预览，
+        // 否则同一张图换个入口就丢了预览与识图（与图片入口同口径）。
+        val isImage = mime.startsWith("image/")
         ForgePendingAttachment(
             id = "att-${UUID.randomUUID()}",
             displayName = name,
             mime = mime,
             // 太大没复制成：保留原始 URI，发送时再试一次（失败会按名字报出来）。
             source = staged?.absolutePath ?: uriString,
-            isImage = false,
+            isImage = isImage,
+            previewDataUrl = if (isImage && staged != null) {
+                buildImagePreviewDataUrl(staged, mime)
+            } else {
+                null
+            },
         )
     }
 
@@ -1075,12 +1151,15 @@ private fun materializePathEntry(context: Context, rawPath: String): ForgePendin
             val extension = file.extension.lowercase()
             val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
                 ?: "application/octet-stream"
+            val isImage = mime.startsWith("image/")
             ForgePendingAttachment(
                 id = "att-${UUID.randomUUID()}",
                 displayName = file.name,
                 mime = mime,
                 source = file.absolutePath,
-                isImage = mime.startsWith("image/"),
+                isImage = isImage,
+                // 路径入口同样生成预览（调用方已切到 IO 线程），三入口同口径。
+                previewDataUrl = if (isImage) buildImagePreviewDataUrl(file, mime) else null,
             )
         }
 
@@ -1090,6 +1169,10 @@ private fun materializePathEntry(context: Context, rawPath: String): ForgePendin
 
 private const val MAX_STAGED_ATTACHMENT_BYTES = 64L * 1024 * 1024
 private const val MAX_PREVIEW_BYTES = 1_500_000
+
+/** 大图降采样预览的目标边长（像素）与 JPEG 数据上限：够识图与气泡预览，又不至于把会话记录撑爆。 */
+private const val MAX_PREVIEW_EDGE_PX = 1568
+private const val MAX_SCALED_PREVIEW_BYTES = 3_000_000
 
 /** 判定「列表停在底部」的容差：末项底边离视口底这么近就算贴底，避免像素级抖动误判成上滑。 */
 private val FOLLOW_BOTTOM_SLACK = 8.dp
@@ -1521,8 +1604,9 @@ private fun summarizeInput(input: String?): String? {
 }
 
 /**
- * Forge 可选的思考档位：opencode 侧靠 variant 落地（配置写入时预置），
- * OFF 在这条链路上关不掉思考，不提供；DEFAULT 不发 variant、用上游默认。
+ * 能力未知时的回落档位表：当前模型的能力声明解析出来后，可选档以能力的 selectableEfforts 为准
+ * （与 Assist 同源，见 ForgeComposer 的 availableReasoningEfforts）。opencode 侧靠 variant 落地
+ * （配置写入时预置），OFF 在这条链路上关不掉思考、不提供；DEFAULT 不发 variant、用上游默认。
  */
 private val ForgeReasoningEfforts = listOf(
     ReasoningEffort.DEFAULT,

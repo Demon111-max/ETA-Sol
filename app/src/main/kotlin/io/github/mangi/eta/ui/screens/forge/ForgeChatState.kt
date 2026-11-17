@@ -28,6 +28,7 @@ import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
+import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import java.io.File
@@ -138,6 +139,9 @@ private fun forgeConfigFingerprint(
     append(credentials.apiKey).append('\n')
     append(settings.endpointMode).append('\n')
     append(settings.contextWindow?.toString().orEmpty()).append('\n')
+    // 识图能力会写进 opencode 配置的 modalities/attachment：不进指纹的话，
+    // 在设置页改了勾选也不会触发重写+重启，Forge 里改了等于没改（链式反应防漏项）。
+    append(settings.supportsVision).append('\n')
     append(distributionWireName).append('\n')
     settings.customHeaders.forEach { header ->
         append(header.name.trim().lowercase()).append('=').append(header.value).append('\n')
@@ -186,7 +190,7 @@ internal data class ForgePendingAttachment(
     val source: String,
     val isImage: Boolean,
     val isFolder: Boolean = false,
-    /** 图片缩略图（小图才有）：只喂输入栏的待发图片条预览，不参与发送。 */
+    /** 图片缩略图（小图才有）：喂输入栏待发预览，发送时同时作图片附件的 data: URL（见 stageAttachments）。 */
     val previewDataUrl: String? = null,
 )
 
@@ -279,6 +283,48 @@ internal class ForgeChatState(
 
     /** Forge 的思考档位：发送时按档位名选 opencode 配置里预置的 variant。 */
     var reasoningEffort by mutableStateOf(ReasoningEffort.DEFAULT)
+
+    /** 输入栏改档的唯一入口：先过能力归一化再落状态，保证控件显示的档就是发送时用的档。 */
+    fun updateReasoningEffort(effort: ReasoningEffort) {
+        reasoningEffort = when {
+            reasoningDisabled -> ReasoningEffort.DEFAULT
+            reasoningCapabilities != null -> reasoningCapabilities.normalize(effort)
+            else -> effort
+        }
+    }
+
+    /**
+     * 输入栏里切了模型（共用选择变了）：立刻重新对齐共用配置（能力、指纹、opencode 配置都跟着换），不等下一次发送。
+     * 轮次进行中不落地：指纹变化会重启 server、打断正在跑的轮次；等 busy 落下后面板会再调一次，发送前也会再对齐，不会漏。
+     * 对齐失败要出声（与发送路径同口径），不许药丸已经显示新模型、内部还停在旧模型却毫无提示。
+     */
+    fun onSharedSelectionChanged() {
+        if (busy) return
+        scope.launch {
+            when (val applied = applySharedConfig()) {
+                is ConfigApply.NotConfigured -> notify(forgeConfigMissingText(context, applied.reason))
+                is ConfigApply.Failed -> notify(
+                    context.getString(
+                        R.string.forge_server_failed,
+                        forgeErrorText(context, applied.output),
+                    ),
+                )
+                ConfigApply.Ready -> Unit
+            }
+        }
+    }
+
+    /**
+     * 当前模型的思考能力声明（与 Assist 共用同一份，来自设置页/拉取的解析结果）：
+     * 输入栏合并控件的可停档以它的 selectableEfforts 为上限，发送前当前档也过它的 normalize()。
+     * 为 null = 能力未知，控件才放行全部 5 档（旧行为）。由 applySharedConfig() 在每次对齐时同步。
+     */
+    var reasoningCapabilities by mutableStateOf<ModelReasoningCapabilities?>(null)
+        private set
+
+    /** 当前模型被明确声明不支持思考：档位一律关闭（发送不带 variant），与「能力未知」严格区分。由 applySharedConfig() 同步。 */
+    var reasoningDisabled by mutableStateOf(false)
+        private set
 
     /** 当前打开的 opencode 会话 id；侧边栏高亮与列表刷新要读它，所以做成可观察状态。 */
     var sessionId: String? by mutableStateOf(null)
@@ -753,6 +799,16 @@ internal class ForgeChatState(
         modelId = shared.settings.modelId
         providerId = shared.settings.providerId
         contextWindowLimit = shared.settings.contextWindow
+        reasoningCapabilities = shared.reasoningCapabilities
+        reasoningDisabled = shared.reasoningDisabled
+        // 换模型/在设置页改了能力后，当前档可能已超出新能力的上限：立刻归一化并回显，
+        // 不等到发送时才被静默改掉——「显示一套实际一套」就是这么来的（链式反应防漏项）。
+        // 明确不支持思考的模型直接落回 DEFAULT（forgeVariant 对它返回 null、不发 variant）。
+        reasoningEffort = when {
+            shared.reasoningDisabled -> ReasoningEffort.DEFAULT
+            shared.reasoningCapabilities != null -> shared.reasoningCapabilities.normalize(reasoningEffort)
+            else -> reasoningEffort
+        }
         val fingerprint = forgeConfigFingerprint(
             shared.settings,
             shared.credentials,
@@ -1097,6 +1153,10 @@ internal class ForgeChatState(
                         mime = item.mime,
                         filename = target.name,
                         linuxPath = ws.linuxPath + "/" + target.name,
+                        // 图片带上 data: URL 发送：模型才能真看到图、历史重拉才能画预览。
+                        // previewDataUrl 只在小图时有（见 ForgeChatPane 的 MAX_PREVIEW_BYTES），
+                        // 大图没有就维持 file:// 老路，模型可经工作区文件读取。
+                        dataUrl = item.previewDataUrl.takeIf { item.isImage },
                     )
                 }
             }.onFailure { failed += item.displayName }
@@ -1378,7 +1438,7 @@ internal class ForgeChatState(
      */
     private fun maybeSetFallbackTitle(id: String) {
         val firstUserText = messages.firstOrNull { it.role == ForgeRole.User }
-            ?.parts?.filterIsInstance<ForgePart.Text>()?.firstOrNull()?.text
+            ?.parts?.filterIsInstance<ForgePart.Text>()?.firstOrNull { !it.synthetic }?.text
             ?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
         if (firstUserText.isBlank()) return
         scope.launch {

@@ -229,7 +229,8 @@ internal class ForgeApiClient(
      * 发送一条消息。走异步端点 /prompt_async（官方文档：body 与 /message 相同、立即返回 204）：
      * 同步端点要等整轮跑完才返回，长轮次必然撞上共享客户端的读超时、误报「发送失败：timeout」，
      * 其实服务端还在跑。发送成功只代表已提交，本轮的生灭由 SSE 的 Idle/Failed 事件驱动。
-     * attachments 是已复制进工作区的附件，以 file part 随消息发出（url 是 Linux 侧 file:// 路径）。
+     * attachments 是已复制进工作区的附件，以 file part 随消息发出：
+     * 一般文件 url 是 Linux 侧 file:// 路径，图片附件带 dataUrl 时用 data: URL（见 ForgeOutgoingAttachment）。
      */
     suspend fun sendMessage(
         sessionId: String,
@@ -262,7 +263,7 @@ internal class ForgeApiClient(
                                 put("type", "file")
                                 put("mime", attachment.mime)
                                 put("filename", attachment.filename)
-                                put("url", "file://${attachment.linuxPath}")
+                                put("url", attachment.dataUrl ?: "file://${attachment.linuxPath}")
                             },
                         )
                     }
@@ -384,9 +385,15 @@ internal class ForgeApiClient(
 internal fun Throwable?.hasHttpCode(code: Int): Boolean =
     (this as? IOException)?.message?.startsWith("HTTP $code") == true
 
-/** 一条要随消息发出的附件：已复制进当前工作区，[linuxPath] 是环境内的绝对路径。 */
+/**
+ * 一条要随消息发出的附件：已复制进当前工作区，[linuxPath] 是环境内的绝对路径。
+ * 图片附件另带 [dataUrl]：opencode 只有拿到 data: URL 才会把图片当图片喂给支持识图的模型，
+ * 也只有 data: URL 会被服务端原样存回 part、供界面重拉历史时画预览图；
+ * 只发 file:// 会被 opencode 降级成一段「Called the Read tool…」合成文本（3.4.44 实测问题）。
+ */
 internal data class ForgeOutgoingAttachment(
     val mime: String,
     val filename: String,
     val linuxPath: String,
+    val dataUrl: String? = null,
 )

@@ -1,9 +1,5 @@
 package io.github.mangi.eta.ui.components
 
-import io.github.mangi.eta.ui.voice.SpeechDictationButton
-import io.github.mangi.eta.ui.voice.SpeechInputFeedback
-import io.github.mangi.eta.ui.voice.rememberSpeechInput
-import androidx.compose.ui.text.TextRange
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -56,7 +52,6 @@ import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -105,10 +100,10 @@ import com.itos.coui.theme.CouiTheme
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.ReasoningEffort
-import io.github.mangi.eta.data.repository.SpeechSettingsRepository
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.markdown.EditorialLineHeightStyle
 import io.github.mangi.eta.ui.model.AgentContextUsageUi
+import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.QueuedMessageUi
@@ -169,6 +164,10 @@ internal fun AgentChatInputBar(
     onAttachFilePath: (String) -> Unit,
     onRemoveFileReference: (String) -> Unit,
     onCancelMessageEdit: () -> Unit,
+    // 模型选择状态：非空时输入栏右下角渲染合并控件（模型+档位，ModelEffortControl），
+    // 顶栏不再承担模型切换。为空时回落到旧的纯档位胶囊（兼容没有模型上下文的调用方）。
+    modelPickerState: AgentModelPickerUiState? = null,
+    onModelSelected: (String) -> Unit = {},
     // Forge 模式复用同一条输入条：不带附件入口，提示语换成 opencode 的措辞。
     showAttach: Boolean = true,
     hintText: String? = null,
@@ -181,16 +180,6 @@ internal fun AgentChatInputBar(
     val hapticFeedback = LocalHapticFeedback.current
     val focusRequester = remember { FocusRequester() }
     val textFieldState = rememberTextFieldState(initialText = input)
-    val speechSettings by remember { SpeechSettingsRepository.settingsFlow() }.collectAsState(initial = null)
-    val recognitionEnabled = speechSettings?.recognitionEnabled == true
-    val dictation = rememberSpeechInput { recognized ->
-        textFieldState.edit {
-            val range = selection
-            replace(range.min, range.max, recognized)
-            selection = TextRange(range.min + recognized.length)
-        }
-    }
-    LaunchedEffect(isEditingMessage, recognitionEnabled) { dictation.cancel() }
     // 把输入内容外传：本组件自己持有 TextFieldState（普通输入不往上抛，避免每个字符带整个
     // 聊天舞台重组），但需要跨重建保住草稿的调用方拿不到内容，所以在这里做一次单向外抛。
     LaunchedEffect(textFieldState) {
@@ -228,7 +217,6 @@ internal fun AgentChatInputBar(
         modifier = modifier
             .fillMaxWidth(),
     ) {
-        if (recognitionEnabled) SpeechInputFeedback(dictation)
         AnimatedVisibility(
             visible = queuedMessages.isNotEmpty(),
             enter = fadeIn(tween(160)) + expandVertically(
@@ -441,31 +429,17 @@ internal fun AgentChatInputBar(
                                     tint = MiuixTheme.colorScheme.onSurface,
                                 )
                             }
-                        } else {
-                            if (showAttach) {
-                                AgentAttachmentPickerButton(
-                                    popupAnchorTopPx = inputContainerTopPx,
-                                    popupMaxHeight = thinkingPopupMaxHeight,
-                                    onAttachImage = onAttachImage,
-                                    onAttachFiles = onAttachFiles,
-                                    onAttachFolder = onAttachFolder,
-                                    onAttachFilePath = onAttachFilePath,
-                                )
+                        } else if (showAttach) {
+                            AgentAttachmentPickerButton(
+                                popupAnchorTopPx = inputContainerTopPx,
+                                popupMaxHeight = thinkingPopupMaxHeight,
+                                onAttachImage = onAttachImage,
+                                onAttachFiles = onAttachFiles,
+                                onAttachFolder = onAttachFolder,
+                                onAttachFilePath = onAttachFilePath,
+                            )
 
-                                Spacer(modifier = Modifier.width(2.dp))
-                            }
-
-                            // 思考档位不跟附件按钮绑定：没有附件入口的场景（如 Forge）也要能调档位。
-                            if (availableReasoningEfforts.isNotEmpty()) {
-                                ThinkingEffortChip(
-                                    effort = reasoningEffort,
-                                    options = availableReasoningEfforts,
-                                    enabled = !isStreaming,
-                                    popupAnchorTopPx = inputContainerTopPx,
-                                    popupMaxHeight = thinkingPopupMaxHeight,
-                                    onEffortChange = onReasoningEffortChange,
-                                )
-                            }
+                            Spacer(modifier = Modifier.width(2.dp))
                         }
 
                         Spacer(modifier = Modifier.weight(1f))
@@ -476,18 +450,40 @@ internal fun AgentChatInputBar(
                                 onCompact = onCompactContext,
                                 canCompact = canCompactContext && !isStreaming,
                             )
-                            Spacer(modifier = Modifier.width(2.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                         }
 
-                        if (recognitionEnabled) {
-                            SpeechDictationButton(dictation, enabled = !isCompacting)
-                            Spacer(modifier = Modifier.width(2.dp))
+                        // 合并控件（选模型 + 思考档位）固定在右下、发送键左侧（3.4.45 用户定案布局）；
+                        // 上下文用量圈在它左边。编辑消息时不显示（编辑态只有取消与发送）。
+                        // 语音听写入口已按用户要求整体移除（用不上），不要再加回来。
+                        if (!isEditingMessage) {
+                            if (modelPickerState != null) {
+                                ModelEffortControl(
+                                    modelPickerState = modelPickerState,
+                                    onModelSelected = onModelSelected,
+                                    effort = reasoningEffort,
+                                    availableEfforts = availableReasoningEfforts,
+                                    enabled = !isStreaming,
+                                    onEffortChange = onReasoningEffortChange,
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                            } else if (availableReasoningEfforts.isNotEmpty()) {
+                                // 没有模型上下文的调用方回落到旧的纯档位胶囊。
+                                ThinkingEffortChip(
+                                    effort = reasoningEffort,
+                                    options = availableReasoningEfforts,
+                                    enabled = !isStreaming,
+                                    popupAnchorTopPx = inputContainerTopPx,
+                                    popupMaxHeight = thinkingPopupMaxHeight,
+                                    onEffortChange = onReasoningEffortChange,
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                            }
                         }
 
                         val showStreamingSend = isStreaming && !isCompacting && canSend
                         val submitCurrentDraft: (Boolean) -> Unit = { interrupt ->
                             if (canSend) {
-                                dictation.cancel()
                                 val submittedText = textFieldState.text.toString()
                                 textFieldState.clearText()
                                 if (interrupt) {

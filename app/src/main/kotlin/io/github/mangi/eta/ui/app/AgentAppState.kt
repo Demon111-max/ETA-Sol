@@ -159,6 +159,14 @@ internal class AgentAppState(
     var modelPickerState by mutableStateOf(AgentModelPickerUiState())
         private set
 
+    /**
+     * Forge 专用的模型选择投影：只按全局选择（设置页那份）投影，不掺 Assist 会话绑定。
+     * Forge 的配置解析只读全局选择，药丸若照 Assist 的绑定优先投影，绑定与全局不一致时
+     * 就会「药丸显示 A、Forge 实际跑 B」。与 [modelPickerState] 在同处刷新，保持同源更新。
+     */
+    var forgeModelPickerState by mutableStateOf(AgentModelPickerUiState())
+        private set
+
     var conversationPaneState by mutableStateOf(
         ConversationPaneUiState(
             conversations = emptyList(),
@@ -226,6 +234,7 @@ internal class AgentAppState(
             AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
         }
         modelPickerState = pickerState.copy(isChanging = modelPickerState.isChanging)
+        forgeModelPickerState = AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
         val effective = bound ?: providers.enabledModel(pickerState.selectedModel?.id)
         currentReasoningCapabilities = effective?.let { (provider, model) ->
             RuntimeConfigRepository.reasoningCapabilities(provider, model)
@@ -788,6 +797,28 @@ internal class AgentAppState(
             } finally {
                 withContext(Dispatchers.Main) {
                     modelPickerState = modelPickerState.copy(isChanging = false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Forge 药丸里的切换：只写全局选择，不碰 Assist 的会话绑定，也不吃 Assist 的
+     * 「会话已加载/正在流式」守卫（那些守卫是给 Assist 聊天内切换用的，套到 Forge 上
+     * 会让 Forge 里点选模型静默无反应）。写完后选择流会回流刷新两个投影，
+     * Forge 面板再按新选择对齐自己的配置。
+     */
+    fun selectGlobalModel(modelId: String) {
+        if (forgeModelPickerState.selectedModel?.id == modelId) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                RuntimeConfigRepository.setSelectedModelId(modelId)
+                RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(appContext, appContext.getString(R.string.state_ui_model_switching_failed_please_try_again_later_4af439), Toast.LENGTH_SHORT).show()
                 }
             }
         }

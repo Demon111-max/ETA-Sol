@@ -14,8 +14,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 internal sealed interface ForgeConfigWriteResult {
@@ -67,6 +69,17 @@ internal object ForgeConfigWriter {
                 putJsonObject("models") {
                     putJsonObject(settings.modelId.trim()) {
                         put("name", settings.modelId.trim())
+                        // 输入能力：opencode 对自定义模型默认只认文字，不声明 image 就会把
+                        // 图片附件降级成「Called the Read tool…」合成文本、模型也自称不支持识图。
+                        // 来源是共用配置的 supportsVision（设置页「图片」勾选），与 Assist 同一份。
+                        put("attachment", settings.supportsVision)
+                        putJsonObject("modalities") {
+                            putJsonArray("input") {
+                                add("text")
+                                if (settings.supportsVision) add("image")
+                            }
+                            putJsonArray("output") { add("text") }
+                        }
                         // 不写 limit：opencode 的 limit 要求 context 与 output 成对出现，
                         // 而 App 的模型设置只有上下文窗口、没有最大输出值；只写 context
                         // 会让整份配置被 opencode 判为无效、server 启动即退出（1.19.5 实测）。
@@ -115,6 +128,7 @@ internal object ForgeConfigWriter {
         val command = writeCommand(
             configJson = opencodeConfigJson(settings).toString(),
             authJson = authJson(settings, credentials).toString(),
+            providerId = settings.providerId,
         )
         val supervisor = ShellProcessSupervisor()
         try {
@@ -161,14 +175,16 @@ internal object ForgeConfigWriter {
      * 模型就被静默抹掉。现在改成：
      * 1. 旧文件存在且是合法 JSON 且环境里有 jq → `jq -s '.[0] * .[1]'` 递归合并，
      *    App 管的字段（provider.<id>、model、permission 等）以 App 为准（右侧覆盖左侧），
-     *    App 不管的键与别家服务商条目原样保留；
+     *    App 不管的键与别家服务商条目原样保留；其中 opencode.json 的当前服务商条目
+     *    整段以新内容替换（深合并删不掉键：删过的自定义请求头会被旧条目合并回来，
+     *    3.4.45 审计实证后补的这一步，细节见 eta_forge_install 调用处）；
      * 2. 没有 jq 的极简环境 → 先把旧文件复制成 `.bak`，再整份覆盖：合并做不到，
      *    但至少用户手改的东西能捞回来，不会静默消失；
      * 3. 旧文件本身解析不了（上次写坏的残留）→ 由 `eta_forge_backup_if_corrupt` 先 `mv` 成
      *    `.bak` 让坏文件自愈，随后按「文件不存在」直接落新文件。
      * 合并只做「深合并到对象」这一层，数组整段取 App 的值（不拼接），语义写在此处备查。
      */
-    internal fun writeCommand(configJson: String, authJson: String): String = buildString {
+    internal fun writeCommand(configJson: String, authJson: String, providerId: String): String = buildString {
         append("set -e\n")
         append("mkdir -p \"${'$'}HOME/.config/opencode\" \"${'$'}HOME/.local/share/opencode\"\n")
         append("eta_forge_config=\"${'$'}HOME/.config/opencode/opencode.json\"\n")
@@ -185,15 +201,15 @@ internal object ForgeConfigWriter {
         append("  fi\n")
         append("  mv -f \"${'$'}1\" \"${'$'}1.bak\"\n")
         append("}\n")
-        // $1 = 正式文件，$2 = 刚写好的 .tmp（新内容）。
+        // $1 = 正式文件，$2 = 刚写好的 .tmp（新内容），$3 = 可选的 jq 合并程序（缺省深合并）。
         append("eta_forge_install() {\n")
         append("  if [ ! -f \"${'$'}1\" ]; then\n")
         append("    mv -f \"${'$'}2\" \"${'$'}1\"\n")
         append("    return 0\n")
         append("  fi\n")
         append("  if command -v jq >/dev/null 2>&1; then\n")
-        // 递归合并成「旧 ← 新」：新内容里出现的键以 App 为准，其余键保留。
-        append("    if jq -s '.[0] * .[1]' \"${'$'}1\" \"${'$'}2\" > \"${'$'}2.merged\"; then\n")
+        // 递归合并成「旧 ← 新」：新内容里出现的键以 App 为准，其余键保留（$3 可换合并程序）。
+        append("    if jq -s \"${'$'}{3:-.[0] * .[1]}\" \"${'$'}1\" \"${'$'}2\" > \"${'$'}2.merged\"; then\n")
         append("      mv -f \"${'$'}2.merged\" \"${'$'}1\"\n")
         append("      rm -f \"${'$'}2\"\n")
         append("      return 0\n")
@@ -209,7 +225,11 @@ internal object ForgeConfigWriter {
         append(configJson).append('\n')
         append("ETA_FORGE_CONFIG_EOF\n")
         append("chmod 600 \"${'$'}eta_forge_config.tmp\"\n")
-        append("eta_forge_install \"${'$'}eta_forge_config\" \"${'$'}eta_forge_config.tmp\"\n")
+        // opencode.json 的合并要多一步：当前服务商条目整段以新内容为准，不能只深合并——
+        // 深合并只认「新里有的键」，用户在设置页删掉的自定义请求头、换掉的旧模型会留在旧条目里
+        // 被合并「复活」，改了等于没改。服务商条目由 App 独占生成，整段替换不伤用户手改的其它键；
+        // auth.json 不做此处理，别家凭据还要靠深合并保留。
+        append("eta_forge_install \"${'$'}eta_forge_config\" \"${'$'}eta_forge_config.tmp\" '.[1] as ${'$'}new | (.[0] * ${'$'}new) | if (${'$'}new.provider // {}) | has(\"$providerId\") then .provider[\"$providerId\"] = ${'$'}new.provider[\"$providerId\"] else . end'\n")
         append("chmod 600 \"${'$'}eta_forge_config\"\n")
         append("eta_forge_backup_if_corrupt \"${'$'}eta_forge_auth\"\n")
         append("cat > \"${'$'}eta_forge_auth.tmp\" <<'ETA_FORGE_AUTH_EOF'\n")

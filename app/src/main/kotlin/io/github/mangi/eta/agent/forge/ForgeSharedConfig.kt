@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.forge
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
+import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderAuthModes
@@ -10,6 +11,7 @@ import io.github.mangi.eta.data.model.ProviderTypes
 import io.github.mangi.eta.data.model.runtimeProviderType
 import io.github.mangi.eta.data.model.selectedOrFirstModel
 import io.github.mangi.eta.data.repository.ProviderRepository
+import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 
 /**
  * Forge 与 Assist 共用同一套服务商配置：从模型提供商里当前选中的服务商与模型
@@ -23,6 +25,10 @@ internal sealed interface ForgeSharedConfig {
     data class Ready(
         val settings: ForgeSettings,
         val credentials: ForgeCredentials,
+        /** 当前模型的思考能力：必须与 Assist 走同一个解析入口（RuntimeConfigRepository.reasoningCapabilities，含目录/家族推断），不许 Forge 只读模型原始字段另算一份。 */
+        val reasoningCapabilities: ModelReasoningCapabilities? = null,
+        /** 模型被明确声明不支持思考（设置页关了「支持思考」或元数据 reasoning=false）：与「能力未知」区分——前者一档都不许开，后者才放行回落档位表。 */
+        val reasoningDisabled: Boolean = false,
     ) : ForgeSharedConfig
 
     /**
@@ -121,8 +127,11 @@ internal suspend fun resolveForgeSharedConfig(): ForgeSharedConfig {
             endpointMode = endpointMode,
             customHeaders = mergedHeaders,
             contextWindow = model.effectiveContextWindow,
+            supportsVision = model.supportsVision,
         ),
         credentials = ForgeCredentials(apiKey = apiKey),
+        reasoningCapabilities = RuntimeConfigRepository.reasoningCapabilities(provider, model),
+        reasoningDisabled = model.effectiveReasoning == false,
     )
 }
 

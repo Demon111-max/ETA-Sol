@@ -1420,6 +1420,9 @@
   <string name="chat_image_attachment">Image attachment</string>
   <string name="chat_view_image">View image</string>
   <string name="reasoning_chip_off">Think</string>
+  <string name="effort_sheet_title">Thinking effort</string>
+  <string name="effort_default_label">Default</string>
+  <string name="effort_off_label">Off</string>
   <string name="reasoning_chip_default">Deep Think</string>
   <string name="chat_edit_preserve_following">Saving updates this message in place and keeps the rest of the conversation</string>
   <string name="chat_save_message">Save message</string>

@@ -960,6 +960,15 @@ private fun ModelEditDialog(
                 .orEmpty() + ReasoningEffort.DEFAULT
         )
     }
+    // 输入能力：与思考能力同级的能力声明，Assist 与 Forge 共用这一份，
+    // 不许任何一侧再单独存一份（链式反应防冲突）。「图片」勾选即 supportsVision：
+    // ForgeSharedConfig 据此把 image 写进 opencode 配置的 modalities/attachment。
+    var textInputEnabled by remember(model.id, isNew) {
+        mutableStateOf(Model.TEXT_MODALITY in model.inputModalities)
+    }
+    var imageInputEnabled by remember(model.id, isNew) {
+        mutableStateOf(model.supportsVision)
+    }
     val contextError = contextWindowInputError(contextWindowOverrideText)
 
     fun resetAutomaticReasoning() {
@@ -981,6 +990,21 @@ private fun ModelEditDialog(
         contextWindowOverride = contextWindowOverrideText.trim()
             .takeIf(String::isNotEmpty)
             ?.toInt(),
+        // 输入能力落到既有字段（DB 已有列，不新增存储）：inputModalities 决定清单，
+        // attachment 与「图片」勾选保持一致，supportsVision 的两个来源不许打架。
+        // 勾选只管文字/图片两项：模型原有的其它模态（video/audio 等）原样保留，
+        // 不许保存一次弹窗就把目录/远端给的模态元数据悄悄削掉。
+        inputModalities = buildList {
+            if (textInputEnabled) add(Model.TEXT_MODALITY)
+            if (imageInputEnabled) add(Model.IMAGE_MODALITY)
+            addAll(
+                model.inputModalities.filter { modality ->
+                    !modality.equals(Model.TEXT_MODALITY, ignoreCase = true) &&
+                        !modality.equals(Model.IMAGE_MODALITY, ignoreCase = true)
+                },
+            )
+        }.ifEmpty { listOf(Model.TEXT_MODALITY) },
+        attachment = imageInputEnabled,
         reasoningOverride = reasoningEnabled.takeIf { reasoningOverrideActive },
         reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled) {
             val canDisable = !nativeGemini && ReasoningEffort.OFF in selectedReasoningEfforts
@@ -1089,6 +1113,33 @@ private fun ModelEditDialog(
                                 )
                             }
                         }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        CouiText(
+                            text = "输入能力",
+                            kind = CouiTextKind.ItemTitle,
+                            color = colors.title,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            EtaChoiceChip(
+                                text = "文字",
+                                selected = textInputEnabled,
+                                onClick = { textInputEnabled = !textInputEnabled },
+                                enabled = !isSaving,
+                            )
+                            EtaChoiceChip(
+                                text = "图片",
+                                selected = imageInputEnabled,
+                                onClick = { imageInputEnabled = !imageInputEnabled },
+                                enabled = !isSaving,
+                            )
+                        }
+                        CouiText(
+                            text = "勾选「图片」表示该模型支持识图，Forge 会据此把图片直接发给模型。",
+                            kind = CouiTextKind.GroupFooter,
+                            color = colors.summary,
+                        )
                     }
 
                     Divider(startIndent = 0.dp, endIndent = 0.dp)
@@ -1282,6 +1333,35 @@ private fun ModelEditDialog(
                                 MiuixTheme.colorScheme.onSurfaceVariantSummary
                             },
                             modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "输入能力",
+                            style = MiuixTheme.textStyles.body1,
+                            color = MiuixTheme.colorScheme.onSurface,
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(top = 10.dp),
+                        ) {
+                            EtaChoiceChip(
+                                text = "文字",
+                                selected = textInputEnabled,
+                                onClick = { textInputEnabled = !textInputEnabled },
+                                enabled = !isSaving,
+                            )
+                            EtaChoiceChip(
+                                text = "图片",
+                                selected = imageInputEnabled,
+                                onClick = { imageInputEnabled = !imageInputEnabled },
+                                enabled = !isSaving,
+                            )
+                        }
+                        Text(
+                            text = "勾选「图片」表示该模型支持识图，Forge 会据此把图片直接发给模型。",
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            modifier = Modifier.padding(top = 6.dp),
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(

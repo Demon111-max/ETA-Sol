@@ -50,6 +50,11 @@ internal fun reconcileRemoteModels(
                         contextWindowOverride = configuredWindow ?: remote.contextWindow,
                         reasoningOverride = stored.reasoningOverride,
                         reasoningCapabilitiesOverride = stored.reasoningCapabilitiesOverride,
+                        // 识图勾选（设置页「文字/图片」）没有独立覆盖字段，只存这两个基础字段：
+                        // 远端没给模态元数据时（中转站 /models 普遍不返回），保留本地值，
+                        // 别让一次同步把用户刚勾上的识图静默冲掉；远端明确给了才以远端为准。
+                        attachment = remote.attachment ?: stored.attachment,
+                        inputModalities = remote.inputModalities.ifEmpty { stored.inputModalities },
                         source = if (stored.source == ModelSource.MANUAL) ModelSource.MANUAL else ModelSource.REMOTE,
                         createdAt = stored.createdAt,
                     ))

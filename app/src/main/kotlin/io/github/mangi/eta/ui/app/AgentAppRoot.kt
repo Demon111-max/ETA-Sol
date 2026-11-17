@@ -724,6 +724,8 @@ fun AgentAppRoot(
                             state = forgeState,
                             onOpenLinuxEnvironment = { pushRoute(AppRoute.LinuxEnvironment) },
                             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
+                            modelPickerState = agentState.forgeModelPickerState,
+                            onModelSelected = agentState::selectGlobalModel,
                             topInset = shellPadding.calculateTopPadding(),
                             // 空页那张「产出落在哪」卡片点一下打开侧边栏：工作区列表就在那儿，
                             // 没有工作区时也是那里加。以前卡片是死的，新用户找不到入口。

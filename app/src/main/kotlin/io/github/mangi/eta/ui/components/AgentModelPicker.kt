@@ -95,10 +95,12 @@ import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import top.yukonga.miuix.kmp.window.WindowListPopup
 
 /**
- * 聊天首页顶栏的复合标题与模型切换入口：
- * - 新对话：居中呈现轻盈的模型胶囊 `[ ✦ 模型名 ▾ ]`
- * - 对话进行中：上行会话标题，下行紧凑模型副标题，整块可点切换模型
- * - 角色对话：左侧头像直达角色详情，右侧双行展示角色名与当前模型
+ * 聊天首页顶栏标题：只负责居中显示标题，不再承担模型切换。
+ *
+ * 3.4.45 起模型选择与思考档位合并进输入栏右下角的合并控件（ModelEffortControl，
+ * 仿旧 Sol 的 Codex 式药丸），顶栏按用户定案只留居中标题：有会话标题显示标题，
+ * 角色对话显示头像+角色名（点开角色详情），都没有时显示应用名。
+ * [state] / [isStreaming] / [onModelSelected] 参数保留只是为了不动壳层调用点，内部不再使用。
  */
 @Composable
 internal fun AgentTopBarChatHeader(
@@ -110,38 +112,6 @@ internal fun AgentTopBarChatHeader(
     onOpenCharacter: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var showPopup by remember { mutableStateOf(false) }
-    var showSheet by remember { mutableStateOf(false) }
-    var sheetSession by remember { mutableIntStateOf(0) }
-    val selected = state.selectedModel
-    val enabled = !isStreaming && !state.isChanging && state.providerGroups.isNotEmpty()
-    LaunchedEffect(enabled) {
-        if (!enabled) {
-            showPopup = false
-            showSheet = false
-        }
-    }
-
-    val currentModel = selected?.displayName ?: stringResource(R.string.model_not_selected)
-    val switchModelDescription = stringResource(R.string.model_switch_current, currentModel)
-    val anchor = rememberCouiMenuAnchor()
-    val uiStyle = LocalUiStyle.current
-    val isCoui = uiStyle == AppearanceUiStyle.COUI
-    val isDark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
-    val ink = MiuixTheme.colorScheme.onSurface.copy(alpha = 1f)
-    val subtitleColor = ink.copy(alpha = if (isDark) 0.56f else 0.52f)
-    val chevronColor = ink.copy(alpha = if (isDark) 0.46f else 0.42f)
-    val interactionSource = remember { MutableInteractionSource() }
-
-    val triggerModelPicker: () -> Unit = {
-        if (state.modelCount <= ModelPopupLimit) {
-            anchor.open { showPopup = true }
-        } else {
-            sheetSession += 1
-            showSheet = true
-        }
-    }
-
     Box(modifier = modifier) {
         when {
             character != null -> {
@@ -160,237 +130,37 @@ internal fun AgentTopBarChatHeader(
                         )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
-                    Column(
-                        modifier = Modifier
-                            .couiMenuAnchor(anchor)
-                            .clip(RoundedCornerShape(10.dp))
-                            .then(
-                                if (isCoui) {
-                                    Modifier.couiButtonFeedback(isDark, interactionSource, enabled = enabled)
-                                } else {
-                                    Modifier
-                                },
-                            )
-                            .clickable(
-                                interactionSource = interactionSource,
-                                indication = null,
-                                enabled = enabled,
-                                role = Role.Button,
-                                onClick = triggerModelPicker,
-                            )
-                            .semantics { contentDescription = switchModelDescription }
-                            .padding(horizontal = 6.dp, vertical = 3.dp),
-                    ) {
-                        Text(
-                            text = character.characterName,
-                            style = MiuixTheme.textStyles.body2.copy(
-                                fontSize = 15.sp,
-                                lineHeight = 18.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            ),
-                            color = MiuixTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        ModelSubtitleRow(
-                            selected = selected,
-                            modelName = currentModel,
-                            textColor = subtitleColor,
-                            chevronColor = chevronColor,
-                            showChevron = enabled,
-                        )
-                    }
-                }
-            }
-
-            !conversationTitle.isNullOrBlank() -> {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .couiMenuAnchor(anchor)
-                        .clip(RoundedCornerShape(12.dp))
-                        .then(
-                            if (isCoui) {
-                                Modifier.couiButtonFeedback(isDark, interactionSource, enabled = enabled)
-                            } else {
-                                Modifier
-                            },
-                        )
-                        .clickable(
-                            interactionSource = interactionSource,
-                            indication = null,
-                            enabled = enabled,
-                            role = Role.Button,
-                            onClick = triggerModelPicker,
-                        )
-                        .semantics { contentDescription = switchModelDescription }
-                        .padding(horizontal = 10.dp, vertical = 3.dp),
-                ) {
                     Text(
-                        text = conversationTitle,
-                        style = MiuixTheme.textStyles.body1.copy(
-                            fontSize = 15.5.sp,
-                            lineHeight = 19.sp,
+                        text = character.characterName,
+                        style = MiuixTheme.textStyles.body2.copy(
+                            fontSize = 15.sp,
+                            lineHeight = 18.sp,
                             fontWeight = FontWeight.SemiBold,
                         ),
                         color = MiuixTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                    )
-                    ModelSubtitleRow(
-                        selected = selected,
-                        modelName = currentModel,
-                        textColor = subtitleColor,
-                        chevronColor = chevronColor,
-                        showChevron = enabled,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(onClick = onOpenCharacter)
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                     )
                 }
             }
 
             else -> {
-                val pillFill = ink.copy(alpha = if (isDark) 0.08f else 0.042f)
-                val pillBorder = ink.copy(alpha = if (isDark) 0.12f else 0.07f)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .couiMenuAnchor(anchor)
-                        .heightIn(min = 34.dp)
-                        .clip(CircleShape)
-                        .background(pillFill, CircleShape)
-                        .border(0.5.dp, pillBorder, CircleShape)
-                        .then(
-                            if (isCoui) {
-                                Modifier.couiButtonFeedback(isDark, interactionSource, enabled = enabled)
-                            } else {
-                                Modifier
-                            },
-                        )
-                        .clickable(
-                            interactionSource = interactionSource,
-                            indication = null,
-                            enabled = enabled,
-                            role = Role.Button,
-                            onClick = triggerModelPicker,
-                        )
-                        .semantics { contentDescription = switchModelDescription }
-                        .padding(start = 11.dp, end = if (enabled) 8.dp else 12.dp, top = 6.dp, bottom = 6.dp),
-                ) {
-                    ModelBrandMark(
-                        modelId = selected?.modelId,
-                        sourceType = selected?.providerSourceType,
-                        size = 15.dp,
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = currentModel,
-                        style = MiuixTheme.textStyles.body2.copy(
-                            fontSize = 14.sp,
-                            lineHeight = 18.sp,
-                            fontWeight = FontWeight.Medium,
-                        ),
-                        color = MiuixTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 180.dp),
-                    )
-                    if (enabled) {
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Icon(
-                            imageVector = Icons.Rounded.KeyboardArrowDown,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = chevronColor,
-                        )
-                    }
-                }
-            }
-        }
-
-        when (uiStyle) {
-            AppearanceUiStyle.COUI -> {
-                val menuItems = remember(state.providerGroups, state.selectedModel?.id) {
-                    val multipleGroups = state.providerGroups.size > 1
-                    state.providerGroups.flatMapIndexed { groupIndex, group ->
-                        group.models.mapIndexed { modelIndex, model ->
-                            CouiMenuItem(
-                                value = model.id,
-                                text = if (multipleGroups) "${group.providerName} · ${model.displayName}" else model.displayName,
-                                selected = model.id == state.selectedModel?.id,
-                                dividerBefore = multipleGroups && groupIndex > 0 && modelIndex == 0,
-                            )
-                        }
-                    }
-                }
-                Menu(
-                    expanded = showPopup,
-                    onDismissRequest = { showPopup = false },
-                    items = menuItems,
-                    onItemClick = { item ->
-                        showPopup = false
-                        onModelSelected(item.value)
-                    },
-                    anchor = anchor,
-                )
-
-                val dark = CouiTheme.isDark
-                Dialog(
-                    visible = showSheet,
-                    onDismissRequest = { showSheet = false },
-                    dark = dark,
-                    title = stringResource(R.string.model_picker_title),
-                    confirmAction = CouiDialogAction(
-                        text = stringResource(R.string.action_close),
-                        onClick = { showSheet = false },
+                Text(
+                    text = conversationTitle?.takeIf { it.isNotBlank() }
+                        ?: stringResource(R.string.app_name),
+                    style = MiuixTheme.textStyles.body1.copy(
+                        fontSize = 15.5.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = FontWeight.SemiBold,
                     ),
-                    placement = CouiDialogPlacement.Bottom,
-                    material = rememberCouiDialogMaterial(dark),
-                    backdrop = rememberCouiWindowBackdrop(),
-                ) {
-                    key(sheetSession) {
-                        ModelSheetContent(
-                            state = state,
-                            onModelSelected = { modelId ->
-                                showSheet = false
-                                onModelSelected(modelId)
-                            },
-                        )
-                    }
-                }
-            }
-
-            AppearanceUiStyle.MIUIX -> {
-                WindowListPopup(
-                    show = showPopup,
-                    alignment = PopupPositionProvider.Align.Start,
-                    onDismissRequest = { showPopup = false },
-                    maxHeight = 360.dp,
-                    minWidth = ModelPopupWidth,
-                ) {
-                    ModelQuickList(
-                        state = state,
-                        onModelSelected = { modelId ->
-                            showPopup = false
-                            onModelSelected(modelId)
-                        },
-                    )
-                }
-
-                WindowBottomSheet(
-                    show = showSheet,
-                    title = stringResource(R.string.model_picker_title),
-                    onDismissRequest = { showSheet = false },
-                    insideMargin = DpSize(0.dp, 0.dp),
-                ) {
-                    key(sheetSession) {
-                        ModelSheetContent(
-                            state = state,
-                            onModelSelected = { modelId ->
-                                showSheet = false
-                                onModelSelected(modelId)
-                            },
-                        )
-                    }
-                }
+                    color = MiuixTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -475,8 +245,12 @@ private sealed interface ModelSheetEntry {
     }
 }
 
+/**
+ * 模型选择浮层内容（分组 + 搜索 + 当前项打勾）：顶栏旧入口与输入栏合并控件共用同一份，
+ * 不许两处各画一份列表（链式反应防冲突：选择口径只能有一份）。
+ */
 @Composable
-private fun ModelSheetContent(
+internal fun ModelSheetContent(
     state: AgentModelPickerUiState,
     onModelSelected: (String) -> Unit,
 ) {

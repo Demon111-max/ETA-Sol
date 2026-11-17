@@ -36,6 +36,7 @@ import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.ListEmptyState
+import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import io.github.mangi.eta.ui.components.coui.CouiButton
 import io.github.mangi.eta.ui.components.coui.CouiButtonRole
 import java.io.File
@@ -75,6 +76,9 @@ internal fun ForgeScreen(
     onBusyChanged: (String?, Boolean) -> Unit = { _, _ -> },
     /** 打开侧边栏的工作区列表（空页工作区卡片的出口）。 */
     onOpenWorkspacePicker: () -> Unit = {},
+    /** 共用模型选择（与 Assist 同一份）：透传给对话面板输入栏的合并控件。 */
+    modelPickerState: AgentModelPickerUiState? = null,
+    onModelSelected: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     var gate by remember { mutableStateOf<ForgeGateState>(ForgeGateState.Checking) }
@@ -108,6 +112,8 @@ internal fun ForgeScreen(
             topInset = topInset,
             onBusyChanged = onBusyChanged,
             onOpenWorkspacePicker = onOpenWorkspacePicker,
+            modelPickerState = modelPickerState,
+            onModelSelected = onModelSelected,
         )
 
         // 检查中保持空白：不引入任何进度指示。

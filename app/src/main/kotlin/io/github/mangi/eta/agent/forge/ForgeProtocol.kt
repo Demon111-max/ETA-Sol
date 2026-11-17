@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -33,6 +34,8 @@ internal sealed interface ForgePart {
         override val messageId: String,
         val text: String,
         override val ended: Boolean,
+        /** opencode 自己合成的文本（如图片被降级成的 Read 提示）：不是用户打的字，界面不许当用户原文显示。 */
+        val synthetic: Boolean = false,
     ) : ForgePart
 
     data class Reasoning(
@@ -73,12 +76,17 @@ internal sealed interface ForgePart {
             get() = true
     }
 
-    /** 文件附件 part（用户从其他客户端或本机 Forge 发的附件消息）：只留 mime 与文件名供界面占位显示。 */
+    /**
+     * 文件附件 part（用户从其他客户端或本机 Forge 发的附件消息）。
+     * [url] 必须保留：图片附件发的是 data: URL，界面靠它画预览图（与 Assist 的 dataUrl 渲染同路）；
+     * 丢掉 url 就只剩文件名，图片只能显示成一行文字（3.4.44 实测问题）。
+     */
     data class Attachment(
         override val id: String,
         override val messageId: String,
         val mime: String?,
         val filename: String?,
+        val url: String? = null,
     ) : ForgePart {
         override val ended: Boolean
             get() = true
@@ -302,6 +310,7 @@ internal object ForgeProtocol {
                 messageId = messageId,
                 text = obj.stringOrNull("text").orEmpty(),
                 ended = ended,
+                synthetic = (obj["synthetic"] as? JsonPrimitive)?.booleanOrNull == true,
             )
 
             "reasoning" -> ForgePart.Reasoning(
@@ -316,6 +325,7 @@ internal object ForgeProtocol {
                 messageId = messageId,
                 mime = obj.stringOrNull("mime"),
                 filename = obj.stringOrNull("filename"),
+                url = obj.stringOrNull("url"),
             )
 
             "tool" -> parseToolPart(obj, id, messageId)
