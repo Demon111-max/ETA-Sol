@@ -918,10 +918,10 @@ private fun ForgeComposer(
                 reasoningEffort = state.reasoningEffort,
                 // 档位上限与 Assist 同源：解析出的能力声明（与 Assist 同一个解析入口）；
                 // 明确不支持思考 → 空列表（控件只剩模型名）；能力未知才回落写死 7 档（控件再收敛成 Sol 5 档）。
-                availableReasoningEfforts = when {
-                    state.reasoningDisabled -> emptyList()
-                    state.reasoningCapabilities != null -> state.reasoningCapabilities.selectableEfforts
-                    else -> ForgeReasoningEfforts
+                availableReasoningEfforts = if (state.reasoningDisabled) {
+                    emptyList()
+                } else {
+                    state.reasoningCapabilities?.selectableEfforts ?: ForgeReasoningEfforts
                 },
                 modelPickerState = modelPickerState,
                 onModelSelected = onModelSelected,

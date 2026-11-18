@@ -286,10 +286,10 @@ internal class ForgeChatState(
 
     /** 输入栏改档的唯一入口：先过能力归一化再落状态，保证控件显示的档就是发送时用的档。 */
     fun updateReasoningEffort(effort: ReasoningEffort) {
-        reasoningEffort = when {
-            reasoningDisabled -> ReasoningEffort.DEFAULT
-            reasoningCapabilities != null -> reasoningCapabilities.normalize(effort)
-            else -> effort
+        reasoningEffort = if (reasoningDisabled) {
+            ReasoningEffort.DEFAULT
+        } else {
+            reasoningCapabilities?.normalize(effort) ?: effort
         }
     }
 
