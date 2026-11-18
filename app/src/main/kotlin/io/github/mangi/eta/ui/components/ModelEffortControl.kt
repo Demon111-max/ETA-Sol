@@ -309,10 +309,10 @@ internal fun ModelEffortControl(
                             // 去模型浮层：内容从右 8dp 滑入、旧内容向右 8dp 滑出；回档位浮层镜像（Sol 原版方向）。
                             val dir = if (targetState == ModelEffortSheet.Model) 1 else -1
                             val slidePx = with(density) { 8.dp.roundToPx() }
-                            (slideInHorizontally(tween(160, SheetSwitchEase)) { dir * slidePx } +
+                            (slideInHorizontally(tween(160, easing = SheetSwitchEase)) { dir * slidePx } +
                                 fadeIn(tween(160)))
                                 .togetherWith(
-                                    slideOutHorizontally(tween(160, SheetSwitchEase)) { dir * slidePx } +
+                                    slideOutHorizontally(tween(160, easing = SheetSwitchEase)) { dir * slidePx } +
                                         fadeOut(tween(160)),
                                 )
                         },
