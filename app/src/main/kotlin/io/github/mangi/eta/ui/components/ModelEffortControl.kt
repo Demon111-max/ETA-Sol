@@ -17,9 +17,9 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -42,7 +43,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -55,33 +58,31 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.itos.coui.dialog.CouiDialogAction
-import com.itos.coui.dialog.CouiDialogPlacement
-import com.itos.coui.dialog.Dialog
-import com.itos.coui.menu.rememberCouiWindowBackdrop
-import com.itos.coui.theme.CouiTheme
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import io.github.mangi.eta.R
-import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.model.ReasoningEffort
-import io.github.mangi.eta.ui.app.LocalUiStyle
-import io.github.mangi.eta.ui.components.coui.rememberCouiDialogMaterial
 import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 /**
  * 仿旧 Sol（Codex 式）的合并控件：一颗药丸同时管「选模型」与「思考档位」。
  *
- * 交互照 Sol 原版：点药丸先开档位浮层（大字档位词 + 5 档滑块），浮层右上角是当前模型名，
- * 点它跳到模型浮层（分组列表、当前项打勾，复用既有 ModelSheetContent）。
+ * 交互与长相都照 Sol 原版（数值摘自 Sol 的 Sheets.tsx 与 app.css，不许用系统组件默认长相顶替）：
+ * - 点药丸先开档位浮层：270dp 宽、104dp 高的小卡片，贴在药丸正上方右侧浮着，没有标题、没有关闭按钮，
+ *   点外面就收；头部上下两行居中——档位词 15sp 半粗强调色在上，模型名 13sp 灰字带小箭头在下，点它跳模型浮层；
+ * - 滑块：轨道是 25dp 粗的浅灰胶囊，强调色填充从左长到手柄处，4dp 刻度点画在轨道里面，
+ *   手柄是 29dp 白圆钮带阴影；手柄弹簧 stiffness 560 / damping 34 / mass 0.7（dampingRatio ≈ 0.86），
+ *   拖动时放大 1.15、过刻度震动、松手吸附最近档才回调，轻点轨道直接跳档；
+ * - 模型浮层与档位浮层同宽（270dp），内容复用既有 ModelSheetContent（分组 + 当前项打勾）。
  *
  * 防冲突口径（与设置页的模型能力声明不许打架）：
  * - 设置页管能力上限：滑块只能停在 [availableEfforts] 允许的档上，没勾的档不存在于滑块；
@@ -133,7 +134,12 @@ internal fun ModelEffortControl(
     val interactionSource = remember { MutableInteractionSource() }
     val description = stringResource(R.string.chat_reasoning_effort, gearLabel ?: modelName)
 
-    Box(modifier = modifier) {
+    var anchorSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+
+    Box(
+        modifier = modifier.onSizeChanged { anchorSize = it },
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -172,42 +178,72 @@ internal fun ModelEffortControl(
                 tint = contentColor,
             )
         }
-    }
 
-    if (modelPickerState != null) {
-        ModelEffortSheetContainer(
-            show = sheet == ModelEffortSheet.Effort,
-            title = stringResource(R.string.effort_sheet_title),
-            onDismiss = { sheet = ModelEffortSheet.None },
-        ) {
-            EffortSheetContent(
-                gears = gears,
-                effort = effort,
-                modelName = modelName,
-                onOpenModels = { sheet = ModelEffortSheet.Model },
-                onEffortChange = { picked ->
-                    onEffortChange(picked)
-                    sheet = ModelEffortSheet.None
-                },
-            )
-        }
-        ModelEffortSheetContainer(
-            show = sheet == ModelEffortSheet.Model,
-            title = stringResource(R.string.model_picker_title),
-            onDismiss = { sheet = ModelEffortSheet.None },
-        ) {
-            ModelSheetContent(
-                state = modelPickerState,
-                onModelSelected = { modelId ->
-                    sheet = ModelEffortSheet.None
-                    onModelSelected(modelId)
-                },
-            )
+        if (modelPickerState != null && sheet != ModelEffortSheet.None) {
+            // Sol 原版浮层：贴在控件右上方的小卡片，点外面收起，没有系统弹窗壳。
+            Popup(
+                alignment = Alignment.BottomEnd,
+                offset = IntOffset(
+                    x = 0,
+                    y = -(anchorSize.height + with(density) { 10.dp.roundToPx() }),
+                ),
+                onDismissRequest = { sheet = ModelEffortSheet.None },
+                properties = PopupProperties(focusable = true),
+            ) {
+                SolSheetCard {
+                    when (sheet) {
+                        ModelEffortSheet.Effort -> EffortSheetContent(
+                            gears = gears,
+                            effort = effort,
+                            modelName = modelName,
+                            onOpenModels = { sheet = ModelEffortSheet.Model },
+                            onEffortChange = { picked ->
+                                onEffortChange(picked)
+                                sheet = ModelEffortSheet.None
+                            },
+                        )
+                        ModelEffortSheet.Model -> Box(
+                            modifier = Modifier.heightIn(max = 430.dp),
+                        ) {
+                            ModelSheetContent(
+                                state = modelPickerState,
+                                onModelSelected = { modelId ->
+                                    sheet = ModelEffortSheet.None
+                                    onModelSelected(modelId)
+                                },
+                            )
+                        }
+                        ModelEffortSheet.None -> Unit
+                    }
+                }
+            }
         }
     }
 }
 
 private enum class ModelEffortSheet { None, Model, Effort }
+
+/** Sol 浮层卡片：270dp 宽、圆角、细边框、柔和投影；底色跟主题表面色（Sol 原版浅色为白）。 */
+@Composable
+private fun SolSheetCard(content: @Composable () -> Unit) {
+    val colors = MiuixTheme.colorScheme
+    val isDark = colors.surface.luminance() < 0.5f
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        modifier = Modifier
+            .width(270.dp)
+            .shadow(16.dp, shape)
+            .clip(shape)
+            .background(colors.surface)
+            .border(
+                width = 1.dp,
+                color = colors.onSurface.copy(alpha = if (isDark) 0.12f else 0.08f),
+                shape = shape,
+            ),
+    ) {
+        content()
+    }
+}
 
 /** 药丸文字：放不下就缩字号，不省略（Sol 原版口径）。 */
 @Composable
@@ -235,6 +271,11 @@ private fun ShrinkingPillText(
     )
 }
 
+/**
+ * 档位浮层内容，几何照 Sol app.css 的 .sheet--effort：
+ * 卡片高 104dp、左右内边距 13dp；头部在顶部 13dp 处，上下两行居中（档位词行高 22dp、模型行高 16dp、行距 4dp）；
+ * 滑块区顶部在 64dp、轨道高 25dp（手柄触点上下各扩 10dp，与 Sol 的 44dp 触点一致）。
+ */
 @Composable
 private fun EffortSheetContent(
     gears: List<ReasoningEffort>,
@@ -256,15 +297,22 @@ private fun EffortSheetContent(
         gears.isEmpty() -> ""
         else -> solGearLabel(gears[previewIndex]) ?: ""
     }
+    val modelTint = colors.onSurface.copy(alpha = 0.55f)
 
-    Column(
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
+            .width(270.dp)
+            .height(104.dp)
+            .padding(horizontal = 13.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth(),
+        // 头部：档位词（15sp 半粗、强调色、180ms 上下滑动）在上，模型名（13sp 灰字 + 11dp 小箭头）在下，都居中。
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 13.dp)
+                .height(22.dp)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
         ) {
             AnimatedContent(
                 targetState = bigWord,
@@ -273,86 +321,102 @@ private fun EffortSheetContent(
                         .togetherWith(slideOutVertically(tween(180)) { -it } + fadeOut(tween(120)))
                 },
                 label = "effort_big_word",
+                contentAlignment = Alignment.Center,
             ) { word ->
                 Text(
                     text = word,
-                    style = MiuixTheme.textStyles.title3.copy(
-                        fontSize = 26.sp,
-                        lineHeight = 32.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    ),
-                    color = colors.onSurface,
-                )
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            // 右上角模型跳转钮：点它去模型浮层（Sol 原版）。
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .clickable(role = Role.Button, onClick = onOpenModels)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    text = modelName,
                     style = MiuixTheme.textStyles.footnote1.copy(
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp,
+                        fontWeight = FontWeight.SemiBold,
                     ),
                     color = colors.primary,
                     maxLines = 1,
                 )
-                Icon(
-                    imageVector = Icons.Rounded.ChevronRight,
-                    contentDescription = null,
-                    modifier = Modifier.size(15.dp),
-                    tint = colors.primary,
-                )
             }
         }
-        Spacer(modifier = Modifier.height(14.dp))
-        if (gears.size >= 2) {
-            EffortSlider(
-                gears = gears,
-                selectedIndex = previewIndex,
-                onPreviewChange = { index ->
-                    interacted = true
-                    previewIndex = index
-                },
-                onRelease = { index ->
-                    val picked = gears[index]
-                    if (picked != effort) onEffortChange(picked)
-                },
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 39.dp)
+                .height(16.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(role = Role.Button, onClick = onOpenModels)
+                .padding(horizontal = 4.dp),
+        ) {
+            Text(
+                text = modelName,
+                style = MiuixTheme.textStyles.footnote1.copy(
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Normal,
+                ),
+                color = modelTint,
+                maxLines = 1,
             )
-        } else if (gears.size == 1) {
-            // 只剩一档时滑块无从拖：给一个明确的选用钮，尤其当前是 OFF 时要能重新开启。
-            val only = gears[0]
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(colors.primary.copy(alpha = 0.12f), CircleShape)
-                    .border(0.5.dp, colors.primary.copy(alpha = 0.25f), CircleShape)
-                    .clickable(role = Role.Button) { onEffortChange(only) }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-            ) {
-                Text(
-                    text = solGearLabel(only) ?: "",
-                    style = MiuixTheme.textStyles.footnote1.copy(
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                    ),
-                    color = colors.primary,
+            Spacer(modifier = Modifier.width(2.dp))
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                modifier = Modifier.size(11.dp),
+                tint = modelTint,
+            )
+        }
+        // 滑块区：轨道中心在卡片顶部 76.5dp 处（64 + 25/2），触点盒高 45dp（54dp 起）。
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 54.dp)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (gears.size >= 2) {
+                EffortSlider(
+                    gears = gears,
+                    selectedIndex = previewIndex,
+                    onPreviewChange = { index ->
+                        interacted = true
+                        previewIndex = index
+                    },
+                    onRelease = { index ->
+                        val picked = gears[index]
+                        if (picked != effort) onEffortChange(picked)
+                    },
                 )
+            } else if (gears.size == 1) {
+                // 只剩一档时滑块无从拖：居中一颗选用钮，尤其当前是 OFF 时要能重新开启。
+                val only = gears[0]
+                Box(
+                    modifier = Modifier
+                        .height(25.dp)
+                        .clip(CircleShape)
+                        .background(colors.primary.copy(alpha = 0.12f), CircleShape)
+                        .border(0.5.dp, colors.primary.copy(alpha = 0.25f), CircleShape)
+                        .clickable(role = Role.Button) { onEffortChange(only) }
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = solGearLabel(only) ?: "",
+                        style = MiuixTheme.textStyles.footnote1.copy(
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                        ),
+                        color = colors.primary,
+                    )
+                }
             }
         }
-        Spacer(modifier = Modifier.height(6.dp))
     }
 }
 
 /**
- * Sol 原版 5 档滑块：手柄 29dp、轨道两侧留白 14.5dp（正好半个手柄，手柄中心对准刻度）、
- * 回弹弹簧 stiffness 560 / damping 34 / mass 0.7（换算 dampingRatio ≈ 0.86）、
- * 拖动时手柄放大 1.15（弹簧 700/30 → dampingRatio ≈ 0.57）、过刻度震动、松手吸附最近档才回调。
+ * Sol 原版 5 档滑块，长相照 app.css 的 .slider：
+ * 轨道是 25dp 粗的浅灰（#EBEBEB）胶囊，强调色填充以 scaleX 从左长到手柄处；
+ * 5 个 4dp 刻度点画在轨道里面（横向内缩 12dp 等分），已过刻度在填充上呈半透明白、未过为 #C4C4C4；
+ * 手柄是 29dp 白圆钮带阴影，在内缩 14.5dp 的轨道里走（圆心正对刻度）。
+ * 弹簧 stiffness 560 / dampingRatio ≈ 0.86（原版 damping 34 / mass 0.7），拖动放大 1.15（弹簧 700/30），
+ * 过刻度震动、松手吸附最近档才回调，轻点轨道直接跳档。
  */
 @Composable
 private fun EffortSlider(
@@ -382,16 +446,19 @@ private fun EffortSlider(
         }
     }
     val colors = MiuixTheme.colorScheme
-    val ink = colors.onSurface.copy(alpha = 1f)
+    val isDark = colors.surface.luminance() < 0.5f
+    val trackColor = if (isDark) colors.onSurface.copy(alpha = 0.14f) else Color(0xFFEBEBEB)
+    val tickIdleColor = if (isDark) colors.onSurface.copy(alpha = 0.35f) else Color(0xFFC4C4C4)
     val knobSize = 29.dp
     val railPadding = 14.5.dp
+    val tickPadding = 12.dp
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(knobSize)
+            .height(45.dp)
             .onSizeChanged { trackWidthPx = it.width }
             .pointerInput(gears) {
-                // 轻点轨道直接跳到最近档（与拖动松手同口径）：只认拖动时点按毫无反应，手感缺一截。
+                // 轻点轨道直接跳到最近档（与拖动松手同口径）。
                 detectTapGestures { offset ->
                     if (trackWidthPx <= 0) return@detectTapGestures
                     val railPaddingPx = with(density) { railPadding.toPx() }
@@ -438,36 +505,51 @@ private fun EffortSlider(
                 }
             },
     ) {
-        // 轨道
+        // 轨道胶囊 + 填充（填充宽度就是 fraction，与 Sol 的 scaleX 同口径）。
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = railPadding)
-                .height(4.dp)
+                .height(25.dp)
                 .align(Alignment.Center)
                 .clip(CircleShape)
-                .background(ink.copy(alpha = 0.12f)),
-        )
-        // 刻度点
+                .background(trackColor),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = fraction.value
+                        transformOrigin = TransformOrigin(0f, 0.5f)
+                    }
+                    .background(colors.primary, CircleShape),
+            )
+        }
+        // 刻度点：画在轨道里面，已过刻度压在填充上呈半透明白。
         gears.indices.forEach { index ->
             val tickFraction = index.toFloat() / segments
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .offset {
-                        val railPaddingPx = with(density) { railPadding.toPx() }
-                        val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(0f)
+                        val tickPaddingPx = with(density) { tickPadding.toPx() }
+                        val usable = (trackWidthPx - tickPaddingPx * 2).coerceAtLeast(0f)
                         IntOffset(
-                            x = (railPaddingPx + usable * tickFraction - with(density) { 2.dp.toPx() }).roundToInt(),
+                            x = (tickPaddingPx + usable * tickFraction - with(density) { 2.dp.toPx() }).roundToInt(),
                             y = 0,
                         )
                     }
                     .size(4.dp)
                     .clip(CircleShape)
-                    .background(ink.copy(alpha = 0.25f)),
+                    .background(
+                        if (index <= selectedIndex) {
+                            Color.White.copy(alpha = 0.62f)
+                        } else {
+                            tickIdleColor
+                        },
+                    ),
             )
         }
-        // 手柄：中心落在 fraction 对应的刻度上。
+        // 手柄：白圆钮带阴影，圆心落在 fraction 对应的刻度上。
         Box(
             modifier = Modifier
                 .align(Alignment.CenterStart)
@@ -485,50 +567,10 @@ private fun EffortSlider(
                     scaleX = knobScale
                     scaleY = knobScale
                 }
+                .shadow(4.dp, CircleShape)
                 .clip(CircleShape)
-                .background(colors.primary)
-                .border(0.5.dp, ink.copy(alpha = 0.08f), CircleShape),
+                .background(if (isDark) Color(0xFFF5F5F5) else Color.White),
         )
-    }
-}
-
-/** 底部浮层容器：COUI 走既有底部 Dialog，Miuix 走 WindowBottomSheet，与顶栏旧模型浮层同款。 */
-@Composable
-private fun ModelEffortSheetContainer(
-    show: Boolean,
-    title: String,
-    onDismiss: () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    when (LocalUiStyle.current) {
-        AppearanceUiStyle.COUI -> {
-            val dark = CouiTheme.isDark
-            Dialog(
-                visible = show,
-                onDismissRequest = onDismiss,
-                dark = dark,
-                title = title,
-                confirmAction = CouiDialogAction(
-                    text = stringResource(R.string.action_close),
-                    onClick = onDismiss,
-                ),
-                placement = CouiDialogPlacement.Bottom,
-                material = rememberCouiDialogMaterial(dark),
-                backdrop = rememberCouiWindowBackdrop(),
-            ) {
-                content()
-            }
-        }
-        AppearanceUiStyle.MIUIX -> {
-            WindowBottomSheet(
-                show = show,
-                title = title,
-                onDismissRequest = onDismiss,
-                insideMargin = DpSize(0.dp, 0.dp),
-            ) {
-                content()
-            }
-        }
     }
 }
 
