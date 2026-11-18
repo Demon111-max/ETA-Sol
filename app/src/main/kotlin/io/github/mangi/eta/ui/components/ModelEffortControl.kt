@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.components
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -48,6 +49,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -324,9 +326,10 @@ internal fun ModelEffortControl(
                                 effort = effort,
                                 modelName = modelName,
                                 onOpenModels = { sheet = ModelEffortSheet.Model },
+                                // 选档不收浮层（Sol 原版口径）：松手只落档，
+                                // 收起只走点遮罩、点药丸或返回键。
                                 onEffortChange = { picked ->
                                     onEffortChange(picked)
-                                    sheet = ModelEffortSheet.None
                                 },
                             )
                             ModelEffortSheet.Model -> SolModelList(
@@ -531,6 +534,7 @@ private fun EffortSheetContent(
     onEffortChange: (ReasoningEffort) -> Unit,
 ) {
     val colors = MiuixTheme.colorScheme
+    val density = LocalDensity.current
     // 滑块初始停靠：当前档的位置；DEFAULT 兜底 High（Sol 原版）；OFF 停第一档（拖动即开启）。
     val initialIndex = remember(gears, effort) {
         solGearIndex(effort, gears).coerceIn(0, (gears.size - 1).coerceAtLeast(0))
@@ -563,11 +567,16 @@ private fun EffortSheetContent(
             AnimatedContent(
                 targetState = bigWord,
                 transitionSpec = {
-                    (slideInVertically(tween(180)) { it } + fadeIn(tween(180)))
-                        .togetherWith(slideOutVertically(tween(180)) { -it } + fadeOut(tween(120)))
+                    // 滑动行程照 Sol 原版是 ±10dp（不是整词高度）；且不许裁剪，
+                    // 词在滑动中要完整露出（Sol 的 .effort__value 就是 overflow: visible）。
+                    val travel = with(density) { 10.dp.roundToPx() }
+                    (slideInVertically(tween(180)) { travel } + fadeIn(tween(180)))
+                        .togetherWith(slideOutVertically(tween(180)) { -travel } + fadeOut(tween(120)))
                 },
+                sizeTransform = SizeTransform(clip = false) { _, _ -> tween(180) },
                 label = "effort_big_word",
                 contentAlignment = Alignment.Center,
+                modifier = Modifier.fillMaxWidth(),
             ) { word ->
                 Text(
                     text = word,
@@ -699,6 +708,9 @@ private fun EffortSlider(
     val knobSize = 29.dp
     val railPadding = 14.5.dp
     val tickPadding = 12.dp
+    // 震动口径：手柄真正跨进一个新档位时才震一次。手势回调里必须读最新档位，
+    // 不能用 pointerInput 捕获的旧值——旧值会让「停在别的档区间里」被反复判定成跨档、动一下就震。
+    val currentIndex by rememberUpdatedState(selectedIndex)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -717,6 +729,9 @@ private fun EffortSlider(
                             targetValue = index.toFloat() / segments,
                             animationSpec = spring(dampingRatio = 0.86f, stiffness = 560f),
                         )
+                    }
+                    if (index != currentIndex) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     }
                     onPreviewChange(index)
                     onRelease(index)
@@ -745,7 +760,7 @@ private fun EffortSlider(
                     val next = ((change.position.x - railPaddingPx) / usable).coerceIn(0f, 1f)
                     scope.launch { fraction.snapTo(next) }
                     val index = (next * segments).roundToInt().coerceIn(0, gears.lastIndex)
-                    if (index != selectedIndex) {
+                    if (index != currentIndex) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     }
                     onPreviewChange(index)
