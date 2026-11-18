@@ -193,6 +193,8 @@ internal fun AgentChatInputBar(
     val density = LocalDensity.current
     val statusBarTopPx = WindowInsets.statusBars.getTop(density)
     var inputContainerTopPx by remember { mutableIntStateOf(0) }
+    // 输入卡片右边缘的窗口横坐标：合并控件的浮层右边缘要与它对齐（Sol 锚点公式），量好后传给控件。
+    var inputCardRightPx by remember { mutableIntStateOf(0) }
     val thinkingPopupMaxHeight = with(density) {
         (inputContainerTopPx - statusBarTopPx).coerceAtLeast(0).toDp()
     }.minus(ChatInputPopupMargin * 2)
@@ -324,6 +326,10 @@ internal fun AgentChatInputBar(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .onGloballyPositioned { coordinates ->
+                        inputCardRightPx =
+                            (coordinates.positionInWindow().x + coordinates.size.width).roundToInt()
+                    }
                     .then(
                         if (isCoui) {
                             Modifier
@@ -465,6 +471,7 @@ internal fun AgentChatInputBar(
                                     availableEfforts = availableReasoningEfforts,
                                     enabled = !isStreaming,
                                     onEffortChange = onReasoningEffortChange,
+                                    sheetRightEdgeWindowPx = inputCardRightPx,
                                 )
                                 Spacer(modifier = Modifier.width(2.dp))
                             } else if (availableReasoningEfforts.isNotEmpty()) {
