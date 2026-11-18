@@ -52,7 +52,7 @@ class AgentModelPickerProjectorTest {
     }
 
     @Test
-    fun project_hidesProvidersWithoutApiKeyButPreservesCurrentSelection() {
+    fun project_hidesProvidersWithoutApiKeyExceptSelectedModelsProvider() {
         val selected = model(id = "selected", displayName = "Selected")
         val result = AgentModelPickerProjector.project(
             providers = listOf(
@@ -70,7 +70,13 @@ class AgentModelPickerProjectorTest {
             selectedModelId = selected.id,
         )
 
-        assertEquals(listOf("configured"), result.providerGroups.map { it.providerId })
+        // 无 Key 的服务商照旧隐藏，但当前选中模型所属的除外：它必须留在列表里，
+        // 否则药丸显示着这个模型、列表里却没有它的行和勾（3.4.47 审计问题 18）。
+        assertEquals(listOf("missing-key", "configured"), result.providerGroups.map { it.providerId })
+        assertEquals(
+            listOf(selected.id),
+            result.providerGroups.first { it.providerId == "missing-key" }.models.map { it.id },
+        )
         assertEquals(selected.id, result.selectedModel?.id)
         assertEquals("missing-key", result.selectedModel?.providerId)
     }

@@ -3,6 +3,8 @@ package io.github.mangi.eta.ui.components
 import io.github.mangi.eta.ui.model.ConversationModeUi
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
 import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -23,7 +25,7 @@ class ConversationDrawerGroupingTest {
 
     @Test
     fun sameDayConversationsWithDifferentTimestampsShareOneDayGroup() {
-        val now = System.currentTimeMillis()
+        val now = todayNoonMillis()
         val conversations = listOf(
             conversation(id = "conv-a", updatedAtMillis = now),
             // 同一天里更早的时刻：3.4.43 就是这一条把「今天」裂成了两组。
@@ -47,7 +49,7 @@ class ConversationDrawerGroupingTest {
 
     @Test
     fun sectionKeysAreUniqueAcrossAllGroups() {
-        val now = System.currentTimeMillis()
+        val now = todayNoonMillis()
         val day = TimeUnit.DAYS.toMillis(1)
         val conversations = listOf(
             conversation(id = "pinned-1", updatedAtMillis = now, isPinned = true),
@@ -69,7 +71,7 @@ class ConversationDrawerGroupingTest {
 
     @Test
     fun pinnedConversationsStayInSinglePinnedGroup() {
-        val now = System.currentTimeMillis()
+        val now = todayNoonMillis()
         val conversations = listOf(
             conversation(id = "pinned-1", updatedAtMillis = now, isPinned = true),
             conversation(id = "pinned-2", updatedAtMillis = now - TimeUnit.DAYS.toMillis(3), isPinned = true),
@@ -82,6 +84,17 @@ class ConversationDrawerGroupingTest {
         val pinnedGroup = groups.first { it.section == ConversationDrawerSection.Pinned }
         assertEquals(listOf("pinned-1", "pinned-2"), pinnedGroup.items.map { it.id })
     }
+
+    /**
+     * 时间锚点固定在本地正午：用 System.currentTimeMillis() 加减几小时推「同一天」，
+     * 在午夜后几小时内跑测试就会跨到前一天、组数多 1（2026-11-19 00:0x 实测踩中）。
+     */
+    private fun todayNoonMillis(): Long =
+        LocalDate.now(ZoneId.systemDefault())
+            .atTime(LocalTime.NOON)
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
 
     private fun expectedDayKey(timestampMillis: Long): String {
         val epochDay = Instant.ofEpochMilli(timestampMillis)

@@ -17,8 +17,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,7 +63,10 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.changedToUpOrCanceled
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
@@ -74,6 +77,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -715,6 +719,8 @@ private fun EffortSheetContent(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier.fillMaxWidth(),
             ) { word ->
+                // 必须显式居中：AnimatedContent 会把整宽约束传给内容，
+                // Text 默认靠左绘制，不写 textAlign 词会跑到左边（3.4.48 真机实证）。
                 Text(
                     text = word,
                     style = MiuixTheme.textStyles.footnote1.copy(
@@ -724,6 +730,8 @@ private fun EffortSheetContent(
                     ),
                     color = colors.primary,
                     maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
@@ -822,18 +830,21 @@ private fun EffortSlider(
 ) {
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
     val segments = (gears.size - 1).coerceAtLeast(1)
     val fraction = remember { Animatable(selectedIndex.toFloat() / segments) }
     var trackWidthPx by remember { mutableStateOf(0) }
     var dragging by remember { mutableStateOf(false) }
+    var gestureActive by remember { mutableStateOf(false) }
     val knobScale by animateFloatAsState(
         targetValue = if (dragging) 1.15f else 1f,
         animationSpec = spring(dampingRatio = 0.57f, stiffness = 700f),
         label = "effort_knob_scale",
     )
-    LaunchedEffect(selectedIndex, dragging) {
-        if (!dragging) {
+    // fraction 的动画只有一个驱动者：本 effect 在非手势期把手柄对齐到 selectedIndex。
+    // 手势协程只做 snapTo（跟手）和回调，绝不自己 launch 动画——旧实现里手势回调
+    // scope.launch 的游离 animateTo 与本 effect 互相取消，是手柄卡在半路的元凶。
+    LaunchedEffect(selectedIndex, gestureActive) {
+        if (!gestureActive) {
             fraction.animateTo(
                 targetValue = selectedIndex.toFloat() / segments,
                 animationSpec = spring(dampingRatio = 0.86f, stiffness = 560f),
@@ -860,56 +871,72 @@ private fun EffortSlider(
             .height(45.dp)
             .onGloballyPositioned { trackWidthPx = it.size.width }
             .pointerInput(gears) {
-                // 轻点轨道直接跳到最近档（与拖动松手同口径）。
-                detectTapGestures { offset ->
-                    if (!latestEnabled || trackWidthPx <= 0) return@detectTapGestures
+                // 点按与拖动共用一条手势回路。旧实现是两个 pointerInput 分别跑
+                // detectTapGestures / detectDragGestures：两套检测器抢同一串事件，
+                // 点按落档会被拖动检测器干扰而丢失——真机实证：点 Light 位置，
+                // 手柄滑过去又弹回原档、档位词也不变（3.4.48 修复）。
+                // 单回路口径：按下先记落点；移动过 touchSlop 才算拖动，拖动中手柄
+                // 在本协程内直接 snapTo 跟手、跨档震一次并报预览；抬手按最终位置
+                // 落档（点按 = 没拖动过、按抬手位置算最近档），回调完成后才放开
+                // gestureActive，让对齐 effect 把手柄弹簧到落定档位。
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    if (!latestEnabled || trackWidthPx <= 0) return@awaitEachGesture
                     val railPaddingPx = with(density) { railPadding.toPx() }
-                    val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(1f)
-                    val tapped = ((offset.x - railPaddingPx) / usable).coerceIn(0f, 1f)
-                    val index = (tapped * segments).roundToInt().coerceIn(0, gears.lastIndex)
-                    scope.launch {
-                        fraction.animateTo(
-                            targetValue = index.toFloat() / segments,
-                            animationSpec = spring(dampingRatio = 0.86f, stiffness = 560f),
-                        )
+                    fun fractionForX(x: Float): Float {
+                        val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(1f)
+                        return ((x - railPaddingPx) / usable).coerceIn(0f, 1f)
                     }
-                    if (index != hapticIndex.intValue) {
-                        hapticIndex.intValue = index
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    }
-                    onPreviewChange(index)
-                    onRelease(index)
-                }
-            }
-            .pointerInput(gears) {
-                detectDragGestures(
-                    onDragStart = { if (latestEnabled) dragging = true },
-                    onDragEnd = {
-                        dragging = false
-                        if (!latestEnabled) return@detectDragGestures
-                        val index = (fraction.value * segments).roundToInt()
-                            .coerceIn(0, gears.lastIndex)
-                        scope.launch {
-                            fraction.animateTo(
-                                targetValue = index.toFloat() / segments,
-                                animationSpec = spring(dampingRatio = 0.86f, stiffness = 560f),
-                            )
+                    fun indexForX(x: Float): Int =
+                        (fractionForX(x) * segments).roundToInt().coerceIn(0, gears.lastIndex)
+                    gestureActive = true
+                    var dragged = false
+                    var lastIndex = indexForX(down.position.x)
+                    var upX = down.position.x
+                    var released = false
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                            if (change.changedToUpOrCanceled()) {
+                                upX = change.position.x
+                                // 被系统取消（不是用户抬手）不落档，手柄由对齐 effect 弹回原档。
+                                released = change.changedToUp()
+                                break
+                            }
+                            if (change.positionChanged()) {
+                                change.consume()
+                                if (!dragged &&
+                                    (change.position - down.position).getDistance() > viewConfiguration.touchSlop
+                                ) {
+                                    dragged = true
+                                    dragging = true
+                                }
+                                if (dragged) {
+                                    fraction.snapTo(fractionForX(change.position.x))
+                                    val index = indexForX(change.position.x)
+                                    lastIndex = index
+                                    if (index != hapticIndex.intValue) {
+                                        hapticIndex.intValue = index
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
+                                    onPreviewChange(index)
+                                }
+                            }
                         }
-                        onRelease(index)
-                    },
-                    onDragCancel = { dragging = false },
-                ) { change, _ ->
-                    if (!latestEnabled || trackWidthPx <= 0) return@detectDragGestures
-                    val railPaddingPx = with(density) { railPadding.toPx() }
-                    val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(1f)
-                    val next = ((change.position.x - railPaddingPx) / usable).coerceIn(0f, 1f)
-                    scope.launch { fraction.snapTo(next) }
-                    val index = (next * segments).roundToInt().coerceIn(0, gears.lastIndex)
-                    if (index != hapticIndex.intValue) {
-                        hapticIndex.intValue = index
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        if (released && latestEnabled) {
+                            val finalIndex = if (dragged) lastIndex else indexForX(upX)
+                            if (finalIndex != hapticIndex.intValue) {
+                                hapticIndex.intValue = finalIndex
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            onPreviewChange(finalIndex)
+                            onRelease(finalIndex)
+                        }
+                    } finally {
+                        dragging = false
+                        gestureActive = false
                     }
-                    onPreviewChange(index)
                 }
             },
     ) {
