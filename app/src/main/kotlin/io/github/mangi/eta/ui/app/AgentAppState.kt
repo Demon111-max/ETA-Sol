@@ -226,12 +226,31 @@ internal class AgentAppState(
      * 会话绑定的模型仍可用时用它，否则用默认模型。回落只影响显示与发送，不改写会话绑定，
      * 模型重新启用后会话自动回到原模型；真正发送后才把实际模型写入绑定。
      */
+    // 会话绑定模型失效（被删/被禁用）时已经提醒过的模型 id：流程会反复发射，
+    // 同一个失效只弹一次提示（3.4.47 审计问题 17：此前只有载入会话的路径会提示，
+    // 在设置里删掉正在用的模型时是静默换掉的）。
+    private var unavailableModelNotifiedId: String? = null
+
     private fun refreshConversationModel() {
         val bound = providers.enabledModel(homeState.modelId)
         val pickerState = if (bound != null) {
             AgentModelPickerProjector.project(providers, bound.provider.id, bound.model.id)
         } else {
             AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
+        }
+        if (bound != null) {
+            unavailableModelNotifiedId = null
+        } else if (homeState.isConversationLoaded && homeState.modelId != null &&
+            unavailableModelNotifiedId != homeState.modelId
+        ) {
+            unavailableModelNotifiedId = homeState.modelId
+            pickerState.selectedModel?.let { fallback ->
+                Toast.makeText(
+                    appContext,
+                    appContext.getString(R.string.conversation_model_unavailable, fallback.displayName),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
         }
         modelPickerState = pickerState.copy(isChanging = modelPickerState.isChanging)
         forgeModelPickerState = AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
@@ -873,13 +892,6 @@ internal class AgentAppState(
                 if (conversationSelectionVersion != selectionVersion) return@launch
                 refreshConversationModel()
                 if (homeState.roleplayMessages.pendingRewrites.isNotEmpty()) refreshRuntimeResults()
-                if (homeState.modelId != null && providers.enabledModel(homeState.modelId) == null) {
-                    modelPickerState.selectedModel?.let { fallback ->
-                        Toast.makeText(appContext, appContext.getString(
-                            R.string.conversation_model_unavailable, fallback.displayName,
-                        ), Toast.LENGTH_SHORT).show()
-                    }
-                }
                 persistConversations()
             } catch (cancelled: CancellationException) {
                 throw cancelled

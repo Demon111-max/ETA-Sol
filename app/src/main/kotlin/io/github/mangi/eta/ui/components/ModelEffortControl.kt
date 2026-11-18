@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,6 +59,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -68,15 +71,22 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.AgentModelPickerUiState
@@ -104,7 +114,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  *   阴影照 --shadow-knob（0 1px 4px rgba(15,15,15,0.22) + 1px 圈 rgba(15,15,15,0.04)）；
  *   手柄弹簧 stiffness 560 / damping 34 / mass 0.7（dampingRatio ≈ 0.86），拖动放大 1.15、
  *   过刻度震动、松手吸附最近档才回调，轻点轨道直接跳档；
- * - 模型浮层：顶部提示行 "Select model"（高 28dp、10sp、灰字），下面是拍平的模型行
+ * - 模型浮层：顶部提示行（文案走资源 model_picker_title，高 28dp、10sp、灰字），下面是拍平的模型行
  *   （最小高 34dp、11.5sp，模型名完整显示，后跟 "·" + 分组，分组放不下省略，当前行右侧打勾），
  *   数据仍读同一份 [AgentModelPickerUiState]、仍走同一个 onModelSelected，不另起数据源。
  *
@@ -128,6 +138,9 @@ internal fun ModelEffortControl(
     // 输入卡片右边缘在窗口中的横坐标（px）：浮层右边缘要与它对齐（Sol 锚点公式）。
     // 由输入栏量好传入；为 0（还没量到）时退回与药丸右边缘对齐。
     sheetRightEdgeWindowPx: Int = 0,
+    // 浮层关闭时回调一次：浮层是可聚焦弹窗、开着时会把软键盘顶掉，
+    // 关闭后由输入栏把焦点还给输入框（3.4.47 审计问题 6）。
+    onSheetClosed: () -> Unit = {},
 ) {
     val gears = remember(availableEfforts) { solEffortGears(availableEfforts) }
     var sheet by remember { mutableStateOf(ModelEffortSheet.None) }
@@ -167,16 +180,38 @@ internal fun ModelEffortControl(
     var anchorWidthPx by remember { mutableStateOf(0) }
     var anchorHeightPx by remember { mutableStateOf(0) }
     val statusBarTopPx = WindowInsets.statusBars.getTop(density)
-    // 模型浮层高度上限（Sol 锚点公式）：药丸上沿 − 间隙 5 − 状态栏下沿 − 8，最小 120dp。
+    // 模型浮层高度上限（Sol 锚点公式）：药丸上沿 − 间隙 5 − 状态栏下沿 − 8。
+    // 不设 120dp 下限：横屏/分屏 + 键盘时可用高度可能不足 120dp，
+    // 硬下限会把浮层顶出屏幕上沿（3.4.47 审计问题 19）。
     val modelSheetMaxHeight = with(density) {
         ((anchorTopPx - statusBarTopPx).coerceAtLeast(0).toDp() - 5.dp - 8.dp)
-            .coerceAtLeast(120.dp)
+            .coerceAtLeast(0.dp)
     }
 
     // 浮层进出场：renderedSheet 是实际在画的那张（退场动画播完才撤），sheet 是目标状态。
     var renderedSheet by remember { mutableStateOf(ModelEffortSheet.None) }
     var exiting by remember { mutableStateOf(false) }
     val sheetProgress = remember { Animatable(0f) }
+    // 选模型确认反馈（旧选择器口径，3.4.47 审计问题 14）：点行先把勾落到新行上，
+    // 140ms 后才真正回调并收起，让用户看清自己选中了哪个。
+    val sheetScope = rememberCoroutineScope()
+    var pickedModelId by remember { mutableStateOf<String?>(null) }
+    var pickJob by remember { mutableStateOf<Job?>(null) }
+    // 档位↔模型内容切换的 160ms 内，旧内容不许再接手势（审计问题 12），用一层罩子吃掉。
+    var contentSwitching by remember { mutableStateOf(false) }
+    var lastRenderedSheet by remember { mutableStateOf(ModelEffortSheet.None) }
+    LaunchedEffect(renderedSheet) {
+        val previous = lastRenderedSheet
+        lastRenderedSheet = renderedSheet
+        if (previous != ModelEffortSheet.None &&
+            renderedSheet != ModelEffortSheet.None &&
+            previous != renderedSheet
+        ) {
+            contentSwitching = true
+            delay(170)
+            contentSwitching = false
+        }
+    }
     LaunchedEffect(sheet) {
         if (sheet != ModelEffortSheet.None) {
             renderedSheet = sheet
@@ -186,6 +221,7 @@ internal fun ModelEffortControl(
                 animationSpec = spring(dampingRatio = 0.93f, stiffness = 480f),
             )
         } else if (renderedSheet != ModelEffortSheet.None) {
+            onSheetClosed()
             exiting = true
             sheetProgress.animateTo(
                 targetValue = 0f,
@@ -193,6 +229,8 @@ internal fun ModelEffortControl(
             )
             if (sheet == ModelEffortSheet.None) {
                 renderedSheet = ModelEffortSheet.None
+                pickedModelId = null
+                pickJob = null
             }
         }
     }
@@ -225,8 +263,8 @@ internal fun ModelEffortControl(
                     enabled = clickable,
                     role = Role.Button,
                     onClick = {
-                        // 照 Sol：点药丸先进档位浮层，再点一次同一入口收起；
-                        // 一档都没有（思考不支持/被关）才直达模型浮层。
+                        // 点药丸打开浮层：一档都没有（思考不支持/被关）才直达模型浮层。
+                        // 浮层开着时药丸被遮罩盖住，再点药丸所在位置实际点到的是遮罩、同样收起。
                         val target = if (canPickEffort) {
                             ModelEffortSheet.Effort
                         } else {
@@ -252,23 +290,33 @@ internal fun ModelEffortControl(
             )
         }
 
-        if (modelPickerState != null && renderedSheet != ModelEffortSheet.None) {
-            // 遮罩：rgba(13,13,13,0.06)，160ms 淡入淡出，点击关闭（Sol .sheet-backdrop）。
+        if (modelPickerState != null && (sheet != ModelEffortSheet.None || scrimAlpha > 0.01f)) {
+            // 遮罩（Sol .sheet-backdrop）：独立窗口、左上角固定在窗口原点，不许锚到药丸上——
+            // 锚到药丸时整屏压暗会退化成右下角一小块（3.4.47 审计问题 1）。
+            // 浅色照 Sol 的 rgba(13,13,13,0.06)；深色下 6% 黑几乎压不动，改 30%（问题 4）。
+            // 退场只跟 160ms 淡出、淡完即撤窗口，不陪卡片弹簧吃点击（问题 11）。
             Popup(
-                alignment = Alignment.TopStart,
+                popupPositionProvider = WindowOriginPositionProvider,
                 onDismissRequest = { sheet = ModelEffortSheet.None },
                 properties = PopupProperties(focusable = false),
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF0D0D0D).copy(alpha = 0.06f * scrimAlpha))
+                        .background(
+                            Color(0xFF0D0D0D).copy(
+                                alpha = (if (isDark) 0.30f else 0.06f) * scrimAlpha,
+                            ),
+                        )
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
                         ) { sheet = ModelEffortSheet.None },
                 )
             }
+        }
+
+        if (modelPickerState != null && renderedSheet != ModelEffortSheet.None) {
             // 浮层卡片：右边缘对齐输入卡片右边缘，底边在药丸上沿上方 5dp（Sol 锚点公式）。
             val anchorRightPx = anchorLeftPx + anchorWidthPx
             val shiftX = if (sheetRightEdgeWindowPx > 0) {
@@ -276,36 +324,44 @@ internal fun ModelEffortControl(
             } else {
                 0
             }
+            // 档位卡固定高 104dp：横屏/分屏 + 键盘时药丸上方可能不足 104+5dp，
+            // 整体下移兜底、顶边不许越过状态栏下 8dp（3.4.47 审计问题 20）。
+            // 模型卡高度已被 maxHeight 卡在同一条线内，不需要下移。
+            val topClampPx = if (renderedSheet == ModelEffortSheet.Effort) {
+                val minTopPx = statusBarTopPx + with(density) { 8.dp.roundToPx() }
+                val cardTopPx = anchorTopPx - with(density) { 5.dp.roundToPx() } -
+                    with(density) { 104.dp.roundToPx() }
+                (minTopPx - cardTopPx).coerceAtLeast(0)
+            } else {
+                0
+            }
             Popup(
                 alignment = Alignment.BottomEnd,
                 offset = IntOffset(
                     x = shiftX,
-                    y = -(anchorHeightPx + with(density) { 5.dp.roundToPx() }),
+                    y = -(anchorHeightPx + with(density) { 5.dp.roundToPx() }) + topClampPx,
                 ),
                 onDismissRequest = { sheet = ModelEffortSheet.None },
                 properties = PopupProperties(focusable = true),
             ) {
-                val progress = sheetProgress.value
-                val translateYDp = if (exiting) {
-                    (1f - progress) * 8f
-                } else {
-                    (1f - progress) * 10f
-                }
-                val scale = if (exiting) {
-                    0.98f + 0.02f * progress
-                } else {
-                    0.97f + 0.03f * progress
-                }
                 SolSheetCard(
+                    // 进度在绘制层读：动画每帧只重绘、不整卡重组（审计问题 26）。
                     modifier = Modifier.graphicsLayer {
+                        val progress = sheetProgress.value
                         alpha = progress
-                        translationY = with(density) { translateYDp.dp.toPx() }
+                        translationY = (1f - progress) * if (exiting) 8.dp.toPx() else 10.dp.toPx()
+                        val scale = if (exiting) {
+                            0.98f + 0.02f * progress
+                        } else {
+                            0.97f + 0.03f * progress
+                        }
                         scaleX = scale
                         scaleY = scale
                         transformOrigin = TransformOrigin(1f, 1f)
                     },
                 ) {
-                    AnimatedContent(
+                    Box {
+                        AnimatedContent(
                         targetState = renderedSheet,
                         transitionSpec = {
                             // 去模型浮层：内容从右 8dp 滑入、旧内容向右 8dp 滑出；回档位浮层镜像（Sol 原版方向）。
@@ -325,9 +381,10 @@ internal fun ModelEffortControl(
                                 gears = gears,
                                 effort = effort,
                                 modelName = modelName,
+                                enabled = enabled,
                                 onOpenModels = { sheet = ModelEffortSheet.Model },
                                 // 选档不收浮层（Sol 原版口径）：松手只落档，
-                                // 收起只走点遮罩、点药丸或返回键。
+                                // 收起只走点遮罩（含药丸所在位置，打开时药丸被遮罩盖住）或返回键。
                                 onEffortChange = { picked ->
                                     onEffortChange(picked)
                                 },
@@ -335,12 +392,37 @@ internal fun ModelEffortControl(
                             ModelEffortSheet.Model -> SolModelList(
                                 state = modelPickerState,
                                 maxHeight = modelSheetMaxHeight,
+                                confirmedModelId = pickedModelId,
                                 onModelSelected = { modelId ->
-                                    sheet = ModelEffortSheet.None
-                                    onModelSelected(modelId)
+                                    // 先把勾落到新行上（SolModelList 读 confirmedModelId），
+                                    // 140ms 后才回调并收起（审计问题 14）。
+                                    if (pickJob?.isActive != true) {
+                                        pickedModelId = modelId
+                                        pickJob = sheetScope.launch {
+                                            delay(140)
+                                            sheet = ModelEffortSheet.None
+                                            onModelSelected(modelId)
+                                        }
+                                    }
                                 },
                             )
                             ModelEffortSheet.None -> Box(modifier = Modifier.size(1.dp))
+                        }
+                        }
+                        // 退场与内容切换期间罩住整卡吃掉手势：透明层不可再点，
+                        // 不许静默改档/切模型（审计问题 11、12）。
+                        if (exiting || contentSwitching) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .pointerInput(Unit) {
+                                        awaitPointerEventScope {
+                                            while (true) {
+                                                awaitPointerEvent().changes.forEach { it.consume() }
+                                            }
+                                        }
+                                    },
+                            )
                         }
                     }
                 }
@@ -350,6 +432,16 @@ internal fun ModelEffortControl(
 }
 
 private enum class ModelEffortSheet { None, Model, Effort }
+
+/** 遮罩专用定位：弹窗窗口左上角固定在窗口原点，与锚点（药丸）位置无关。 */
+private object WindowOriginPositionProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset = IntOffset.Zero
+}
 
 /** 浮层切换缓动（Sol 原版 cubic-bezier(0.16, 1, 0.3, 1)）。 */
 private val SheetSwitchEase = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
@@ -368,6 +460,9 @@ private fun SolSheetCard(
     val isDark = colors.surface.luminance() < 0.5f
     val shape = RoundedCornerShape(18.dp)
     val shadowInk = Color(0xFF0F0F0F)
+    // 深色/纯黑下页面底色与卡片同为 surface（纯黑下同为纯黑），卡片会糊在页面上：
+    // 深色时把卡片底色往白提 7% 做出层次，边框也加深（3.4.47 审计问题 2、3）。
+    val cardColor = if (isDark) lerp(colors.surface, Color.White, 0.07f) else colors.surface
     Box(
         modifier = modifier
             .width(270.dp)
@@ -387,10 +482,10 @@ private fun SolSheetCard(
                     spotColor = shadowInk.copy(alpha = 0.05f),
                 )
                 .clip(shape)
-                .background(colors.surface)
+                .background(cardColor)
                 .border(
                     width = 1.dp,
-                    color = colors.onSurface.copy(alpha = if (isDark) 0.12f else 0.08f),
+                    color = colors.onSurface.copy(alpha = if (isDark) 0.16f else 0.08f),
                     shape = shape,
                 ),
         ) {
@@ -401,24 +496,34 @@ private fun SolSheetCard(
 
 /**
  * 模型浮层内容，照 Sol 的 ModelSheet（Sheets.tsx）与 .sheet--model / .modelrow / .sheet__hint（app.css）：
- * 卡片上下内边距 6dp；提示行 "Select model" 高 28dp、10sp、灰字、左右 12dp；
- * 模型行最小高 34dp、左右 12dp、11.5sp：模型名完整显示，后跟灰色 "·"（左右各 4dp）+ 分组名（放不下省略），
- * 当前选中行右侧 32dp 宽的格子里打勾（14dp）。点行即选中并收起。
+ * 卡片上下内边距 6dp；提示行（文案走资源 model_picker_title）高 28dp、10sp、灰字、左右 12dp；
+ * 模型行最小高 34dp、左右 12dp、11.5sp：模型名在前（放不下省略），后跟灰色 "·"（左右各 4dp）+ 分组名（放不下省略），
+ * 当前选中行右侧 32dp 宽的格子里打勾（14dp、强调色）。只有一个服务商时不重复显示服务商名。
+ * 打开时列表定位到当前模型（旧选择器口径）；点行先落勾、140ms 后才回调收起（回调在控件层）。
  * 数据只读传入的 [state]、选择只走 onModelSelected，与设置页/顶栏共用同一份选择口径，不另起一份。
  */
 @Composable
 private fun SolModelList(
     state: AgentModelPickerUiState,
     maxHeight: Dp,
+    confirmedModelId: String?,
     onModelSelected: (String) -> Unit,
 ) {
     val colors = MiuixTheme.colorScheme
-    val gray = colors.onSurface.copy(alpha = 0.55f)
+    val isDark = colors.surface.luminance() < 0.5f
+    // 次要文字：浅色用 Sol 的 --text-3（#6b6b6b，对比约 5:1）；深色用 onSurface 55%。
+    val gray = if (isDark) colors.onSurface.copy(alpha = 0.55f) else Color(0xFF6B6B6B)
     val rows = remember(state.providerGroups) {
         state.providerGroups.flatMap { group ->
             group.models.map { model -> group.providerName to model }
         }
     }
+    val showProvider = state.providerGroups.size > 1
+    val selectedId = confirmedModelId ?: state.selectedModel?.id
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = rows.indexOfFirst { it.second.id == selectedId }
+            .coerceAtLeast(0),
+    )
     Column(
         modifier = Modifier
             .width(270.dp)
@@ -433,7 +538,7 @@ private fun SolModelList(
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
-                text = "Select model",
+                text = stringResource(R.string.model_picker_title),
                 style = MiuixTheme.textStyles.footnote1.copy(
                     fontSize = 10.sp,
                     letterSpacing = 0.1.sp,
@@ -442,16 +547,35 @@ private fun SolModelList(
                 maxLines = 1,
             )
         }
+        if (rows.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(34.dp)
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    text = stringResource(R.string.model_picker_empty),
+                    style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.5.sp),
+                    color = gray,
+                    maxLines = 1,
+                )
+            }
+        }
         LazyColumn(
+            state = listState,
             modifier = Modifier.weight(1f, fill = false),
         ) {
             items(rows, key = { "${it.second.providerId}/${it.second.id}" }) { (providerName, model) ->
+                val isSelected = model.id == selectedId
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 34.dp)
                         .clickable(role = Role.Button) { onModelSelected(model.id) }
+                        .semantics { selected = isSelected }
                         .padding(horizontal = 12.dp),
                 ) {
                     Text(
@@ -459,32 +583,36 @@ private fun SolModelList(
                         style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.5.sp),
                         color = colors.onSurface,
                         maxLines = 1,
-                    )
-                    Text(
-                        text = "·",
-                        style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.5.sp),
-                        color = gray,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                    )
-                    Text(
-                        text = providerName,
-                        style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.5.sp),
-                        color = gray,
-                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(2f, fill = false),
                     )
-                    if (model.id == state.selectedModel?.id) {
+                    if (showProvider) {
+                        Text(
+                            text = "·",
+                            style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.5.sp),
+                            color = gray,
+                            maxLines = 1,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                        Text(
+                            text = providerName,
+                            style = MiuixTheme.textStyles.footnote1.copy(fontSize = 11.5.sp),
+                            color = gray,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    }
+                    if (isSelected) {
                         Box(
                             modifier = Modifier.width(32.dp),
                             contentAlignment = Alignment.CenterEnd,
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Check,
-                                contentDescription = null,
+                                contentDescription = stringResource(R.string.ui_current_model_a0af8f),
                                 modifier = Modifier.size(14.dp),
-                                tint = colors.onSurface,
+                                tint = colors.primary,
                             )
                         }
                     }
@@ -530,6 +658,7 @@ private fun EffortSheetContent(
     gears: List<ReasoningEffort>,
     effort: ReasoningEffort,
     modelName: String,
+    enabled: Boolean,
     onOpenModels: () -> Unit,
     onEffortChange: (ReasoningEffort) -> Unit,
 ) {
@@ -547,7 +676,13 @@ private fun EffortSheetContent(
         gears.isEmpty() -> ""
         else -> solGearLabel(gears[previewIndex]) ?: ""
     }
-    val modelTint = colors.onSurface.copy(alpha = 0.55f)
+    // 模型名灰字：浅色用 Sol 的 --text-3（#6b6b6b），深色用 onSurface 55%（审计问题 25）。
+    val isDarkSheet = colors.surface.luminance() < 0.5f
+    val modelTint = if (isDarkSheet) {
+        colors.onSurface.copy(alpha = 0.55f)
+    } else {
+        Color(0xFF6B6B6B)
+    }
 
     Box(
         modifier = Modifier
@@ -569,11 +704,13 @@ private fun EffortSheetContent(
                 transitionSpec = {
                     // 滑动行程照 Sol 原版是 ±10dp（不是整词高度）；且不许裁剪，
                     // 词在滑动中要完整露出（Sol 的 .effort__value 就是 overflow: visible）。
+                    // 不裁剪要靠 ContentTransform.using(SizeTransform(clip=false))——
+                    // AnimatedContent 没有 sizeTransform 形参（3.4.47 审计 P0）。
                     val travel = with(density) { 10.dp.roundToPx() }
                     (slideInVertically(tween(180)) { travel } + fadeIn(tween(180)))
                         .togetherWith(slideOutVertically(tween(180)) { -travel } + fadeOut(tween(120)))
+                        .using(SizeTransform(clip = false) { _, _ -> tween(180) })
                 },
-                sizeTransform = SizeTransform(clip = false) { _, _ -> tween(180) },
                 label = "effort_big_word",
                 contentAlignment = Alignment.Center,
                 modifier = Modifier.fillMaxWidth(),
@@ -629,6 +766,7 @@ private fun EffortSheetContent(
                 EffortSlider(
                     gears = gears,
                     selectedIndex = previewIndex,
+                    enabled = enabled,
                     onPreviewChange = { index ->
                         interacted = true
                         previewIndex = index
@@ -647,7 +785,7 @@ private fun EffortSheetContent(
                         .clip(CircleShape)
                         .background(colors.primary.copy(alpha = 0.12f), CircleShape)
                         .border(0.5.dp, colors.primary.copy(alpha = 0.25f), CircleShape)
-                        .clickable(role = Role.Button) { onEffortChange(only) }
+                        .clickable(role = Role.Button) { if (enabled) onEffortChange(only) }
                         .padding(horizontal = 14.dp),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -678,6 +816,7 @@ private fun EffortSheetContent(
 private fun EffortSlider(
     gears: List<ReasoningEffort>,
     selectedIndex: Int,
+    enabled: Boolean,
     onPreviewChange: (Int) -> Unit,
     onRelease: (Int) -> Unit,
 ) {
@@ -708,9 +847,13 @@ private fun EffortSlider(
     val knobSize = 29.dp
     val railPadding = 14.5.dp
     val tickPadding = 12.dp
-    // 震动口径：手柄真正跨进一个新档位时才震一次。手势回调里必须读最新档位，
-    // 不能用 pointerInput 捕获的旧值——旧值会让「停在别的档区间里」被反复判定成跨档、动一下就震。
-    val currentIndex by rememberUpdatedState(selectedIndex)
+    // 震动口径：手柄真正跨进一个新档位时才震一次。判定值在回调里同步更新，
+    // 同一帧内连发多个 move 事件也不会对同一档重复震（3.4.47 审计问题 27）；
+    // 外部改档（不是手势触发）时由 LaunchedEffect(selectedIndex) 拉齐。
+    val hapticIndex = remember { mutableIntStateOf(selectedIndex) }
+    LaunchedEffect(selectedIndex) { hapticIndex.intValue = selectedIndex }
+    // 流式开始等禁用态：浮层开着时药丸已被门控，浮层内的滑块同样不许改档。
+    val latestEnabled by rememberUpdatedState(enabled)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -719,7 +862,7 @@ private fun EffortSlider(
             .pointerInput(gears) {
                 // 轻点轨道直接跳到最近档（与拖动松手同口径）。
                 detectTapGestures { offset ->
-                    if (trackWidthPx <= 0) return@detectTapGestures
+                    if (!latestEnabled || trackWidthPx <= 0) return@detectTapGestures
                     val railPaddingPx = with(density) { railPadding.toPx() }
                     val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(1f)
                     val tapped = ((offset.x - railPaddingPx) / usable).coerceIn(0f, 1f)
@@ -730,7 +873,8 @@ private fun EffortSlider(
                             animationSpec = spring(dampingRatio = 0.86f, stiffness = 560f),
                         )
                     }
-                    if (index != currentIndex) {
+                    if (index != hapticIndex.intValue) {
+                        hapticIndex.intValue = index
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     }
                     onPreviewChange(index)
@@ -739,9 +883,10 @@ private fun EffortSlider(
             }
             .pointerInput(gears) {
                 detectDragGestures(
-                    onDragStart = { dragging = true },
+                    onDragStart = { if (latestEnabled) dragging = true },
                     onDragEnd = {
                         dragging = false
+                        if (!latestEnabled) return@detectDragGestures
                         val index = (fraction.value * segments).roundToInt()
                             .coerceIn(0, gears.lastIndex)
                         scope.launch {
@@ -754,13 +899,14 @@ private fun EffortSlider(
                     },
                     onDragCancel = { dragging = false },
                 ) { change, _ ->
-                    if (trackWidthPx <= 0) return@detectDragGestures
+                    if (!latestEnabled || trackWidthPx <= 0) return@detectDragGestures
                     val railPaddingPx = with(density) { railPadding.toPx() }
                     val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(1f)
                     val next = ((change.position.x - railPaddingPx) / usable).coerceIn(0f, 1f)
                     scope.launch { fraction.snapTo(next) }
                     val index = (next * segments).roundToInt().coerceIn(0, gears.lastIndex)
-                    if (index != currentIndex) {
+                    if (index != hapticIndex.intValue) {
+                        hapticIndex.intValue = index
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     }
                     onPreviewChange(index)
@@ -849,7 +995,7 @@ private fun EffortSlider(
  * Forge 的「能力未知」由调用方传非空的回落档位表来表达；控件不许把空列表自行解释成放行 5 档，
  * 否则 Assist 里选了档也会被状态层归一化吞掉，成了能点不能用的假入口（3.4.45 审计实证）。
  */
-private fun solEffortGears(availableEfforts: List<ReasoningEffort>): List<ReasoningEffort> {
+internal fun solEffortGears(availableEfforts: List<ReasoningEffort>): List<ReasoningEffort> {
     if (availableEfforts.isEmpty()) return emptyList()
     return buildList {
         when {
@@ -864,7 +1010,7 @@ private fun solEffortGears(availableEfforts: List<ReasoningEffort>): List<Reason
 }
 
 /** 档位词照 Sol 原版英文（Light / Medium / High / Extra High / Max）。 */
-private fun solGearLabel(effort: ReasoningEffort): String? = when (effort) {
+internal fun solGearLabel(effort: ReasoningEffort): String? = when (effort) {
     ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> "Light"
     ReasoningEffort.MEDIUM -> "Medium"
     ReasoningEffort.HIGH -> "High"
@@ -874,7 +1020,7 @@ private fun solGearLabel(effort: ReasoningEffort): String? = when (effort) {
 }
 
 /** 当前档在滑块上的位置；DEFAULT 兜底 High 的位置（Sol 原版），没有 High 就取最接近的一档。 */
-private fun solGearIndex(effort: ReasoningEffort, gears: List<ReasoningEffort>): Int {
+internal fun solGearIndex(effort: ReasoningEffort, gears: List<ReasoningEffort>): Int {
     if (gears.isEmpty()) return 0
     val direct = when (effort) {
         ReasoningEffort.MINIMAL, ReasoningEffort.LOW ->

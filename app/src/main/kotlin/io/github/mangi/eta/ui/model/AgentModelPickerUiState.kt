@@ -123,8 +123,12 @@ internal object AgentModelPickerProjector {
         val groups = enabledProviders
             .asSequence()
             .filter {
+                // 当前选中模型所属的服务商必须出现在列表里，哪怕它的 Key 是空的：
+                // 否则药丸显示着这个模型、列表里却没有它的行和勾（投影口径不对称，
+                // 3.4.47 审计问题 18）。selectedModel 的解析口径本来就包含这种服务商。
                 ProviderAuthModes.isOAuth(it.authMode) ||
-                    (it.authMode == ProviderAuthModes.API_KEY && it.apiKey.isNotBlank())
+                    (it.authMode == ProviderAuthModes.API_KEY && it.apiKey.isNotBlank()) ||
+                    (selectedModel != null && it.id == selectedModel.providerId)
             }
             .mapNotNull { provider ->
                 val sourceType = ProviderSourceRegistry.resolve(provider)

@@ -1149,7 +1149,7 @@
   <string name="conversation_model_unavailable">此對話原用的模型無法使用，已改用 %1$s</string>
   <string name="model_switch_current">切換模型，目前為 %1$s</string>
   <string name="model_picker_title">選擇模型</string>
-  <string name="model_picker_filter_all">全部</string>
+  <string name="model_picker_empty">暫無可用模型</string>
   <string name="context_no_previous_usage">暫無上輪用量</string>
   <string name="context_no_model_limit">未知上下文視窗，自動壓縮已關閉。仍可手動壓縮，也可在設定 → 模型提供商中填寫視窗。</string>
   <string name="context_usage_after_response">完成首次回覆後顯示實測用量</string>
@@ -1375,7 +1375,6 @@
   <string name="chat_image_attachment">圖片附件</string>
   <string name="chat_view_image">查看圖片</string>
   <string name="reasoning_chip_off">思考</string>
-  <string name="effort_sheet_title">思考檔位</string>
   <string name="effort_default_label">默認</string>
   <string name="effort_off_label">已關閉</string>
   <string name="reasoning_chip_default">深度思考</string>

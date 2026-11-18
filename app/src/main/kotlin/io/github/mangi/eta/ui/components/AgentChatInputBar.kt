@@ -472,6 +472,8 @@ internal fun AgentChatInputBar(
                                     enabled = !isStreaming,
                                     onEffortChange = onReasoningEffortChange,
                                     sheetRightEdgeWindowPx = inputCardRightPx,
+                                    // 浮层开着时软键盘会被它顶掉，关掉后把焦点还给输入框。
+                                    onSheetClosed = { focusRequester.requestFocus() },
                                 )
                                 Spacer(modifier = Modifier.width(2.dp))
                             } else if (availableReasoningEfforts.isNotEmpty()) {
