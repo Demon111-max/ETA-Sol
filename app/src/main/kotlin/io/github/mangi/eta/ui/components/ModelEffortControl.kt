@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,7 +66,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.changedToUp
-import androidx.compose.ui.input.pointer.changedToUpOrCanceled
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -863,7 +864,7 @@ private fun EffortSlider(
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val segments = (gears.size - 1).coerceAtLeast(1)
-    val fraction = remember { Animatable(selectedIndex.toFloat() / segments) }
+    val fractionState = remember { mutableFloatStateOf(selectedIndex.toFloat() / segments) }
     var trackWidthPx by remember { mutableStateOf(0) }
     var dragging by remember { mutableStateOf(false) }
     var gestureActive by remember { mutableStateOf(false) }
@@ -873,14 +874,18 @@ private fun EffortSlider(
         label = "effort_knob_scale",
     )
     // fraction 的动画只有一个驱动者：本 effect 在非手势期把手柄对齐到 selectedIndex。
-    // 手势协程只做 snapTo（跟手）和回调，绝不自己 launch 动画——旧实现里手势回调
-    // scope.launch 的游离 animateTo 与本 effect 互相取消，是手柄卡在半路的元凶。
+    // fraction 用普通浮点状态而不是 Animatable：awaitEachGesture 是受限挂起作用域，
+    // Animatable.snapTo 这类外部挂起成员在里面根本调不了（3.4.49 首次构建才暴露）；
+    // 手势回路改成同步写状态值跟手，落定动画由本 effect 用 animate() 写回同一状态。
+    // 手势与 effect 都在主线程串行执行，不存在旧实现里游离 animateTo 与 effect
+    // 互相取消、把手柄卡在半路的问题。
     LaunchedEffect(selectedIndex, gestureActive) {
         if (!gestureActive) {
-            fraction.animateTo(
+            animate(
+                initialValue = fractionState.floatValue,
                 targetValue = selectedIndex.toFloat() / segments,
                 animationSpec = spring(dampingRatio = 0.86f, stiffness = 560f),
-            )
+            ) { value, _ -> fractionState.floatValue = value }
         }
     }
     val colors = MiuixTheme.colorScheme
@@ -915,7 +920,7 @@ private fun EffortSlider(
                 // 点按落档会被拖动检测器干扰而丢失——真机实证：点 Light 位置，
                 // 手柄滑过去又弹回原档、档位词也不变（3.4.48 修复）。
                 // 单回路口径：按下先记落点；移动过 touchSlop 才算拖动，拖动中手柄
-                // 在本协程内直接 snapTo 跟手、跨档震一次并报预览；抬手按最终位置
+                // 在本协程内同步写 fractionState 跟手、跨档震一次并报预览；抬手按最终位置
                 // 落档（点按 = 没拖动过、按抬手位置算最近档），回调完成后才放开
                 // gestureActive，让对齐 effect 把手柄弹簧到落定档位。
                 awaitEachGesture {
@@ -941,7 +946,10 @@ private fun EffortSlider(
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: continue
                             if (change.isConsumed) break
-                            if (change.changedToUpOrCanceled()) {
+                            // 抬起或被系统取消：changedToUpOrCanceled 在本项目 compose-ui
+                            // 版本里不存在，用 previousPressed && !pressed 等价表达；
+                            // 是不是用户真抬手（而非系统取消）靠 changedToUp() 区分。
+                            if (change.previousPressed && !change.pressed) {
                                 upX = change.position.x
                                 // 被系统取消（不是用户抬手）不落档，手柄由对齐 effect 弹回原档。
                                 released = change.changedToUp()
@@ -956,7 +964,7 @@ private fun EffortSlider(
                                     dragging = true
                                 }
                                 if (dragged) {
-                                    fraction.snapTo(fractionForX(change.position.x))
+                                    fractionState.floatValue = fractionForX(change.position.x)
                                     val index = indexForX(change.position.x)
                                     lastIndex = index
                                     if (index != hapticIndex.intValue) {
@@ -1002,7 +1010,7 @@ private fun EffortSlider(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        scaleX = fraction.value
+                        scaleX = fractionState.floatValue
                         transformOrigin = TransformOrigin(0f, 0.5f)
                     }
                     .background(colors.primary, CircleShape),
@@ -1042,7 +1050,7 @@ private fun EffortSlider(
                     val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(0f)
                     val knobPx = with(density) { knobSize.toPx() }
                     IntOffset(
-                        x = (railPaddingPx + usable * fraction.value - knobPx / 2).roundToInt(),
+                        x = (railPaddingPx + usable * fractionState.floatValue - knobPx / 2).roundToInt(),
                         y = 0,
                     )
                 }
