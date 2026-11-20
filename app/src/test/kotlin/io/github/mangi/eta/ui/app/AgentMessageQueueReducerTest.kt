@@ -57,19 +57,90 @@ class AgentMessageQueueReducerTest {
     }
 
     @Test
-    fun requeuePutsTheRejectedMessageBackAtTheHeadWithoutDuplicatingIt() {
-        val state = baseState(isStreaming = true).let {
-            val s1 = AgentMessageQueueReducer.enqueue(it, QueuedMessageUi(id = "q-1", content = "后面的"))
-            AgentMessageQueueReducer.enqueue(s1, QueuedMessageUi(id = "q-2", content = "被门拦下的"))
-        }
-        // 出队那一步已经落盘，被发送门拦下后必须原样回到队首，否则消息从界面上消失。
-        val rejected = state.queuedMessages.first { it.id == "q-1" }.copy(immediateInterrupt = true)
+    fun requeuePutsTheRejectedMessageAtTheTailAndMarksItBlocked() {
+        // 模拟「已经出队、又被发送门拦下」的那一条：出队时它已经离开队列（pollNextToSendAfterRun
+        // 先写状态再发），所以队列里不能留同 id 的条目。之前那版测试直接拿队列里已有的同 id
+        // 条目去 requeue，走的是 any{id} 早退、断言恒真，等于什么都没测（3.4.50 审理 P2-2）。
+        val state = baseState(isStreaming = true).copy(
+            queuedMessages = listOf(QueuedMessageUi(id = "q-1", content = "后面的")),
+        )
+        val rejected = QueuedMessageUi(id = "q-2", content = "被门拦下的", immediateInterrupt = true)
 
         val requeued = AgentMessageQueueReducer.requeue(state, rejected)
 
+        // 放队尾：放队首会让这条发不出去的消息永久堵住后面所有排队消息。
         assertEquals(listOf("q-1", "q-2"), requeued.queuedMessages.map { it.id })
-        assertFalse(requeued.queuedMessages.first().immediateInterrupt)
-        assertEquals(state, AgentMessageQueueReducer.requeue(requeued, rejected))
+        assertFalse(requeued.queuedMessages.last().immediateInterrupt)
+        assertTrue(requeued.queuedMessages.last().blocked)
+        assertEquals("被门拦下的", requeued.queuedMessages.last().content)
+        // 同一条重复 requeue 幂等（泵和发送门可能各调一次）。
+        assertEquals(requeued, AgentMessageQueueReducer.requeue(requeued, rejected))
+    }
+
+    @Test
+    fun requeueCanReplayWithoutBlockingWhenItWasOnlyATimingProblem() {
+        // 出队时发现会话又在跑：只是时序不对，运行结束后该自己重试，不该要求用户介入。
+        val state = baseState(isStreaming = true)
+        val item = QueuedMessageUi(id = "q-1", content = "出队时又在跑")
+
+        val requeued = AgentMessageQueueReducer.requeue(state, item, blocked = false)
+
+        assertEquals(listOf("q-1"), requeued.queuedMessages.map { it.id })
+        assertFalse(requeued.queuedMessages.single().blocked)
+    }
+
+    @Test
+    fun pollNextToSendAfterRunSkipsBlockedMessagesInsteadOfStallingTheQueue() {
+        val state = baseState(isStreaming = false).copy(
+            queuedMessages = listOf(
+                QueuedMessageUi(id = "q-blocked", content = "模型不支持图片", blocked = true),
+                QueuedMessageUi(id = "q-1", content = "第一条"),
+                QueuedMessageUi(id = "q-2", content = "第二条"),
+            ),
+        )
+
+        val (afterPoll, next) = AgentMessageQueueReducer.pollNextToSendAfterRun(
+            state = state,
+            stoppedByUser = false,
+        )
+
+        // 被拦下的那条不许挡住后面的：泵跳过它发 q-1，blocked 项原样留在队里等用户处理。
+        assertEquals("q-1", next?.id)
+        assertEquals(listOf("q-blocked", "q-2"), afterPoll.queuedMessages.map { it.id })
+        assertTrue(afterPoll.queuedMessages.first().blocked)
+    }
+
+    @Test
+    fun pollNextToSendAfterRunKeepsTheQueueWhenEverythingIsBlocked() {
+        val state = baseState(isStreaming = false).copy(
+            queuedMessages = listOf(QueuedMessageUi(id = "q-blocked", content = "被拦下的", blocked = true)),
+        )
+
+        val (afterPoll, next) = AgentMessageQueueReducer.pollNextToSendAfterRun(
+            state = state,
+            stoppedByUser = false,
+        )
+
+        assertNull(next)
+        assertEquals(listOf("q-blocked"), afterPoll.queuedMessages.map { it.id })
+    }
+
+    @Test
+    fun promoteToInterruptClearsTheBlockedFlagWhenTheUserRetriesManually() {
+        val state = baseState(isStreaming = true).copy(
+            queuedMessages = listOf(
+                QueuedMessageUi(id = "q-blocked", content = "被拦下的", blocked = true),
+                QueuedMessageUi(id = "q-2", content = "后面的"),
+            ),
+        )
+
+        val (promoted, item) = AgentMessageQueueReducer.promoteToInterrupt(state, "q-blocked")
+
+        assertEquals("q-blocked", item?.id)
+        assertFalse(item!!.blocked)
+        assertEquals(listOf("q-blocked", "q-2"), promoted.queuedMessages.map { it.id })
+        assertTrue(promoted.queuedMessages.first().immediateInterrupt)
+        assertFalse(promoted.queuedMessages.first().blocked)
     }
 
     @Test

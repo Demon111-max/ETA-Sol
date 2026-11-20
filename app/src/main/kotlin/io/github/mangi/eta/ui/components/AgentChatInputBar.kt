@@ -51,6 +51,7 @@ import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -130,8 +131,41 @@ private val StopIconSize = 10.dp
 private val ThinkingIconSize = 21.dp
 private val InputContainerShape = RoundedCornerShape(20.dp)
 
-/** 草稿外传的静默窗口：连续输入期间只按这个间隔落一次，见 AgentChatInputBar 的 snapshotFlow。 */
+/**
+ * 草稿外传的静默窗口：连续输入期间只按这个间隔落一次，见 AgentChatInputBar 的 snapshotFlow。
+ *
+ * 3.4.50 审理 P3-30：窗口内没外传的文字**不是「最多一个窗口」**。只要用户不停顿，
+ * 自上次 ≥200ms 停顿以来输入的全部文字都还没进状态层；输入栏一销毁（切会话 / 切模式 /
+ * 返回上一页，见 `AgentHomeScreen.kt:43` 的 `key(chatConversationCompositionKey(...))`）
+ * 就整段丢，且内存与盘上都没有。所以销毁时必须走同步 flush
+ * （见 AgentChatInputBar 里的 DisposableEffect），不能只靠这个窗口兜底。
+ */
 private const val InputDraftSyncDelayMillis = 200L
+
+/**
+ * 输入栏与上层之间的「这段文本已经交出去了」对账标记。
+ *
+ * 为什么需要：草稿外传有三条会重叠的路径（静默窗口到期、销毁前补交、上层同步）。没有对账时，
+ * 一次补交之后仍在跑的旧协程会把同一段旧文本再写一遍，上层就把「刚清空的草稿」又填回来，
+ * 已发送的内容原地复活成草稿（3.4.50 审理 P1-2 / P2-1）。同一段文本只外传一次，重复投递丢弃。
+ */
+private class DraftSyncMarker(initialText: String) {
+    private var delivered: String = initialText
+
+    /** 这段文本已经通过别的路径交给上层（提交、撤回、上层同步），不必再走 onInputChange。 */
+    fun isDelivered(text: String): Boolean = text == delivered
+
+    fun mark(text: String) {
+        delivered = text
+    }
+
+    /** 与最后一次交出的文本不同才投递；先记账再投递，回调里再改状态也不会重入。 */
+    fun deliver(text: String, sink: (String) -> Unit) {
+        if (text == delivered) return
+        delivered = text
+        sink(text)
+    }
+}
 
 /**
  * Agent 输入器始终保持同一空间结构，聚焦、输入和执行过程只改变状态，不搬动操作入口。
@@ -180,6 +214,16 @@ internal fun AgentChatInputBar(
     workingText: String? = null,
     /** 输入内容变化的外传（含被外部同步写入、发送后清空）：供需要跨重建保留草稿的调用方落盘。 */
     onInputChange: (String) -> Unit = {},
+    /**
+     * 输入栏被销毁前的草稿补交（3.4.51 P1-2）：与 [onInputChange] 分开是必须的。
+     *
+     * 销毁发生在「已经切到别的会话」之后（AgentAppState.selectConversation 先改
+     * selectedConversationId 再让子树重组销毁），所以 [onInputChange] 这条链上的
+     * updateInputDraft 此刻写的是**新会话**——旧会话的字会冒到新会话输入框里，旧会话照样丢。
+     * 调用方必须在这个回调里带上草稿归属（会话键），按归属落回原会话。
+     * 默认值退回 [onInputChange]：没有会话归属概念的调用方（Forge）行为不变。
+     */
+    onDraftFlush: (String) -> Unit = onInputChange,
     modifier: Modifier = Modifier,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
@@ -189,20 +233,35 @@ internal fun AgentChatInputBar(
     // 把输入内容外传：本组件自己持有 TextFieldState（普通输入不往上抛，避免每个字符带整个
     // 聊天舞台重组），但需要跨重建保住草稿的调用方拿不到内容，所以在这里做一次单向外抛。
     //
-    // 两点修正（3.4.49 审理 P2-1 / P3-6）：
-    // 1. 按 [InputDraftSyncDelayMillis] 的静默窗口节流：此前逐字符直抛，每敲一个字就把
-    //    homeState.input 改一遍、整张会话表复制一次、整屏重组一次。节流窗口内连打只落一次，
-    //    代价是切走瞬间最多丢最后一个窗口内的字符（切走时输入栏会被销毁，收不到新的快照）。
-    // 2. 回调经 rememberUpdatedState 取最新值：LaunchedEffect 只按 textFieldState 启动一次，
-    //    直接捕获 onInputChange 会把首次组合的旧闭包一直用到销毁。
+    // 三条外传路径叠在一起，必须互相让路（3.4.50 审理 P1-2 / P2-1）：
+    // 1. 静默窗口：按 [InputDraftSyncDelayMillis] 节流。此前逐字符直抛，每敲一个字就把
+    //    homeState.input 改一遍、整张会话表复制一次、整屏重组一次；窗口内连打只落一次。
+    // 2. 销毁前补交（下面的 DisposableEffect）：输入栏随会话 key 一起被销毁，LaunchedEffect
+    //    被取消时 delay 体根本不执行，所以窗口内的字必须在这里补交一次。补交范围是「自上次
+    //    成功外传以来的全部文字」——切走前连打了多久就丢多久，不是一个窗口（3.4.50 P3-30）。
+    // 3. 上层同步：发送后清空、排队消息撤回合并、编辑态回填都由上层写 input 并递增
+    //    inputSyncVersion 驱动，此时输入栏里的旧文本已经作废，不能反过来写回上层。
+    // 路径 1/2 与 3 的胜负由 [DraftSyncMarker] 记账判定：同一段文本只外传一次。
+    // 回调经 rememberUpdatedState 取最新值：LaunchedEffect 只按 textFieldState 启动一次，
+    // 直接捕获 onInputChange 会把首次组合的旧闭包一直用到销毁。
     val currentOnInputChange by rememberUpdatedState(onInputChange)
+    val currentOnDraftFlush by rememberUpdatedState(onDraftFlush)
+    val draftSync = remember { DraftSyncMarker(initialText = input) }
     LaunchedEffect(textFieldState) {
         snapshotFlow { textFieldState.text.toString() }
             .distinctUntilChanged()
             .collectLatest { text ->
                 delay(InputDraftSyncDelayMillis)
-                currentOnInputChange(text)
+                draftSync.deliver(text, currentOnInputChange)
             }
+    }
+    // 销毁前补交草稿：切会话、切模式、离开聊天页都会重建整棵输入栏，这里是「一段字都不许丢」
+    // 的唯一保证（3.4.50 审理 P1-2）。取的是销毁那一刻的最新文本与最新回调，不是首次组合的闭包。
+    // 走 [onDraftFlush] 而不是 [onInputChange]：销毁时上层已经切到新会话，补交必须带上归属。
+    DisposableEffect(Unit) {
+        onDispose {
+            draftSync.deliver(textFieldState.text.toString(), currentOnDraftFlush)
+        }
     }
     var wasEditingMessage by remember { mutableStateOf(isEditingMessage) }
     var syncedVersion by remember { mutableIntStateOf(inputSyncVersion) }
@@ -225,6 +284,9 @@ internal fun AgentChatInputBar(
         val versionChanged = inputSyncVersion != syncedVersion
         if (isEditingMessage || wasEditingMessage || versionChanged) {
             textFieldState.setTextAndPlaceCursorAtEnd(input)
+            // 上层刚覆盖了输入框（发送后清空、撤回合并、编辑态回填）：这段文本以上层为准，
+            // 记进对账标记，随后才到期的旧窗口就不会把它当草稿写回去（3.4.50 审理 P2-1）。
+            draftSync.mark(input)
         }
         if (isEditingMessage || (versionChanged && input.isNotEmpty() && focusInputOnSync)) {
             focusRequester.requestFocus()
@@ -232,6 +294,16 @@ internal fun AgentChatInputBar(
         }
         wasEditingMessage = isEditingMessage
         syncedVersion = inputSyncVersion
+    }
+
+    // 外部同步的第二道保险：切会话、载入、新建都靠外层 key(...) 重建输入栏来对齐，
+    // inputSyncVersion 在这三条路径上不递增（3.4.50 审理 P3-20）。这里改成盯外部 input 本身：
+    // 只要它变成一段「我们没交出去过」的文本就对齐过去；自己刚交出去的那段回灌时不动，
+    // 否则每次落盘都会把光标拽到末尾。
+    LaunchedEffect(input) {
+        if (draftSync.isDelivered(input)) return@LaunchedEffect
+        textFieldState.setTextAndPlaceCursorAtEnd(input)
+        draftSync.mark(input)
     }
 
     Column(
@@ -253,7 +325,13 @@ internal fun AgentChatInputBar(
                 queuedMessages = queuedMessages,
                 isStreaming = isStreaming,
                 onSteer = onSteerQueuedMessage,
-                onRecall = { id -> onRecallQueuedMessage(id, textFieldState.text.toString()) },
+                onRecall = { id ->
+                    val draftText = textFieldState.text.toString()
+                    // 当前草稿跟着撤回一起交给上层合并了，先记账：否则过期的静默窗口会把
+                    // 合并前的文本再写回去，把刚撤回的内容冲掉（3.4.50 审理 P2-1）。
+                    draftSync.mark(draftText)
+                    onRecallQueuedMessage(id, draftText)
+                },
                 onRemove = onRemoveQueuedMessage,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
@@ -518,6 +596,10 @@ internal fun AgentChatInputBar(
                                 // 草稿一起扔掉，上层再想还原也只剩空串（3.4.49 审理 P2-2）。
                                 // 真正的清空交给上层：它把 input 置空并递增 inputSyncVersion，
                                 // 输入栏在 LaunchedEffect(inputSyncVersion) 里同步成空。
+                                // 这段文本已经交给上层了（onSubmit），先记账：否则已经过了静默
+                                // 窗口的旧协程会在清空之后把它当草稿写回去，已发内容原地复活
+                                // （3.4.50 审理 P2-1）。
+                                draftSync.mark(submittedText)
                                 if (interrupt) {
                                     onInterruptAndSubmit(submittedText)
                                 } else {

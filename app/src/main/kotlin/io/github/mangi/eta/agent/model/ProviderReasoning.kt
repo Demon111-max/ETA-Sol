@@ -15,10 +15,18 @@ internal object ProviderReasoning {
     ) {
         val effort = validatedEffort(config)
         val sourceType = sourceType(config)
-        if (
-            !config.hasDeclaredReasoningCapabilities() &&
-            !isLegacyReasoningModel(sourceType, config.model)
-        ) {
+        if (!config.hasDeclaredReasoningCapabilities()) {
+            // 没声明＝什么都不发（等价旧的 null 护栏）。这里绝不能落进下面的分派表：
+            // 未收录的型号撞上服务商硬校验会抛 IllegalArgumentException 让整轮失败
+            // （MiniMax / MiMo toggle / StepFun 三处都是硬 require），非硬表家族则会
+            // 把药丸里猜出来的档位真发出去。唯一例外是 DEFAULT：它表达的是「用服务商
+            // 自己的默认」，按型号名能给 toggle 家族写对默认（kimi-k2.6），不属于猜档位。
+            if (
+                effort == ReasoningEffort.DEFAULT &&
+                isLegacyReasoningModel(sourceType, config.model)
+            ) {
+                applyProviderDefault(request, config, sourceType)
+            }
             return
         }
         if (effort == ReasoningEffort.DEFAULT) {
@@ -83,14 +91,11 @@ internal object ProviderReasoning {
         request: JSONObject,
         config: AgentModelClient.ModelConfig,
     ) {
-        // 能力未知的模型按 DEFAULT 处理：thinking / output_config 一个都不写。
-        // 此前这条路径没有 null 护栏，未知模型会带档位发出去（3.4.49 审理 P1-1）。
-        if (
-            !config.hasDeclaredReasoningCapabilities() &&
-            !isLegacyReasoningModel(sourceType(config), config.model)
-        ) {
-            return
-        }
+        // 没声明＝什么都不发：thinking / output_config 一个都不写。
+        // 此前这条路径没有 null 护栏，未知模型会带档位发出去（3.4.49 审理 P1-1）；
+        // 3.4.50 的 isFallback 标记过不了 Bundle，跨进程就变成「真声明」，所以这里
+        // 只看能力是不是 null（3.4.51 运行时侧重解析）。
+        if (!config.hasDeclaredReasoningCapabilities()) return
         val effort = validatedEffort(config)
         if (effort == ReasoningEffort.DEFAULT) return
         if (effort == ReasoningEffort.OFF) {
@@ -300,11 +305,9 @@ internal object ProviderReasoning {
 
     private fun validatedEffort(config: AgentModelClient.ModelConfig): ReasoningEffort {
         val effort = config.effectiveReasoningEffort
+        // 没声明能力（null）＝ 服务商没说过这个模型能收哪些档：不校验、也不把档位送进
+        // 任何一家服务商的硬表，这就是旧的 null 护栏（3.4.50 审理 P1-1）。
         val capabilities = config.reasoningCapabilities ?: return effort
-        // 回落能力是猜的，不是服务商声明：一律按 DEFAULT 处理——不校验、也不把猜出来的档位
-        // 送进任何一家服务商的硬表（那会让整轮请求抛 IllegalArgumentException 打死）。
-        // 这就是旧的 null 护栏口径：什么都不发（3.4.49 审理 P1-1）。
-        if (capabilities.isFallback) return ReasoningEffort.DEFAULT
         require(effort in capabilities.selectableEfforts) {
             "当前模型不支持 ${effort.displayName} thinking effort"
         }
@@ -315,13 +318,14 @@ internal object ProviderReasoning {
     }
 
     /**
-     * 能力是否由服务商/目录真实声明。null 与 [io.github.mangi.eta.data.model.UnknownReasoningCapabilities]
-     * 都算「没声明」：发送侧按 DEFAULT 处理，什么都不发（3.4.49 审理 P1-1）。
+     * 能力是否由服务商/目录真实声明：只有 null 才算「没声明」。
+     *
+     * 「这份能力是不是猜的」不许靠随配置传递的标记判断（@Transient 的 isFallback 过不了
+     * Bundle 与 JSON，跨进程后回落形状会被当成真声明）：运行时侧按 (providerId, authMode,
+     * modelId) 走与 UI 同一个解析入口重新解析，未声明就是 null（3.4.50 审理 P1-1）。
      */
-    private fun AgentModelClient.ModelConfig.hasDeclaredReasoningCapabilities(): Boolean {
-        val capabilities = reasoningCapabilities ?: return false
-        return !capabilities.isFallback
-    }
+    private fun AgentModelClient.ModelConfig.hasDeclaredReasoningCapabilities(): Boolean =
+        reasoningCapabilities != null
 
     private fun sourceType(config: AgentModelClient.ModelConfig): String =
         ProviderSourceRegistry.resolve(

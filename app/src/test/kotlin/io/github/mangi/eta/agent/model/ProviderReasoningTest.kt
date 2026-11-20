@@ -4,7 +4,6 @@ import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.ReasoningEffort
-import io.github.mangi.eta.data.model.UnknownReasoningCapabilities
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -405,9 +404,9 @@ class ProviderReasoningTest {
 
     @Test
     fun unknownCapabilityModelAcceptsEveryEffortWithoutThrowingOrSendingAnything() {
-        // 能力未声明（解析 null → 回落 Unknown）的模型：药丸里选任何档发送都不许抛错、
-        // 不许整轮失败，发送侧按 DEFAULT 处理（等价旧 null 护栏：什么都不发）。3.4.50 P1-1。
-        val fallback = UnknownReasoningCapabilities
+        // 能力没声明（解析 null）的模型：药丸里选任何档发送都不许抛错、不许整轮失败，
+        // 发送侧按「没声明＝什么都不发」处理。3.4.51 P1-1：能力未知时的回落形状不再
+        // 参与发送判断（它跨进程会被当成真声明），只有真声明才进服务商分派表。
         val cases = listOf(
             ProviderSourceTypes.MINIMAX to "MiniMax-M3",
             ProviderSourceTypes.MIMO to "mimo-v2.6",
@@ -417,11 +416,11 @@ class ProviderReasoningTest {
             ProviderSourceTypes.DEEPSEEK to "deepseek-v4",
         )
         for ((source, model) in cases) {
-            for (effort in fallback.selectableEfforts) {
+            for (effort in ReasoningEffort.entries) {
                 val request = JSONObject().put("kept", "yes")
                 ProviderReasoning.applyOpenAiCompatibleRequest(
                     request,
-                    config(source, effort, model).copy(reasoningCapabilities = fallback),
+                    config(source, effort, model).copy(reasoningCapabilities = null),
                 )
                 assertEquals("$source/$model/$effort", setOf("kept"), request.keys().asSequence().toSet())
             }
@@ -430,19 +429,18 @@ class ProviderReasoningTest {
 
     @Test
     fun unknownCapabilityModelSendsNoReasoningBlockOnResponsesAndAnthropic() {
-        val fallback = UnknownReasoningCapabilities
-        for (effort in fallback.selectableEfforts) {
+        for (effort in ReasoningEffort.entries) {
             val responses = JSONObject()
             ProviderReasoning.applyResponsesRequest(
                 responses,
-                config(ProviderSourceTypes.OPENAI, effort, "gpt-6.1-sol").copy(reasoningCapabilities = fallback),
+                config(ProviderSourceTypes.OPENAI, effort, "gpt-6.1-sol").copy(reasoningCapabilities = null),
             )
             assertFalse("responses/$effort", responses.has("reasoning"))
 
             val anthropic = JSONObject()
             ProviderReasoning.applyAnthropicRequest(
                 anthropic,
-                config(ProviderSourceTypes.ANTHROPIC, effort, "claude-unknown-9").copy(reasoningCapabilities = fallback),
+                config(ProviderSourceTypes.ANTHROPIC, effort, "claude-unknown-9").copy(reasoningCapabilities = null),
             )
             assertFalse("anthropic/$effort", anthropic.has("thinking"))
             assertFalse("anthropic/$effort", anthropic.has("output_config"))

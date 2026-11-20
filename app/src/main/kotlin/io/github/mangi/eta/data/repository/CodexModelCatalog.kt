@@ -49,7 +49,6 @@ internal object CodexModelCatalog {
             reasoningCapabilities = if (reasoning.isEmpty()) null else ModelReasoningCapabilities(
                 supportedEfforts = reasoning,
                 defaultEffort = default,
-                defaultEnabled = default?.enablesReasoning,
                 canDisable = ReasoningEffort.OFF in levels,
                 mandatory = ReasoningEffort.OFF !in levels,
             ),

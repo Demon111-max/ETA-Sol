@@ -602,6 +602,17 @@ class AnthropicMessagesProviderTest {
                         systemPrompt = "system",
                         thinkingEnabled = true,
                         reasoningEffort = io.github.mangi.eta.data.model.ReasoningEffort.MEDIUM,
+                        // 3.4.51 P1-1：能力必须由服务商/目录真声明过。没声明＝什么都不发，
+                        // 猜出来的档位不再写进请求——这条用例要测的是「声明了 MEDIUM 就发
+                        // adaptive thinking」，所以得把声明带上。
+                        reasoningCapabilities = io.github.mangi.eta.data.model.ModelReasoningCapabilities(
+                            supportedEfforts = listOf(
+                                io.github.mangi.eta.data.model.ReasoningEffort.LOW,
+                                io.github.mangi.eta.data.model.ReasoningEffort.MEDIUM,
+                                io.github.mangi.eta.data.model.ReasoningEffort.HIGH,
+                            ),
+                            canDisable = true,
+                        ),
                     ),
                     messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
                     tools = JSONArray(),

@@ -15,6 +15,7 @@ import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -33,6 +34,9 @@ class AgentConversationPersistenceTest {
         context = RuntimeEnvironment.getApplication()
         EtaDatabase.closeForTests()
         context.deleteDatabase("eta.db")
+        // 草稿走旁路文件（不在数据库里，见 AgentConversationStore 的 AgentDraftStore）：
+        // 用例之间若复用临时目录，上一条的草稿会漏到下一条，P3-14 的回归用例对此很敏感。
+        context.filesDir?.listFiles()?.forEach { it.delete() }
     }
 
     @Test
@@ -340,6 +344,88 @@ class AgentConversationPersistenceTest {
 
         assertEquals(ReasoningEffort.LOW.wireValue,
             EtaDatabase.get(context).conversationDao().conversation("active")!!.reasoningEffort)
+    }
+
+    @Test
+    fun contentKeepsThePinnedAndLoadedFlagsInTheirOwnFields() {
+        // Content 的 13 个实参里有两个 Boolean：isPinned 在第 3 位、isConversationLoaded 在第 12 位。
+        // 位置传参看走眼就是把「置顶」写成「已载入」，编译器不会报错（3.4.50 审理 P3-17）。
+        // 这里逐字段核对一遍，锁住字段顺序与 journal 的空值兜底。
+        val source = state("conv-a").copy(
+            isConversationLoaded = false,
+            messageStartIndex = 42,
+            modelId = "model-x",
+            journal = emptyList(),
+        )
+
+        val content = AgentConversationPersistence.Content(
+            state = source,
+            title = "标题",
+            updatedAt = 7L,
+            isPinned = true,
+        )
+
+        assertTrue(content.isPinned)
+        assertFalse(content.isConversationLoaded)
+        assertEquals(42, content.messageStartIndex)
+        assertEquals("model-x", content.modelId)
+        assertEquals("标题", content.title)
+        assertEquals(7L, content.updatedAt)
+        assertEquals(source.reasoningEffort, content.reasoningEffort)
+        assertEquals(source.messages, content.messages)
+        // journal 为空时落盘取 history，否则上下文压缩后重启会丢掉整段历史。
+        assertEquals(source.history, content.journal)
+    }
+
+    @Test
+    fun unsentDraftSurvivesARestartWithoutRewritingStoredContent() = runBlocking {
+        // 3.4.50 审理 P3-14：conversations 表没有草稿列，草稿走旁路文件；
+        // 但「重启后草稿还在」必须成立——load 与 loadConversation 两条回读路径都要带上它。
+        val persistence = AgentConversationPersistence()
+        val initial = snapshot(mapOf("active" to state("active"), "other" to state("other")))
+        persistence.save(context, initial)
+        installAudit()
+        val typed = initial.copy(conversationsById = initial.conversationsById +
+            ("active" to initial.conversationsById.getValue("active").copy(input = "打了一半的字")))
+
+        persistence.save(context, typed)
+
+        // 草稿不许把正文行重写一遍（否则每 200ms 敲字都要重写会话元数据）。
+        assertEquals(0, allEvents())
+        // 模拟进程死亡后重新启动：全新的 load 必须把草稿读回来。
+        val reloaded = AgentConversationStore.load(context)
+        assertEquals("打了一半的字", reloaded.conversationsById.getValue("active").input)
+        assertEquals("打了一半的字", AgentConversationStore.loadConversation(context, "active")!!.input)
+        assertEquals("", reloaded.conversationsById.getValue("other").input)
+    }
+
+    @Test
+    fun draftsOfUnloadedConversationsAreNotSilentlyDropped() = runBlocking {
+        // 3.4.50 审理 P3-16（持久化侧）：未载入的会话在正文事务里只写标题/置顶/时间，其余整段 continue。
+        // 草稿只存在于旁路文件里，所以整份草稿表必须一起写——按「本次改动的会话」增量写，
+        // 未载入会话的草稿就被静默抹掉了。
+        val original = snapshot(mapOf(
+            "active" to state("active"),
+            "dormant" to state("dormant").copy(input = "dormant 的草稿"),
+        ))
+        AgentConversationPersistence().save(context, original)
+        val loaded = AgentConversationStore.load(context)
+        assertFalse(loaded.conversationsById.getValue("dormant").isConversationLoaded)
+        assertEquals("dormant 的草稿", loaded.conversationsById.getValue("dormant").input)
+
+        // 这次只改 active 的草稿与 dormant 的标题：dormant 的草稿不在改动集里，也不许丢。
+        val next = loaded.copy(
+            conversationsById = loaded.conversationsById +
+                ("active" to loaded.conversationsById.getValue("active").copy(input = "active 的新草稿")),
+            titles = loaded.titles + ("dormant" to "改个名"),
+        )
+        AgentConversationPersistence(loaded).save(context, next)
+
+        val restored = AgentConversationStore.load(context)
+        assertEquals("active 的新草稿", restored.conversationsById.getValue("active").input)
+        assertEquals("dormant 的草稿", restored.conversationsById.getValue("dormant").input)
+        assertEquals("dormant 的草稿", AgentConversationStore.loadConversation(context, "dormant")!!.input)
+        assertEquals("改个名", EtaDatabase.get(context).conversationDao().conversation("dormant")!!.title)
     }
 
     private fun state(id: String): AgentChatHomeUiState {

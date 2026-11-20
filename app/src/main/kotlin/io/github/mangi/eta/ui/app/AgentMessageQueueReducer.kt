@@ -48,10 +48,11 @@ internal object AgentMessageQueueReducer {
             .filterNot { it.id == id }
             .map { it.copy(immediateInterrupt = false) }
         return if (state.isStreaming && !state.isCompacting) {
-            val promoted = target.copy(immediateInterrupt = true)
+            // 用户亲手把这条重新插话：清掉 blocked，让泵愿意再试一次（拦不拦由发送门当场判）。
+            val promoted = target.copy(immediateInterrupt = true, blocked = false)
             state.copy(queuedMessages = listOf(promoted) + rest) to promoted
         } else {
-            state.copy(queuedMessages = rest) to target.copy(immediateInterrupt = false)
+            state.copy(queuedMessages = rest) to target.copy(immediateInterrupt = false, blocked = false)
         }
     }
 
@@ -83,18 +84,31 @@ internal object AgentMessageQueueReducer {
     }
 
     /**
-     * 出队后又被发送门拦下（模型不支持图片、文件引用需要终端）时把消息放回队首。
+     * 出队后又被发送门拦下（模型不支持图片、文件引用需要终端）时把消息放回队列。
      *
      * 出队那一步已经落盘（[pollNextToSendAfterRun] / [promoteToInterrupt] 都先写状态再发），
      * 拦下后如果只是 return，这条消息在界面上就彻底消失了（3.4.49 审理 P2-3）。
+     *
+     * 放队尾而不是队首，并且默认标 [QueuedMessageUi.blocked]（3.4.50 审理 P2-2）：
+     * 泵只在队首取一条，[dispatchQueuedMessage] 又只被「运行收尾」和「空闲插话」两处触发，
+     * 没有定时器也没有观察者——被拦下的消息放回队首就永久卡在那儿，后面所有排队消息
+     * 一个都发不出去；拦截条件解除后也不会自己重试。放队尾让别的消息先走，blocked 让
+     * 泵跳过它，等用户处理完（换模型/开终端/撤回）再发。
+     *
+     * [blocked] 传 false 用于「只是时序不对」的重放（例如出队时发现会话又在跑），
+     * 那种情况运行结束后自然就该重试，不该要求用户介入。
      */
     fun requeue(
         state: AgentChatUiState,
         item: QueuedMessageUi,
+        blocked: Boolean = true,
     ): AgentChatUiState {
         if (state.queuedMessages.any { it.id == item.id }) return state
         return state.copy(
-            queuedMessages = listOf(item.copy(immediateInterrupt = false)) + state.queuedMessages,
+            queuedMessages = state.queuedMessages + item.copy(
+                immediateInterrupt = false,
+                blocked = blocked,
+            ),
         )
     }
 
@@ -119,17 +133,21 @@ internal object AgentMessageQueueReducer {
      * 当前运行收尾后决定是否自动弹出下一条排队消息：
      * - 队首为 [QueuedMessageUi.immediateInterrupt] 时，无论本次是否因取消结束，都立即弹出执行。
      * - 用户主动点击停止按钮（[stoppedByUser]）时，保留剩余队列，不自动发出。
-     * - 其余情况（正常结束）弹出队首第一条消息自动发出。
+     * - [QueuedMessageUi.blocked] 的消息一律跳过（它被发送门拦着，发也发不出去）。
+     * - 其余情况（正常结束）弹出第一条可发的消息自动发出。
      */
     fun pollNextToSendAfterRun(
         state: AgentChatUiState,
         stoppedByUser: Boolean,
     ): Pair<AgentChatUiState, QueuedMessageUi?> {
-        val first = state.queuedMessages.firstOrNull() ?: return state to null
+        // 跳过被发送门拦下的消息：它们发不出去，但不该占着泵口把后面能发的消息一起堵死
+        // （3.4.50 审理 P2-2）。整队都被拦下时原样返回，等用户处理。
+        val first = state.queuedMessages.firstOrNull { !it.blocked } ?: return state to null
         if (!first.immediateInterrupt && stoppedByUser) {
             return clearInterruptFlags(state) to null
         }
-        val remaining = state.queuedMessages.drop(1)
+        // first 可能不在队首（前面有 blocked 的），所以按 id 移除而不是 drop(1)。
+        val remaining = state.queuedMessages.filterNot { it.id == first.id }
         return state.copy(queuedMessages = remaining) to first.copy(immediateInterrupt = false)
     }
 }

@@ -188,7 +188,10 @@ class AgentConversationStoreTest {
         assertEquals("屏幕分析", snapshot.titles.getValue("conv-1"))
         assertEquals(1234L, snapshot.updatedAt.getValue("conv-1"))
         val restored = snapshot.conversationsById.getValue("conv-1")
-        assertEquals("", restored.input)
+        // 草稿现在活过重启（3.4.51 P1-2 / P3-14）：正文行里没有草稿列，它走旁路文件
+        // agent_conversation_drafts.json，回读时按会话 id 回填——所以这里必须拿得回来。
+        // 旧契约（草稿一律丢弃）已被本次修复反转。
+        assertEquals("不应该保存草稿", restored.input)
         assertFalse(restored.isStreaming)
         assertTrue(restored.thinkingEnabled)
         assertEquals(ReasoningEffort.HIGH, restored.reasoningEffort)

@@ -37,7 +37,11 @@ data class Model(
     val effectiveReasoningCapabilities: ModelReasoningCapabilities?
         get() = when (reasoningOverride) {
             false -> null
-            true -> reasoningCapabilitiesOverride ?: ModelReasoningCapabilities()
+            // 只拨了「思考」开关、没单独声明档位集时，沿用目录/远端写入的声明能力：
+            // 这里若合成一份空声明，ReasoningCapabilityResolver 会把它当作用户声明原样返回，
+            // 目录解析出的档位被整份顶掉（3.4.50 P2-7）。与 GeminiModelCapabilities.resolveReasoning
+            // 的 true 分支同口径：开关只表达「要不要思考」，不表达「有哪些档」。
+            true -> reasoningCapabilitiesOverride ?: reasoningCapabilities
             null -> reasoningCapabilities
         }
 

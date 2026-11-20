@@ -158,6 +158,12 @@ internal fun AgentChatBody(
     canCompactContext: Boolean,
     onModelSelected: (String) -> Unit,
     onInputChange: (String) -> Unit = {},
+    /**
+     * 输入栏销毁前的草稿补交（3.4.51 P1-2）：必须带上草稿归属的会话键。
+     * 见 [AgentChatInputBar] 的 onDraftFlush——销毁时上层已经切到新会话，补交按会话键路由，
+     * 否则旧会话的字会写进新会话。默认退回 [onInputChange]。
+     */
+    onDraftFlush: (String) -> Unit = onInputChange,
     onSubmit: (String) -> Unit,
     onInterruptAndSubmit: (String) -> Unit = onSubmit,
     onSteerQueuedMessage: (String) -> Unit = {},
@@ -288,6 +294,7 @@ internal fun AgentChatBody(
             canCompactContext = canCompactContext,
             onModelSelected = onModelSelected,
             onInputChange = onInputChange,
+            onDraftFlush = onDraftFlush,
             onStop = onStop,
             onAttachImage = onAttachImage,
             onRemoveImage = onRemoveImage,
@@ -349,6 +356,8 @@ private fun AgentChatScaffold(
     canCompactContext: Boolean,
     onModelSelected: (String) -> Unit,
     onInputChange: (String) -> Unit = {},
+    /** 输入栏销毁前的草稿补交（3.4.51 P1-2）：透传到输入栏，见 [AgentChatInputBar]。 */
+    onDraftFlush: (String) -> Unit = onInputChange,
     onStop: () -> Unit,
     onAttachImage: (String) -> Unit,
     onRemoveImage: (String) -> Unit,
@@ -409,6 +418,7 @@ private fun AgentChatScaffold(
                 modelPickerState = modelPickerState,
                 onModelSelected = onModelSelected,
                 onInputChange = onInputChange,
+                onDraftFlush = onDraftFlush,
                 onStop = onStop,
                 onAttachImage = onAttachImage,
                 onRemoveImage = onRemoveImage,
@@ -1101,6 +1111,8 @@ private fun AgentChatBottomBar(
     modelPickerState: AgentModelPickerUiState,
     onModelSelected: (String) -> Unit,
     onInputChange: (String) -> Unit = {},
+    /** 输入栏销毁前的草稿补交（3.4.51 P1-2）：透传到输入栏，见 [AgentChatInputBar]。 */
+    onDraftFlush: (String) -> Unit = onInputChange,
     onStop: () -> Unit,
     onAttachImage: (String) -> Unit,
     onRemoveImage: (String) -> Unit,
@@ -1162,6 +1174,7 @@ private fun AgentChatBottomBar(
                 modelPickerState = modelPickerState,
                 onModelSelected = onModelSelected,
                 onInputChange = onInputChange,
+                onDraftFlush = onDraftFlush,
                 onStop = onStop,
                 onAttachImage = onAttachImage,
                 onRemoveImage = onRemoveImage,

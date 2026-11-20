@@ -73,8 +73,10 @@ class GeminiProviderConfigurationTest {
         assertEquals(ProviderTypes.GEMINI, config.providerType)
         assertEquals(ProviderSourceTypes.GEMINI, config.providerSourceType)
         assertEquals("", config.openAiEndpointMode)
-        assertEquals(ReasoningEffort.DEFAULT, config.reasoningEffort)
-        assertEquals(listOf(ReasoningEffort.DEFAULT), requireNotNull(config.reasoningCapabilities).selectableEfforts)
+        assertEquals(ReasoningEffort.OFF, config.reasoningEffort)
+        // 关思考＝没声明思考能力：能力给 null，不再合成一份「只有 Default」的空声明
+        //（3.4.50 审理 P3-25）。发送侧据此什么都不发，由服务端按默认跑。
+        assertNull(config.reasoningCapabilities)
         val raw = Json.encodeToString<ProviderSetting>(stored)
         assertEquals(stored, Json.decodeFromString<ProviderSetting>(raw))
     }
@@ -87,16 +89,14 @@ class GeminiProviderConfigurationTest {
         )
         assertEquals(ReasoningEffort.DEFAULT, config.reasoningEffort)
         assertEquals(ReasoningEffort.DEFAULT, config.effectiveReasoningEffort)
-        val capabilities = requireNotNull(config.reasoningCapabilities)
-        assertEquals(listOf(ReasoningEffort.DEFAULT), capabilities.selectableEfforts)
-        assertNull(capabilities.defaultEnabled)
-        assertFalse(capabilities.mandatory)
+        // 目录里没有、模型也没声明 ⇒ 能力为 null（未声明），不再造一份「只有 Default」的假声明。
+        assertNull(config.reasoningCapabilities)
     }
 
     @Test
     fun unknownModelManualEffortsSurvivePersistenceAndRuntimeProjection() = runBlocking {
         val manual = ModelReasoningCapabilities(supportedEfforts = listOf(ReasoningEffort.LOW, ReasoningEffort.HIGH),
-            defaultEnabled = true, mandatory = true)
+            mandatory = true)
         val provider = GeminiProviderSetting(id = "manual-config", name = "Gemini", models = listOf(
             Model(id = "future", modelId = "gemini-future", displayName = "未来模型",
                 reasoningOverride = true, reasoningCapabilitiesOverride = manual),
@@ -106,9 +106,9 @@ class GeminiProviderConfigurationTest {
         val model = stored.models.single()
         assertEquals(manual, model.reasoningCapabilitiesOverride)
         assertEquals(manual, RuntimeConfigRepository.buildRuntimeConfig(stored, model).reasoningCapabilities)
-        assertEquals(listOf(ReasoningEffort.DEFAULT), requireNotNull(
-            RuntimeConfigRepository.buildRuntimeConfig(stored, model.copy(reasoningOverride = null,
-                reasoningCapabilitiesOverride = null)).reasoningCapabilities).selectableEfforts)
+        // 手写声明撤掉、目录又没有这个型号 ⇒ 未声明（null），而不是「只有 Default」的空声明。
+        assertNull(RuntimeConfigRepository.buildRuntimeConfig(stored, model.copy(reasoningOverride = null,
+            reasoningCapabilitiesOverride = null)).reasoningCapabilities)
     }
 
     @Test

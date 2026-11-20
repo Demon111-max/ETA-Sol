@@ -79,6 +79,7 @@ import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -179,10 +180,13 @@ internal fun ModelEffortControl(
         ink.copy(alpha = if (isDark) 0.10f else 0.065f)
     }
     val interactionSource = remember { MutableInteractionSource() }
-    // OFF 时药丸视觉上只剩模型名，读屏不能也跟着丢掉「思考已关」这层意思（3.4.49 审理 P3-4）。
+    // 读屏文案与药丸文字同口径：一律「模型名 · 档位词」，OFF 用「已关闭」补上「思考已关」
+    // 这层意思（3.4.49 审理 P3-4）。此前只有 OFF 态拼了模型名，其余态只剩一个档位词，
+    // 同一颗药丸在不同状态下读屏说的事不一样（3.4.50 审理 P3-4）。
+    val effortWord = gearLabel ?: stringResource(R.string.effort_off_label)
     val description = stringResource(
         R.string.chat_reasoning_effort,
-        gearLabel ?: "$modelName · ${stringResource(R.string.effort_off_label)}",
+        "$modelName · $effortWord",
     )
 
     val density = LocalDensity.current
@@ -232,15 +236,26 @@ internal fun ModelEffortControl(
         if (sheet != ModelEffortSheet.None) {
             renderedSheet = sheet
             exiting = false
+            // 开层就清掉「被禁用收起」的标记：上一次退场动画播到一半被这次开层打断时，
+            // 下面的收尾块根本不会执行，标记会一直留到下一次正常关层，把 onSheetClosed()
+            // 吞掉一次（键盘不回弹，3.4.50 审理 P3-1）。
+            sheetClosedByDisable = false
             sheetProgress.animateTo(
                 targetValue = 1f,
                 animationSpec = spring(dampingRatio = 0.93f, stiffness = 480f),
             )
         } else if (renderedSheet != ModelEffortSheet.None) {
-            // 关层意图一出现就取消待确认的选模型：140ms 内点遮罩/按返回关层，
-            // 是用户明确的取消，不许任务到期后照样把模型换掉（3.4.49 审理）。
-            pickJob?.cancel()
+            // 140ms 确认窗内关层：点模型行这个动作已经表达了选择，不许把这唯一一笔待确认的
+            // 选择连同勾一起丢掉——勾停在 pickedModelId 上却不回调，药丸显示一套实际一套，
+            // 一直错到下次开层（3.4.50 审理 P2-10）。所以这里把待确认的那笔立即结清。
+            // 例外是「被禁用自动收起」：那一步发生在流式开始，状态层会挡下改模型，
+            // 提交了只会让勾与实际模型再次分叉，按取消处理。
+            val pendingPick = pickJob
             pickJob = null
+            if (pendingPick != null) {
+                pendingPick.cancel()
+                if (!sheetClosedByDisable) pickedModelId?.let(onModelSelected)
+            }
             exiting = true
             sheetProgress.animateTo(
                 targetValue = 0f,
@@ -252,6 +267,9 @@ internal fun ModelEffortControl(
                 // 切换遮罩的单向闩锁在这里解开：只有这里知道「内容切换/退场都结束了」
                 // （3.4.49 审理 P3-3）。
                 contentSwitching = false
+                // 退场播完就把 exiting 落回 false：此前只靠下一次开层重置，中途被打断时
+                // 它会一直是 true，遮罩判据跟着错到下次开层（3.4.50 审理 P3-7）。
+                exiting = false
                 // 焦点归还等浮层真正撤下后再发：退场动画期间卡片 Popup 还是可聚焦窗口，
                 // 提前 requestFocus 会被它抢走、键盘回不来（3.4.49 审理，原问题 6 的时序补完）。
                 // 被禁用自动收起的路径不还焦点：那是流式开始，键盘本就该收着。
@@ -443,6 +461,10 @@ internal fun ModelEffortControl(
                                     pickJob?.cancel()
                                     pickJob = sheetScope.launch {
                                         delay(140)
+                                        // 先清任务引用再落选择：关层分支靠 pickJob 判断「有没有
+                                        // 待确认的选择」，留着引用会让同一笔选择被结清两次
+                                        // （3.4.50 审理 P2-10）。
+                                        pickJob = null
                                         // 先落选择、再关层。反过来的话，关层那一步会走
                                         // LaunchedEffect(sheet) 的取消分支把本任务 cancel 掉，
                                         // 全靠「两条语句之间没有挂起点」才侥幸没丢选择（3.4.49 审理 P2-8）。
@@ -492,6 +514,14 @@ private object WindowOriginPositionProvider : PopupPositionProvider {
 private val SheetSwitchEase = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
 
 /**
+ * 浮层卡片宽度（Sol 的 --sheet-width = 270dp）。
+ * 卡片外框、模型列表、档位内容三处都要用它：内容宽度决定卡片背景的实际宽度
+ * （内层 Box 是包裹尺寸），改一处漏一处就会让某张卡片的底色比外框窄一截，
+ * 所以提成一份常量共用（3.4.50 审理 P3-10）。
+ */
+private val SheetWidth = 270.dp
+
+/**
  * Sol 浮层卡片：宽 270dp、圆角 18dp（--r-sheet）、边框 1dp。
  * 投影照 --shadow-sheet 的两层：外层 0 14px 40px rgba(15,15,15,0.11)、内层 0 2px 8px rgba(15,15,15,0.05)，
  * Compose 的单值 elevation 画不出双层，用两个嵌套 shadow 近似（大 elevation 承第一层、小 elevation 承第二层）。
@@ -510,7 +540,7 @@ private fun SolSheetCard(
     val cardColor = if (isDark) lerp(colors.surface, Color.White, 0.07f) else colors.surface
     Box(
         modifier = modifier
-            .width(270.dp)
+            .width(SheetWidth)
             .shadow(
                 elevation = 20.dp,
                 shape = shape,
@@ -572,7 +602,7 @@ private fun SolModelList(
     )
     Column(
         modifier = Modifier
-            .width(270.dp)
+            .width(SheetWidth)
             .heightIn(max = maxHeight)
             .padding(vertical = 6.dp),
     ) {
@@ -620,7 +650,13 @@ private fun SolModelList(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 34.dp)
-                        .clickable(role = Role.Button, enabled = enabled) { onModelSelected(model.id) }
+                        // 单选行：role 用 RadioButton，读屏才报「单选按钮 · 已选中」；
+                        // 用 Button 只会读成普通按钮（3.4.50 审理 P3-6）。
+                        .clickable(
+                            enabled = enabled,
+                            role = Role.RadioButton,
+                            onClick = { onModelSelected(model.id) },
+                        )
                         .semantics { selected = isSelected }
                         .padding(horizontal = 12.dp),
                 ) {
@@ -734,7 +770,7 @@ private fun EffortSheetContent(
 
     Box(
         modifier = Modifier
-            .width(270.dp)
+            .width(SheetWidth)
             .height(104.dp)
             .padding(horizontal = 13.dp),
     ) {
@@ -824,9 +860,19 @@ private fun EffortSheetContent(
                         previewIndex = index
                     },
                     onRelease = { index ->
-                        // 落档按「相对打开时的位置有没有移动」判断：DEFAULT 在滑块上的兜底位置
-                        // 就是 High，点在自己手柄上不该把「默认」具体化成 High（3.4.49 审理 P3-6）。
-                        if (index != initialIndex) onEffortChange(gears[index])
+                        // 预览与落档必须同一门控，否则大词已经换成新档、effort 还是旧值，
+                        // 显示一套实际一套（3.4.50 审理 P2-3）。判据两条：
+                        // 1) 停在打开时的位置上就不落档：DEFAULT 在滑块上的兜底位置就是 High，
+                        //    点在自己手柄上不该把「默认」具体化成 High（3.4.49 审理 P3-6）；
+                        // 2) 但 OFF 在滑块上没有自己的位置（手柄停在第一档、大词写「已关闭」），
+                        //    所以停在第一档是「开思考到这个档」的真实意图，必须落档。
+                        if (index != initialIndex || effort == ReasoningEffort.OFF) {
+                            onEffortChange(gears[index])
+                        } else {
+                            // 不落档就把预览退回实际档，大词回到「默认」而不是停在某个具体档上。
+                            interacted = false
+                            previewIndex = initialIndex
+                        }
                     },
                     onDragCancelled = {
                         // 手势被系统取消/中途禁用：预览与「已交互」标记一起退回，
@@ -844,9 +890,12 @@ private fun EffortSheetContent(
                         .clip(CircleShape)
                         .background(colors.primary.copy(alpha = 0.12f), CircleShape)
                         .border(0.5.dp, colors.primary.copy(alpha = 0.25f), CircleShape)
-                        .clickable(enabled = enabled, role = Role.Button) {
-                            if (enabled) onEffortChange(only)
-                        }
+                        // clickable 已经带 enabled 门控，这里不再重复判断（3.4.50 审理 P3-11）。
+                        .clickable(
+                            enabled = enabled,
+                            role = Role.Button,
+                            onClick = { onEffortChange(only) },
+                        )
                         .padding(horizontal = 14.dp),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -868,8 +917,11 @@ private fun EffortSheetContent(
  * Sol 原版 5 档滑块，长相照 app.css 的 .slider：
  * 轨道是 25dp 粗的浅灰（#EBEBEB）胶囊，强调色填充以 scaleX 从左长到手柄处；
  * 5 个 4dp 刻度点画在轨道里面（横向内缩 12dp 等分），已过刻度在填充上呈半透明白、未过为 #C4C4C4；
- * 手柄是 29dp 白圆钮，在内缩 14.5dp 的轨道里走（圆心正对刻度），阴影照 --shadow-knob：
+ * 手柄是 29dp 白圆钮，在内缩 14.5dp 的轨道里走，阴影照 --shadow-knob：
  * 0 1px 4px rgba(15,15,15,0.22) 用一层小 elevation 近似，外加 1px 圈 rgba(15,15,15,0.04) 用描边落。
+ * 刻度圆心与手柄圆心并不重合：刻度圆心 x = 12 + (W−24)·f，手柄圆心 x = 14.5 + (W−29)·f，
+ * 两者相差 5f − 2.5dp（f 是 0..1 的档位进度）——f=0.5 时重合，两端各偏 2.5dp。
+ * 这组数值取自 Sol 原版，强行对齐会让刻度和手柄同时离开原版位置（3.4.50 审理 P3-8）。
  * 弹簧 stiffness 560 / dampingRatio ≈ 0.86（原版 damping 34 / mass 0.7），拖动放大 1.15（弹簧 700/30），
  * 过刻度震动、松手吸附最近档才回调，轻点轨道直接跳档。
  */
@@ -882,6 +934,10 @@ private fun EffortSlider(
     onRelease: (Int) -> Unit,
     onDragCancelled: () -> Unit,
 ) {
+    // 单档/零档不该走滑块：调用方把单档交给下面的「选用钮」分支（EffortSheetContent 里
+    // gears.size == 1），零档连滑块都不组合。这里再挡一层，免得将来多一处调用时把 0..0 的
+    // range 和「共 1 档」交给读屏（3.4.50 审理 P3-3）。
+    if (gears.size < 2) return
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val segments = (gears.size - 1).coerceAtLeast(1)
@@ -925,7 +981,7 @@ private fun EffortSlider(
     LaunchedEffect(selectedIndex) { hapticIndex.intValue = selectedIndex }
     // 流式开始等禁用态：浮层开着时药丸已被门控，浮层内的滑块同样不许改档。
     val latestEnabled by rememberUpdatedState(enabled)
-    // 回调与选中档一律走最新值：pointerInput 只以 gears 为 key，块里直接抓的参数
+    // 回调与选中档一律走最新值：pointerInput 只以 gears / density 为 key，块里直接抓的参数
     // 会停在手势块创建那一刻——外部改档后旧 onRelease 闭包里的 effort 是陈值，
     // 「拖回原档」会被误判成没变化而吞掉（3.4.49 审理）。
     val latestSelectedIndex by rememberUpdatedState(selectedIndex)
@@ -941,13 +997,19 @@ private fun EffortSlider(
         modifier = Modifier
             .fillMaxWidth()
             .height(45.dp)
-            .semantics {
+            // mergeDescendants：轨道、刻度、手柄都是纯绘制节点，合并成一个焦点；
+            // 不合并时读屏会在同一颗滑块上停两次（3.4.50 审理 P3-18）。
+            .semantics(mergeDescendants = true) {
                 contentDescription = sliderDescription
                 progressBarRangeInfo = ProgressBarRangeInfo(
                     current = selectedIndex.toFloat(),
                     range = 0f..gears.lastIndex.coerceAtLeast(0).toFloat(),
                     steps = (gears.size - 2).coerceAtLeast(0),
                 )
+                // 补上「第几档 / 共几档」：progressBarRangeInfo 只给出数值范围，读屏不会
+                // 自己换算成档位序号（3.4.50 审理 P3-5）。序号用纯数字拼，本控件不新增
+                // 字符串资源——档位词已由 contentDescription 提供，这里只补位置。
+                stateDescription = "${selectedIndex + 1} / ${gears.size}"
                 setProgress { target ->
                     if (!latestEnabled) {
                         false
@@ -960,7 +1022,12 @@ private fun EffortSlider(
                 }
             }
             .onGloballyPositioned { trackWidthPx = it.size.width }
-            .pointerInput(gears) {
+            // density 也要进 key：命中区按 dp→px 换算，改字号/显示大小后不重建手势块，
+            // 就还按旧密度算落点，点到的手柄位置与看到的差一截（3.4.50 审理 P3-2）。
+            .pointerInput(gears, density) {
+                // 内缩量在块首换算一次：pointerInput 的作用域本身就是 Density，
+                // 不必再 with(density)（3.4.50 审理 P3-19）。
+                val railPaddingPx = railPadding.toPx()
                 // 点按与拖动共用一条手势回路。旧实现是两个 pointerInput 分别跑
                 // detectTapGestures / detectDragGestures：两套检测器抢同一串事件，
                 // 点按落档会被拖动检测器干扰而丢失——真机实证：点 Light 位置，
@@ -975,7 +1042,6 @@ private fun EffortSlider(
                     // 不查 isConsumed 的话滑块照样跟手改档，罩子在主控件上落空（3.4.49 审理）。
                     if (down.isConsumed) return@awaitEachGesture
                     if (!latestEnabled || trackWidthPx <= 0) return@awaitEachGesture
-                    val railPaddingPx = with(density) { railPadding.toPx() }
                     fun fractionForX(x: Float): Float {
                         val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(1f)
                         return ((x - railPaddingPx) / usable).coerceIn(0f, 1f)
@@ -996,9 +1062,11 @@ private fun EffortSlider(
                             // 由下面的取消分支把预览退回实际档位（3.4.49 审理 P2-10）。
                             if (!latestEnabled) break
                             // 抬起或被系统取消。系统取消（ACTION_CANCEL）在 compose 里是合成一个
-                            // pressed=false 且已被消费的 PointerEvent，走上面的 isConsumed 分支，
-                            // 所以能走到这里的一定是用户真抬手——不用再拿 changedToUp() 判别
-                            // （那个判据在此处恒为真，是死逻辑，3.4.49 审理 P2-9）。
+                            // pressed=false 且已被消费的 PointerEvent，被上面的 isConsumed 分支
+                            // 抢先 break 掉，所以能走到这里的一定是用户真抬手。
+                            // 下面这个判据就是 changedToUp() 的定义（previousPressed && !pressed），
+                            // 就地展开只是省一个 API，语义完全等价——此前注释说「不能用
+                            // changedToUp() 判别」是错的（3.4.50 审理 P3-12）。
                             if (change.previousPressed && !change.pressed) {
                                 upX = change.position.x
                                 released = true
@@ -1080,11 +1148,13 @@ private fun EffortSlider(
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
+                    // offset 的 lambda 接收者本身就是 Density，不必再 with(density)
+                    // （3.4.50 审理 P3-19）。
                     .offset {
-                        val tickPaddingPx = with(density) { tickPadding.toPx() }
+                        val tickPaddingPx = tickPadding.toPx()
                         val usable = (trackWidthPx - tickPaddingPx * 2).coerceAtLeast(0f)
                         IntOffset(
-                            x = (tickPaddingPx + usable * tickFraction - with(density) { 2.dp.toPx() }).roundToInt(),
+                            x = (tickPaddingPx + usable * tickFraction - 2.dp.toPx()).roundToInt(),
                             y = 0,
                         )
                     }
@@ -1104,9 +1174,9 @@ private fun EffortSlider(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .offset {
-                    val railPaddingPx = with(density) { railPadding.toPx() }
+                    val railPaddingPx = railPadding.toPx()
                     val usable = (trackWidthPx - railPaddingPx * 2).coerceAtLeast(0f)
-                    val knobPx = with(density) { knobSize.toPx() }
+                    val knobPx = knobSize.toPx()
                     IntOffset(
                         x = (railPaddingPx + usable * fractionState.floatValue - knobPx / 2).roundToInt(),
                         y = 0,

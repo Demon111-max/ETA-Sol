@@ -2,8 +2,11 @@ package io.github.mangi.eta.agent.runtime
 
 import android.content.SharedPreferences
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.ProviderReasoning
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.CustomBody
+import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.lang.reflect.Proxy
 import kotlinx.serialization.json.JsonObject
@@ -174,6 +177,64 @@ class AgentRuntimePolicyTest {
         val metadata = constrained.customBody.single().value as JsonObject
         assertFalse("enable_thinking" in metadata)
         assertEquals(JsonPrimitive("kept"), metadata["safe"])
+    }
+
+    @Test
+    fun globalThinkingOffFallsBackToASendableEffortForModelsWithoutOff() {
+        // 3.4.50 P1-4：全局关思考 × 模型没有 OFF 档（mandatory / canDisable=false）时，
+        // 不能把不可选的 OFF 直接塞进请求——发送侧 require 会抛 IllegalArgumentException
+        // 让整轮失败。这里按能力归一化到可发送档，OFF 变成服务商默认（DEFAULT）。
+        val capabilities = ModelReasoningCapabilities(
+            supportedEfforts = listOf(ReasoningEffort.LOW, ReasoningEffort.HIGH),
+            defaultEffort = ReasoningEffort.HIGH,
+            mandatory = true,
+        )
+        val constrained = AgentRuntimePolicy.constrain(
+            config = modelConfig(
+                terminalTools = false,
+                browserTools = false,
+                thinking = true,
+            ).copy(
+                providerSourceType = ProviderSourceTypes.XAI,
+                reasoningEffort = ReasoningEffort.HIGH,
+                reasoningCapabilities = capabilities,
+            ),
+            permissions = AgentRuntimePolicy.Permissions(
+                terminalTools = false,
+                browserTools = false,
+                thinking = false,
+                autoCompaction = false,
+                subagentTools = false,
+                virtualDisplay = false,
+            ),
+        )
+
+        assertEquals(ReasoningEffort.DEFAULT, constrained.reasoningEffort)
+        assertTrue(constrained.thinkingEnabled)
+        // 发送侧不再抛错：DEFAULT 档什么都不写。
+        val body = JSONObject()
+        ProviderReasoning.applyOpenAiCompatibleRequest(body, constrained)
+        assertFalse(body.has("reasoning_effort"))
+
+        // 能真关思考的模型仍然真关。
+        val disableable = AgentRuntimePolicy.constrain(
+            config = modelConfig(terminalTools = false, browserTools = false, thinking = true)
+                .copy(
+                    providerSourceType = ProviderSourceTypes.XAI,
+                    reasoningEffort = ReasoningEffort.HIGH,
+                    reasoningCapabilities = capabilities.copy(mandatory = false, canDisable = true),
+                ),
+            permissions = AgentRuntimePolicy.Permissions(
+                terminalTools = false,
+                browserTools = false,
+                thinking = false,
+                autoCompaction = false,
+                subagentTools = false,
+                virtualDisplay = false,
+            ),
+        )
+        assertEquals(ReasoningEffort.OFF, disableable.reasoningEffort)
+        assertFalse(disableable.thinkingEnabled)
     }
 
     private fun modelConfig(

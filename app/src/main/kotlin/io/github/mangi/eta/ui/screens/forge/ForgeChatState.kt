@@ -180,7 +180,6 @@ internal suspend fun prewarmForgeServer(context: Context) {
                     settings = shared.settings,
                     credentials = shared.credentials,
                     reasoningCapabilities = shared.reasoningCapabilities,
-                    reasoningDisabled = shared.reasoningDisabled,
                 )
                 is ForgeConfigWriteResult.Written
             ) {
@@ -348,7 +347,12 @@ internal class ForgeChatState(
     var reasoningCapabilities by mutableStateOf<ModelReasoningCapabilities?>(null)
         private set
 
-    /** 当前模型被明确声明不支持思考：档位一律关闭（发送不带 variant），与「能力未知」严格区分。由 applySharedConfig() 同步。 */
+    /**
+     * 当前模型被明确声明不支持思考：档位一律关闭（发送不带 variant），与「能力未知」严格区分。
+     * 它与 [reasoningCapabilities] == null 是同一个事实的两种表示（resolveForgeSharedConfig
+     * 里两者同源：effectiveReasoning == false），保留它是给 UI 直接判断用；配置写入只看能力，
+     * 不要再拿它当第二真值（3.4.51 P2-8）。由 applySharedConfig() 同步。
+     */
     var reasoningDisabled by mutableStateOf(false)
         private set
 
@@ -834,12 +838,13 @@ internal class ForgeChatState(
         reasoningDisabled = shared.reasoningDisabled
         // 换模型/在设置页改了能力后，当前档可能已超出新能力的上限：立刻归一化并回显，
         // 不等到发送时才被静默改掉——「显示一套实际一套」就是这么来的（链式反应防漏项）。
-        // 明确不支持思考的模型直接落回 DEFAULT（forgeVariant 对它返回 null、不发 variant）。
-        reasoningEffort = when {
-            shared.reasoningDisabled -> ReasoningEffort.DEFAULT
-            shared.reasoningCapabilities != null -> shared.reasoningCapabilities.normalize(reasoningEffort)
-            else -> ReasoningEffort.OFF
-        }
+        // 能力为 null 就是「模型被明确声明不支持思考」（effectiveReasoningCapabilities 唯一的
+        // null 出口，与 reasoningDisabled 是同一件事）：此时档位一律落 DEFAULT，forgeVariant
+        // 对它返回 null、一个 variant 都不发。此前这里还有一支 else -> OFF，被 reasoningDisabled
+        // 挡在前面永远走不到，而且它写的 OFF 与产物矛盾（OFF 会发 variant "off"，可这类模型
+        // 连 variant 都没被写进配置）（3.4.50 审理 P3-26）。
+        reasoningEffort = shared.reasoningCapabilities?.normalize(reasoningEffort)
+            ?: ReasoningEffort.DEFAULT
         // 新对话/换模型时播种一次（与 Assist 同一口径，见 initialReasoningEffort）：
         // DEFAULT 只是「还没选过」的占位，能力已知时落到声明的默认档、没有才兜底 High。
         // 只播一次：此前每次发送前都重播，用户在药丸里选「默认」后下一次发送又被打回 High，
@@ -847,9 +852,12 @@ internal class ForgeChatState(
         if (!shared.reasoningDisabled && !reasoningEffortExplicit &&
             seededModelId != shared.settings.modelId
         ) {
+            // 这段被 !reasoningDisabled 挡着，而「能力为 null」与它等价 ⇒ 这里的 capabilities
+            // 必定非空；兜底写 DEFAULT 而不是 OFF：OFF 是「用户/全局开关明确关思考」的产物，
+            // 不该从「没有能力声明」里长出来（3.4.50 审理 P3-26 同类）。
             reasoningEffort = shared.reasoningCapabilities?.let { capabilities ->
                 capabilities.normalize(capabilities.defaultEffort ?: ReasoningEffort.HIGH)
-            } ?: ReasoningEffort.OFF
+            } ?: ReasoningEffort.DEFAULT
             seededModelId = shared.settings.modelId
         }
         val fingerprint = forgeConfigFingerprint(
@@ -865,7 +873,6 @@ internal class ForgeChatState(
                 settings = shared.settings,
                 credentials = shared.credentials,
                 reasoningCapabilities = shared.reasoningCapabilities,
-                reasoningDisabled = shared.reasoningDisabled,
             )) {
                 ForgeConfigWriteResult.Written -> {
                     // 重启失败要让调用方知道：server 没起来还继续往下发，只会无声卡死；
@@ -1949,8 +1956,9 @@ internal class ForgeChatState(
 
     /**
      * DEFAULT 不发 variant（用上游默认）；OFF 发 "off"——配置里那个 variant 是「真关」
-     * （reasoningEffort=none + thinking disabled，见 ForgeConfigWriter）。此前 OFF 与 DEFAULT
-     * 同产物（都不发 variant），药丸显示「关闭」、上游照样开着思考（3.4.49 审理 P1-3）。
+     * （reasoningEffort=none，见 ForgeConfigWriter；Forge 只接 OpenAI 兼容/Responses，
+     * 这两条协议只认这个键）。此前 OFF 与 DEFAULT 同产物（都不发 variant），药丸显示
+     * 「关闭」、上游照样开着思考（3.4.49 审理 P1-3）。
      */
     private fun ReasoningEffort.forgeVariant(): String? = when (this) {
         ReasoningEffort.DEFAULT -> null

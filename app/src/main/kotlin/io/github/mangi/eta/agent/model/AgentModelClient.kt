@@ -42,7 +42,9 @@ internal object AgentModelClient {
                 val effort = if (thinkingAllowed) {
                     runtime.effectiveReasoningEffort
                 } else {
-                    ReasoningEffort.OFF
+                    // 全局关思考：按模型能力归一化，别把不可选的 OFF 交给发送侧 require
+                    // 抛错（3.4.50 审理 P1-4）；没声明能力就照旧 OFF（那时什么都不发）。
+                    runtime.reasoningCapabilities?.disabledEffort() ?: ReasoningEffort.OFF
                 }
                 return runtime.copy(
                     terminalTools = Prefs.isEnabled(Prefs.Keys.AGENT_TERMINAL_TOOLS),

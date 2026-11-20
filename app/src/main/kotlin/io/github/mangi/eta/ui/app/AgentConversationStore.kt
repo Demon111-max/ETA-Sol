@@ -32,6 +32,7 @@ import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
@@ -41,6 +42,74 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * 未发送草稿的旁路存储（3.4.50 审理 P3-14 / P3-16）。
+ *
+ * 为什么单开一份 JSON：草稿要活过进程死亡，而 `conversations` 表没有草稿列；加列意味着
+ * Room 版本号 + 迁移脚本（本批禁止改 data/db，也不许新增 DB/wire 字段）。草稿只是
+ * 「会话 id → 一段文本」，写坏了最多丢草稿，所以它必须待在正文事务**外面**，
+ * 绝不能让一份草稿把会话正文的写入一起拖下水。
+ */
+private object AgentDraftStore {
+    private const val FileName = "agent_conversation_drafts.json"
+    private val mutex = Mutex()
+
+    private fun file(context: Context): File = File(context.applicationContext.filesDir, FileName)
+
+    /** 读草稿表；文件不存在/半截 JSON/被清理过一律当作「没有草稿」，绝不抛给调用方。 */
+    fun load(context: Context): Map<String, String> = try {
+        val target = file(context)
+        if (!target.isFile) {
+            emptyMap()
+        } else {
+            val raw = target.readText()
+            if (raw.isBlank()) {
+                emptyMap()
+            } else {
+                val json = JSONObject(raw)
+                json.keys().asSequence().associateWith { key -> json.optString(key, "") }
+            }
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Throwable) {
+        AndroidAgentLogger.warnThrottled("agent_drafts_read_failed") {
+            "Agent draft store read failed: type=${failure.safeLogType()}"
+        }
+        emptyMap()
+    }
+
+    /** 整份草稿表一次写出；空表就删文件，别在磁盘上留一份空 JSON。 */
+    suspend fun save(context: Context, drafts: Map<String, String>) = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val target = file(context)
+            try {
+                if (drafts.isEmpty()) {
+                    if (target.exists()) target.delete()
+                } else {
+                    val payload = JSONObject()
+                    drafts.forEach { (id, text) -> payload.put(id, text) }
+                    // 先写临时文件再改名：进程在写一半时被杀，读到的还是上一份完整草稿，
+                    // 不会出现半截 JSON 让所有会话的草稿一起作废。
+                    val temp = File(target.parentFile, "$FileName.tmp")
+                    temp.writeText(payload.toString())
+                    if (!temp.renameTo(target)) {
+                        target.delete()
+                        temp.renameTo(target)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                AndroidAgentLogger.warnThrottled("agent_drafts_write_failed") {
+                    "Agent draft store write failed: type=${failure.safeLogType()}"
+                }
+            }
+        }
+    }
+}
 
 internal object AgentConversationStore {
     private val json = Json {
@@ -78,6 +147,20 @@ internal object AgentConversationStore {
     ) = AgentConversationPersistence().save(
         context, Snapshot(selectedConversationId, conversationsById, titles, updatedAt, pinnedIds),
     )
+
+    /**
+     * 只写草稿、不碰正文（3.4.50 审理 P3-14）。
+     *
+     * 给「打字」这条高频路径用：输入栏 200ms 节流后的回写没必要每次都跑完整保存
+     * （那要查一遍会话元数据、比对历史与消息、推进保存基线）。传进来的是**全量**草稿表，
+     * 不是增量——磁盘上只有一份文件，按会话增量写会把别的会话的草稿抹掉。
+     */
+    suspend fun saveDrafts(context: Context, drafts: Map<String, String>) =
+        AgentDraftStore.save(context, drafts.filterValues { it.isNotEmpty() })
+
+    /** 快照里的草稿表；空草稿不入表，别在磁盘上堆一串空串。 */
+    private fun Map<String, AgentConversationPersistence.Content>.drafts(): Map<String, String> =
+        mapValues { (_, content) -> content.input }.filterValues { it.isNotEmpty() }
 
     internal suspend fun saveChanges(
         context: Context,
@@ -173,6 +256,15 @@ internal object AgentConversationStore {
                         if (selected == null) dao.deleteState()
                         else dao.insertState(ConversationStateEntity(selectedConversationId = selected))
                     }
+                    // 草稿旁路落盘（3.4.50 审理 P3-14 / P3-16）：正文事务成功之后才写，
+                    // 事务回滚就整份不写，不会出现「正文没落、草稿先落」。
+                    // 必须整张表一起写，不能只写这次改动的会话：未载入的会话（上面
+                    // `if (!state.isConversationLoaded)` 那条 continue 分支）在内存里只有侧栏预览，
+                    // 它的草稿**只**存在于这份文件里——按会话增量写就会把它静默抹掉（P3-16 持久化侧）。
+                    val drafts = current.drafts()
+                    if (drafts != previous.drafts()) {
+                        AgentDraftStore.save(appContext, drafts)
+                    }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Throwable) {
@@ -201,6 +293,9 @@ internal object AgentConversationStore {
         val titles = mutableMapOf<String, String>()
         val updatedAt = mutableMapOf<String, Long>()
         val pinnedIds = mutableSetOf<String>()
+        // 3.4.50 审理 P3-14：草稿不在数据库里，回读必须从旁路文件取，否则每次启动
+        // `input` 恒为空——进程死亡后草稿就是没了。
+        val drafts = AgentDraftStore.load(context)
         conversations.forEach { conversation ->
             val effort = ReasoningEffort.fromWireValue(conversation.reasoningEffort) ?: ReasoningEffort.DEFAULT
             val character = if (conversation.hasRoleplay) loadCharacterSummary(dao, conversation.id) else null
@@ -212,7 +307,9 @@ internal object AgentConversationStore {
                         toolName = conversation.toolName,
                     ).toMessageOrNull()
                 }),
-                input = "", isStreaming = false, thinkingEnabled = effort.enablesReasoning,
+                // 未载入的会话也要回填草稿：侧栏切过去时它得立刻显示上次没发出去的字。
+                input = drafts[conversation.id].orEmpty(),
+                isStreaming = false, thinkingEnabled = effort.enablesReasoning,
                 reasoningEffort = effort, modelId = conversation.modelId, isConversationLoaded = false,
                 conversationCharacterName = character?.first, conversationCharacterAvatarPath = character?.second,
             )
@@ -247,6 +344,8 @@ internal object AgentConversationStore {
     )
 
     suspend fun loadConversation(context: Context, conversationId: String): AgentChatHomeUiState? = withContext(Dispatchers.IO) {
+        // 3.4.50 审理 P3-14：草稿在旁路文件里（见 AgentDraftStore），不进事务。
+        val draft = AgentDraftStore.load(context.applicationContext)[conversationId].orEmpty()
         val database = EtaDatabase.get(context.applicationContext)
         database.withTransaction {
             val dao = database.conversationDao()
@@ -268,7 +367,7 @@ internal object AgentConversationStore {
                 messages = page.messages,
                 history = history.ifEmpty { loadLegacyHistory(dao, conversationId) },
                 appliedRuntimeRunIds = conversation.appliedRuntimeRunIdsJson.toStringList(),
-                input = "", isStreaming = false,
+                input = draft, isStreaming = false,
                 thinkingEnabled = conversation.reasoningEffortValue.enablesReasoning,
                 reasoningEffort = conversation.reasoningEffortValue,
                 modelId = conversation.modelId,

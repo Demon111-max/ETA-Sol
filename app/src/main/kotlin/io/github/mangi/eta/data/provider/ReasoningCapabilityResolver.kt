@@ -33,7 +33,6 @@ internal object ReasoningCapabilityResolver {
         return catalogCapabilities(sourceType, model.modelId)
             ?: familyCapabilities(sourceType, model.modelId)
             ?: ModelReasoningCapabilities(
-                defaultEnabled = true,
                 mandatory = true,
             )
     }
@@ -221,7 +220,6 @@ internal object ReasoningCapabilityResolver {
     }
 
     private fun mandatoryDefault() = ModelReasoningCapabilities(
-        defaultEnabled = true,
         mandatory = true,
     )
 
@@ -235,7 +233,6 @@ internal object ReasoningCapabilityResolver {
     ) = ModelReasoningCapabilities(
         supportedEfforts = supported,
         defaultEffort = defaultEffort,
-        defaultEnabled = true,
         mandatory = mandatory,
         canDisable = canDisable,
         supportsBudget = supportsBudget,

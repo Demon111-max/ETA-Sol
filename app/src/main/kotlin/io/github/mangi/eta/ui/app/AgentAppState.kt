@@ -109,6 +109,8 @@ internal class AgentAppState(
     private val pendingConversationDeletes = mutableSetOf<String>()
     private val persistenceLock = Any()
     private var persistenceJob: Job? = null
+    // 草稿旁路落盘的防抖句柄（3.4.51 P3-14）：与正文保存分开，连打只落最后一次。
+    private var draftPersistJob: Job? = null
     // 导入期间暂停保存：旧状态的增量保存会删除刚导入的会话；导入成功后整体重载，失败时数据库已回滚。
     private var persistencePaused = false
     private val runtimeRecoveryInProgress = AtomicBoolean(false)
@@ -837,6 +839,47 @@ internal class AgentAppState(
     fun updateInputDraft(text: String) {
         if (homeState.input == text) return
         updateCurrentConversation(homeState.copy(input = text), updateTimestamp = false)
+        scheduleDraftPersist()
+    }
+
+    /**
+     * 草稿单独落盘（3.4.51 P3-14）：只写 agent_conversation_drafts.json，不跑正文事务。
+     *
+     * 输入栏 200ms 节流后的回写是高频路径，每次都跑完整保存代价太大（要查会话元数据、比对
+     * 历史与消息、推进保存基线），所以草稿走 [DraftPersistDelayMillis] 防抖的小文件写入。
+     * 传全量草稿表：磁盘上只有一份文件，按会话增量写会把别的会话的草稿静默抹掉。
+     * 这样「打完字立刻被杀」也只丢最后 400ms，不再整段丢。
+     */
+    private fun scheduleDraftPersist() {
+        draftPersistJob?.cancel()
+        val drafts = conversationsById.mapValues { (_, state) -> state.input }
+        draftPersistJob = scope.launch(Dispatchers.IO) {
+            delay(DraftPersistDelayMillis)
+            AgentConversationStore.saveDrafts(appContext, drafts)
+        }
+    }
+
+    /**
+     * 输入栏销毁前的草稿补交（3.4.51 P1-2）：按归属的会话键写回，绝不写「当前会话」。
+     *
+     * 切会话时 [selectConversation] 先改 selectedConversationId、再让输入栏子树重组销毁，
+     * 所以销毁回调到达时「当前会话」已经是新的那个——照 [updateInputDraft] 写就会把旧会话
+     * 的草稿塞进新会话（还会覆盖新会话已有的草稿），旧会话照样丢字。归属键为空（新对话页）
+     * 或该会话已不在内存里时才退回「当前会话」。
+     *
+     * 补交即落盘一次：这一瞬正是用户离开会话的时刻，之后再无写回机会，进程随后被杀也不丢
+     * （3.4.50 审理 P1-2 / P3-14 的落盘口）。
+     */
+    fun flushInputDraft(conversationKey: String?, text: String) {
+        val conversationId = conversationKey?.takeIf { it in conversationsById }
+        if (conversationId == null) {
+            updateInputDraft(text)
+            return
+        }
+        val current = conversationsById.getValue(conversationId)
+        if (current.input == text) return
+        updateConversation(conversationId, current.copy(input = text), updateTimestamp = false)
+        persistConversations()
     }
 
     fun updateReasoningEffort(effort: ReasoningEffort) {
@@ -1428,7 +1471,10 @@ internal class AgentAppState(
     ) {
         if (!homeState.isConversationLoaded || homeState.isCompacting ||
             selectedConversationId in pendingConversationDeletes) return
-        val prompt = (submittedText ?: homeState.input).trim()
+        // 原始草稿单独留一份：prompt 必须 trim（首尾空白不该发给模型），但注册被拒时放回
+        // 输入区的得是用户原样的字，拿 trim 过的顶替就把首尾空白吃掉了（3.4.50 审理 P3-15）。
+        val rawDraft = submittedText ?: homeState.input
+        val prompt = rawDraft.trim()
         val pendingImages = homeState.pendingImages
         val pendingFileReferences = homeState.pendingFileReferences
         if (prompt.isBlank() && pendingImages.isEmpty() && pendingFileReferences.isEmpty()) {
@@ -1522,6 +1568,7 @@ internal class AgentAppState(
             pendingImages = pendingImages,
             pendingFileReferences = pendingFileReferences,
             editBoundary = editBoundary,
+            rejectedDraftText = rawDraft,
         )
     }
 
@@ -1532,7 +1579,13 @@ internal class AgentAppState(
         val targetConversationId = conversationId ?: return
         if (targetConversationId in pendingConversationDeletes) return
         val state = conversationsById[targetConversationId] ?: return
-        if (state.isStreaming || state.isCompacting) return
+        // 出队后才发现这条会话又在跑（或正在压缩）：这条消息已经离开队列了，静默 return
+        // 等于让它在界面上凭空消失（3.4.50 审理 P3-16）。放回队尾、不标 blocked——这是时序
+        // 问题，当前运行收尾后泵自然会把它再取一次，不必等用户介入。
+        if (state.isStreaming || state.isCompacting) {
+            requeueRejectedMessage(targetConversationId, item, blocked = false)
+            return
+        }
         val fileReferences = item.pendingFileReferences.map { it.reference }
         if (
             !AgentFileReferencePolicy.canSend(
@@ -1576,15 +1629,19 @@ internal class AgentAppState(
     }
 
     /**
-     * 排队消息出队后又被发送门拦下：放回队首并落盘，别让这条消息凭空消失
+     * 排队消息出队后又被发送门拦下：放回队列并落盘，别让这条消息凭空消失
      * （出队那一步已经落过盘，3.4.49 审理 P2-3）。用户能在队列条上看到它并撤回继续编辑。
+     *
+     * 默认标 blocked（3.4.50 审理 P2-2）：拦下它的条件（模型不支持图片、文件引用要终端）
+     * 在用户动手改之前不会自己消失，所以这条既不能立刻发、也不许把后面能发的消息堵住。
      */
     private fun requeueRejectedMessage(
         conversationId: String,
         item: QueuedMessageUi,
+        blocked: Boolean = true,
     ) {
         val current = conversationsById[conversationId] ?: return
-        val next = AgentMessageQueueReducer.requeue(current, item)
+        val next = AgentMessageQueueReducer.requeue(current, item, blocked = blocked)
         if (next === current) return
         updateConversation(conversationId, next, updateTimestamp = false)
         if (conversationId == selectedConversationId) persistConversations()
@@ -1598,6 +1655,9 @@ internal class AgentAppState(
         pendingFileReferences: List<PendingFileReferenceUi>,
         editBoundary: AgentConversationRevisionReducer.Boundary?,
         preserveCurrentDraft: Boolean = false,
+        // 注册被拒时要放回输入区的原始草稿；[prompt] 已经 trim 过，不能直接拿来写回
+        // （3.4.50 审理 P3-15）。排队消息的 content 本身就是原文，默认值够用。
+        rejectedDraftText: String = prompt,
     ) {
         val fileReferences = pendingFileReferences.map { it.reference }
         val runtimePrompt = AgentFileReferencePromptCodec.format(prompt, fileReferences)
@@ -1676,7 +1736,7 @@ internal class AgentAppState(
         )
         if (!runLaunched && !preserveCurrentDraft) {
             // 注册被拒（已有 run 在跑等）时不能静默吞掉这条消息：把草稿放回输入区，用户可改后再发。
-            val draftText = prompt.ifBlank {
+            val draftText = rejectedDraftText.ifBlank {
                 messages.filterIsInstance<UserMessageUi>().lastOrNull()?.content.orEmpty()
             }
             conversationsById[conversationId]?.let { current ->
@@ -1686,6 +1746,9 @@ internal class AgentAppState(
                         input = draftText,
                         pendingImages = state.pendingImages,
                         pendingFileReferences = state.pendingFileReferences,
+                        // 放回草稿也要递增版本号：不递增时输入栏只会在下一次外部输入时才
+                        // 对齐，写回来的字要等用户再敲一下才看得见（3.4.50 审理 P3-15）。
+                        inputSyncVersion = current.inputSyncVersion + 1,
                     ),
                 )
             }
@@ -1890,10 +1953,10 @@ internal class AgentAppState(
         if (conversationId in pendingConversationDeletes || !runStore.register(runId, conversationId)) return false
         // 发送即绑定：会话记住本轮实际使用的模型，回落到默认模型时也随之更新。
         val runModelId = state.effectiveModelId
-        val runReasoningEffort = providers.enabledModel(runModelId)?.let { (provider, model) ->
+        val runCapabilities = providers.enabledModel(runModelId)?.let { (provider, model) ->
             RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
-                ?.normalize(reasoningEffort)
-        } ?: ReasoningEffort.OFF
+        }
+        val runReasoningEffort = runCapabilities?.normalize(reasoningEffort) ?: ReasoningEffort.OFF
 
         updateConversation(
             conversationId,
@@ -1955,12 +2018,16 @@ internal class AgentAppState(
                     return@launch
                 }
             }
+            // 全局关思考：能真关就真关，模型没有 OFF 档（mandatory）时收敛到它自己的默认档。
+            // 直接写 OFF 会撞上 AgentModelClient.validate() 的「强制启用思考」require，把整轮
+            // 打死（3.4.50 审理 P1-4）；这里与 AgentRuntimePolicy.constrain 走同一个
+            // disabledEffort() 口径。
             val permittedReasoningEffort = if (
                 agentBooleanForUi(Prefs.Keys.AGENT_THINKING_ENABLED)
             ) {
                 runReasoningEffort
             } else {
-                ReasoningEffort.OFF
+                runCapabilities?.disabledEffort() ?: ReasoningEffort.OFF
             }
             val config = RuntimeConfigRepository.runtimeConfigFor(runModelId)?.copy(
                 terminalTools = agentBooleanForUi(Prefs.Keys.AGENT_TERMINAL_TOOLS),
@@ -2931,6 +2998,9 @@ internal class AgentAppState(
         const val MAX_PREVIEW_CHARS = 48
         const val LEGACY_STOPPED_ERROR = "已停止"
         const val SYNTHETIC_STATUS_STOPPED = "eta_status:stopped"
+
+        /** 草稿旁路落盘的防抖窗口：输入栏本身已 200ms 节流，这里再收一次，避免连打时狂写文件。 */
+        const val DraftPersistDelayMillis = 400L
         private val SHARED_IMAGE_EXTENSIONS = setOf(
             "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif",
         )

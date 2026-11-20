@@ -77,6 +77,12 @@ internal fun AgentHomeScreen(
                     canCompactContext = state.canCompactContext,
                     onModelSelected = { onAction(AgentHomeAction.ModelSelected(it)) },
                     onInputChange = { onAction(AgentHomeAction.InputChanged(it)) },
+                    // 销毁前补交草稿必须带归属：切会话那一刻 selectedConversationId 已经是新会话，
+                    // 只传文本会把旧会话的字写进新会话（3.4.51 P1-2）。这里闭包捕获的是本子树
+                    // 所属的 conversationKey（外层 key(...) 保证切会话时整棵子树重建）。
+                    onDraftFlush = { text ->
+                        onAction(AgentHomeAction.InputFlushed(conversationKey, text))
+                    },
                     onSubmit = { text -> onAction(AgentHomeAction.SubmitMessage(text)) },
                     onInterruptAndSubmit = { text -> onAction(AgentHomeAction.InterruptAndSubmitMessage(text)) },
                     onSteerQueuedMessage = { id -> onAction(AgentHomeAction.SteerQueuedMessage(id)) },

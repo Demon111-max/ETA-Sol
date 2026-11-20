@@ -326,7 +326,6 @@ internal object RemoteModelFetcher {
                     defaultEffort = ReasoningEffort.HIGH.takeIf {
                         ReasoningEffort.HIGH in supportedEfforts
                     },
-                    defaultEnabled = true,
                     canDisable = thinkingSupported,
                 )
             } else {
@@ -370,7 +369,6 @@ internal object RemoteModelFetcher {
             defaultEffort = ReasoningEffort.fromWireValue(
                 metadata?.string("default_effort", "defaultEffort")
             ),
-            defaultEnabled = metadata?.boolean("default_enabled", "defaultEnabled"),
             mandatory = mandatory,
             canDisable = !mandatory && (
                 metadata != null ||

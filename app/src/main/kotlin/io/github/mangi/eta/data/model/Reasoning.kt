@@ -3,7 +3,6 @@ package io.github.mangi.eta.data.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.Transient
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
@@ -76,18 +75,11 @@ object ReasoningEffortSerializer : KSerializer<ReasoningEffort> {
 data class ModelReasoningCapabilities(
     val supportedEfforts: List<ReasoningEffort> = emptyList(),
     val defaultEffort: ReasoningEffort? = null,
-    val defaultEnabled: Boolean? = null,
     val mandatory: Boolean = false,
     val canDisable: Boolean = false,
     val supportsBudget: Boolean = false,
     val maxBudgetTokens: Int? = null,
     val supportsMaxTokens: Boolean? = null,
-    /**
-     * 这份能力是「未知回落」（[UnknownReasoningCapabilities]），不是服务商真实声明。
-     * 只用于放行档位 UI：发送侧遇到它按 DEFAULT 处理，不向请求里注入任何思考参数，
-     * 等价于 3.4.48 的 null 护栏（3.4.49 审理 P1-1）。不落盘，故 @Transient。
-     */
-    @Transient val isFallback: Boolean = false,
 ) {
     val selectableEfforts: List<ReasoningEffort>
         get() = buildList {
@@ -112,17 +104,31 @@ data class ModelReasoningCapabilities(
             .maxByOrNull(ReasoningEffort::rank)
             ?: ReasoningEffort.DEFAULT
     }
+
+    /**
+     * 「关思考」的可发送落点：可选集里有 OFF 就真关，没有（模型强制思考、或服务商
+     * 压根不支持关）就收敛到 DEFAULT——服务商默认，不替用户猜具体档位。
+     *
+     * 全局思考开关关掉、而模型没有 OFF 档时，此前直接把 OFF 塞进请求：发送侧的
+     * `require(effort in selectableEfforts)` 与强制思考校验当场抛 IllegalArgumentException，
+     * 整轮对话失败。要求用户「先打开思考再发」不是解法，归一化才是（3.4.50 审理 P1-4）。
+     */
+    fun disabledEffort(): ReasoningEffort = normalize(ReasoningEffort.OFF)
 }
 
 /**
- * 能力未知（模型没声明思考能力、也没明确声明不支持）时的回落能力：放行全部档位。
+ * 能力未知（模型没声明思考能力、也没明确声明不支持）时给 UI 用的回落形状：放行全部档位。
  * Assist 与 Forge 共用这一份口径，不许各写一份、各猜一个方向——此前 Assist 把
  * 「未知」当成「不支持」（档位段直接消失），Forge 放行 5 档，同一个模型两边两样
  * （3.4.49 审理）。明确不支持（解析入口返回 null 且模型声明了不支持）不走这里。
  *
- * [isFallback] 让发送侧认出「这是猜的」：选哪一档都不许抛错，也绝不把档位写进请求，
- * 按 DEFAULT 处理（3.4.49 审理 P1-1）。默认档也定为 DEFAULT，新对话播种时不替用户
- * 猜一个具体档位（3.4.49 审理 D 路 P2-1：3.4.48 对这类模型是关思考，不许静默变成 High）。
+ * 它只是「放行档位 UI」的形状，**不代表服务商声明过任何档位**。发送侧永远不看它：
+ * 运行时侧按 (providerId, authMode, modelId) 走同一个解析入口重新解析，解析不到就是
+ * null＝没声明，发送侧据此什么都不发（3.4.50 审理 P1-1）。此前用 @Transient 的
+ * isFallback 标记把「这是猜的」一路带到发送侧，可标记过不了 Bundle/JSON，跨进程后
+ * 回落形状就变成了「真声明」，猜出来的档位直接被写进请求、撞上服务商硬表整轮失败。
+ * 默认档也定为 DEFAULT，新对话播种时不替用户猜一个具体档位（3.4.49 审理 D 路 P2-1：
+ * 3.4.48 对这类模型是关思考，不许静默变成 High）。
  */
 internal val UnknownReasoningCapabilities = ModelReasoningCapabilities(
     supportedEfforts = listOf(
@@ -135,7 +141,6 @@ internal val UnknownReasoningCapabilities = ModelReasoningCapabilities(
     ),
     defaultEffort = ReasoningEffort.DEFAULT,
     canDisable = true,
-    isFallback = true,
 )
 
 /**

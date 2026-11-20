@@ -292,7 +292,14 @@ internal object RuntimeConfigRepository {
         val sourceType = ProviderSourceRegistry.resolve(provider)
         val profile = ProviderConnectionProfile.forAuthMode(provider.authMode)
         val endpointMode = profile?.endpointMode ?: provider.endpointMode()
-        val reasoningCapabilities = effectiveReasoningCapabilities(provider, model)
+        // 只带服务商/目录的真声明，不带「能力未知」的回落形状：这段配置会进 Bundle 与
+        // Prefs（runtimeConfigJson），而回落形状跨进程后与真声明长得一模一样，发送侧
+        // 会把猜出来的档位当真声明写进请求（3.4.50 审理 P1-1）。没声明就是 null，
+        // 由 Runtime 侧按同一个解析入口重新解析。
+        val declaredCapabilities = reasoningCapabilities(provider, model)
+        // 用户/目录明确关掉思考时记 OFF（老版本兼容路径据此把 "none" 发给上游）；
+        // 其余从服务商默认起播，UI 侧发送前会用用户实际选的档位覆盖它。
+        val thinkingDisabled = model.effectiveReasoning == false
         return AgentModelClient.ModelConfig(
             providerId = provider.id,
             providerName = provider.name,
@@ -311,10 +318,9 @@ internal object RuntimeConfigRepository {
                 ?: AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION,
             openAiEndpointMode = endpointMode,
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
-            thinkingEnabled = reasoningCapabilities != null,
-            reasoningEffort = reasoningCapabilities?.let { ReasoningEffort.DEFAULT }
-                ?: ReasoningEffort.OFF,
-            reasoningCapabilities = reasoningCapabilities,
+            thinkingEnabled = !thinkingDisabled,
+            reasoningEffort = if (thinkingDisabled) ReasoningEffort.OFF else ReasoningEffort.DEFAULT,
+            reasoningCapabilities = declaredCapabilities,
             customHeaders = provider.customHeaders + model.customHeaders,
             customBody = provider.customBody + model.customBody,
         )
@@ -353,6 +359,26 @@ internal object RuntimeConfigRepository {
             model = model,
             inferExactCatalogModel = inferOpenAiCatalog,
         )
+    }
+
+    /**
+     * 运行时侧的能力重解析入口：按 (providerId, authMode, modelId) 找回与 UI 侧同一口径的
+     * 声明能力（[reasoningCapabilities]，不含「能力未知」回落形状）。
+     *
+     * 查不到（provider 或 model 已被删/禁用，登录方式已变）一律当作「没声明」返回 null：
+     * 宁可不发思考参数，也不能把入口进程那份可能只是回落猜测的能力当真声明用——这份
+     * 能力跨进程后与真声明无法区分（3.4.50 审理 P1-1）。
+     */
+    suspend fun declaredReasoningCapabilities(
+        providerId: String,
+        authMode: String,
+        modelId: String,
+    ): ModelReasoningCapabilities? {
+        ProviderRepository.ensureBuiltInsMerged()
+        val provider = ProviderRepository.providerById(providerId)
+            ?.takeIf { it.isEnabled && it.authMode == authMode } ?: return null
+        val model = provider.models.firstOrNull { it.isEnabled && it.modelId == modelId } ?: return null
+        return reasoningCapabilities(provider, model)
     }
 
     private fun ProviderSetting.endpointMode(): String = when (this) {

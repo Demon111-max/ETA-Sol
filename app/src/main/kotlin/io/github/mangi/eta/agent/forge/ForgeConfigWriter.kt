@@ -45,53 +45,68 @@ internal object ForgeConfigWriter {
 
     /**
      * 写进 opencode 配置的档位集：与输入栏可停档同源（能力的 selectableEfforts），
-     * 去掉 DEFAULT（不发 variant、用上游默认）。能力未知（回落表）时给六档，
-     * 与 Assist 的 UnknownReasoningCapabilities 同一口径。
+     * 去掉 DEFAULT（不发 variant、用上游默认）。
      * 此前写死六档：服务商不认的档（MiniMax 的 xhigh、只认 low/high/max 的 kimi-k3）
      * 也会被写进配置，选中就 400（3.4.49 审理 P3-22）。
+     *
+     * 参数不接受 null：能力为 null 的语义是「模型被明确声明不支持思考」
+     * （effectiveReasoningCapabilities 唯一的 null 出口），一档都不该有，由调用方直接不写
+     * variants。3.4.50 这里还留着一支「null ⇒ 六档」的回落，但那支在生产上永远走不到
+     * ——capabilities == null 与 reasoningDisabled == true 是同一件事，写 variants 的整块
+     * 被 reasoningDisabled 挡在外面——只会让人误以为存在「未知 ⇒ 六档」这条口径，
+     * 而「未知」早就由 UnknownReasoningCapabilities（七档、含 OFF）表达了（3.4.50 审理 P2-8）。
      */
     internal fun forgeVariantEfforts(
-        capabilities: ModelReasoningCapabilities?,
-    ): List<ReasoningEffort> {
-        val efforts = capabilities?.selectableEfforts ?: listOf(
-            ReasoningEffort.MINIMAL,
-            ReasoningEffort.LOW,
-            ReasoningEffort.MEDIUM,
-            ReasoningEffort.HIGH,
-            ReasoningEffort.XHIGH,
-            ReasoningEffort.MAX,
-        )
-        return efforts.filter { it != ReasoningEffort.DEFAULT }.distinct()
-    }
+        capabilities: ModelReasoningCapabilities,
+    ): List<ReasoningEffort> = capabilities.selectableEfforts
+        .filter { it != ReasoningEffort.DEFAULT }
+        .distinct()
 
     /**
      * 档位集指纹：配置里写了哪些 variant 取决于能力声明，能力变了（设置页改了档位、
      * 换了模型）就必须重写配置，否则 server 里还是旧档位表（链式反应防漏项）。
+     * 明确不支持思考（null）时配置里没有 variants，指纹也就是空串——不能让指纹里带着
+     * 一份并不存在的档位表。
      */
     internal fun variantSignature(capabilities: ModelReasoningCapabilities?): String =
-        forgeVariantEfforts(capabilities).joinToString(",") { it.wireValue }
+        capabilities?.let { forgeVariantEfforts(it) }.orEmpty().joinToString(",") { it.wireValue }
 
     /**
      * 一个 variant 条目：档位名与 reasoningEffort 都用 wireValue，和 Assist 发出去的一致。
-     * OFF 要真关：reasoningEffort=none（OpenAI 兼容家族）+ thinking disabled（DeepSeek/
-     * 百炼/Moonshot 这一族认这个开关）两套口径一起写，各服务商认自己那套、忽略另一套。
+     * OFF 要真关，而 Forge 只可能接 OpenAI 兼容 / Responses（门禁见 ForgeSharedConfig：
+     * 仅 OPENAI_COMPATIBLE + API_KEY），这两条协议在 opencode 1.19.5 里唯一有效的关闭口径
+     * 就是 reasoningEffort = "none"（transform 对 @ai-sdk/openai-compatible 只认这个键，
+     * 取值与 Assist 关思考时发出去的 wireValue 相同）。3.4.50 还一并写了
+     * thinking: {type:"disabled"}，那是 Anthropic 形状——opencode 只为 Anthropic 生成它，
+     * 对这两个包既不生效、又可能被严格的兼容上游当成未知字段拒绝；留着会让排查者误以为
+     * 还有第二条生效路径，故删除。将来 Forge 真支持 Anthropic 时再按那家的形状补。
      * 此前 OFF 直接不发 variant，于是药丸显示「关闭」、上游照样开着思考（3.4.49 审理 P1-3）。
      */
     private fun JsonObjectBuilder.putVariant(effort: ReasoningEffort) {
         putJsonObject(effort.wireValue) {
             if (effort == ReasoningEffort.OFF) {
                 put("reasoningEffort", "none")
-                putJsonObject("thinking") { put("type", "disabled") }
             } else {
                 put("reasoningEffort", effort.wireValue)
             }
         }
     }
 
+    /**
+     * 写出的 opencode 配置是 **V1 形状**（`provider` 单数、`npm`、`options`、`variants` 是对象）：
+     * 内置 opencode 固定装 1.19.5（LinuxPackageProfiles.OPENCODE_VERSION），该版本仍以
+     * `ConfigV1.Info` 读配置、再用 `ConfigV2Compat.lower` 把 V1 映射到内部 V2 结构，
+     * 所以这份配置在 1.19.5 上是有效的（3.4.50 审理 P3-28 复核结论：现状不改）。
+     * 不要凭印象改成 V2：V2 的键名全变（`providers` 复数、`package` 取代 `npm`、`settings`、
+     * `capabilities.input`、`variants` 变数组、`limit.context` 等），写成半 V1 半 V2 会让
+     * opencode 整份判无效、server 启动即退出（与下面 limit 那条同一现象），而 App 侧只看得到
+     * 「启动失败」，排查代价很高。真要升级 V2 的前置条件：先把 OPENCODE_VERSION 抬到目标版本，
+     * 读该版本的 config schema 与 ConfigV2Compat 是否还在，在真机 rootfs 里用写出的配置实跑
+     * 一次 `opencode serve` 确认能起来，再整体重写这一块。
+     */
     internal fun opencodeConfigJson(
         settings: ForgeSettings,
-        reasoningCapabilities: ModelReasoningCapabilities? = null,
-        reasoningDisabled: Boolean = false,
+        reasoningCapabilities: ModelReasoningCapabilities?,
     ): JsonObject = buildJsonObject {
         put("\$schema", "https://opencode.ai/config.json")
         putJsonObject("provider") {
@@ -142,10 +157,13 @@ internal object ForgeConfigWriter {
                         // 写的是 "xhigh"，药丸显示 Max、实际深度只有 Extra High，
                         // 与 Assist 同档位发出的 "max" 不一致（3.4.49 审理）。
                         // 档位集按当前模型的能力声明生成（见 forgeVariantEfforts），不再写死六档。
-                        // 模型明确不支持思考时不写 variants：行为层本来就不发 variant，
-                        // 配置里留着只会让人手改/排查时误以为可用（3.4.49 审理）。
-                        if (!reasoningDisabled) {
-                            val efforts = forgeVariantEfforts(reasoningCapabilities)
+                        // 能力为 null 表示模型被明确声明不支持思考（effectiveReasoningCapabilities
+                        // 唯一的 null 出口，与 reasoningDisabled 是同一件事）：一个 variant 都不写。
+                        // 行为层本来也不发 variant，配置里留着只会让人手改/排查时误以为可用
+                        // （3.4.49 审理 P1-3）；3.4.50 那个独立的 reasoningDisabled 开关与这里
+                        // 表达的是同一件事，两处真值容易漂移，已收敛成只看能力（3.4.50 审理 P2-8）。
+                        reasoningCapabilities?.let { capabilities ->
+                            val efforts = forgeVariantEfforts(capabilities)
                             if (efforts.isNotEmpty()) {
                                 putJsonObject("variants") {
                                     efforts.forEach { effort -> putVariant(effort) }
@@ -171,12 +189,16 @@ internal object ForgeConfigWriter {
             }
         }
 
+    /**
+     * 写配置与凭据。思考能力**必须由调用方显式传入**（不给默认值）：漏传不能静默变成
+     * 「按默认档位写一份配置」——那会让明确不支持思考的模型拿到一整套 variant，
+     * 配置与行为层各说一套（3.4.50 审理 P3-27）。null 表示明确不支持思考，配置里不写 variants。
+     */
     suspend fun write(
         context: Context,
         settings: ForgeSettings,
         credentials: ForgeCredentials,
-        reasoningCapabilities: ModelReasoningCapabilities? = null,
-        reasoningDisabled: Boolean = false,
+        reasoningCapabilities: ModelReasoningCapabilities?,
     ): ForgeConfigWriteResult = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
         val distribution = LinuxEnvironmentSettingsRepository.current(appContext)
@@ -189,7 +211,6 @@ internal object ForgeConfigWriter {
             configJson = opencodeConfigJson(
                 settings = settings,
                 reasoningCapabilities = reasoningCapabilities,
-                reasoningDisabled = reasoningDisabled,
             ).toString(),
             authJson = authJson(settings, credentials).toString(),
             providerId = settings.providerId,

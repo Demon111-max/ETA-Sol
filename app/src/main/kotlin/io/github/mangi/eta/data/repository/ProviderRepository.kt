@@ -292,11 +292,9 @@ internal object ProviderRepository {
                     ReasoningEffort.MAX,
                 ),
                 defaultEffort = ReasoningEffort.HIGH,
-                defaultEnabled = true,
                 canDisable = true,
             ))
             BuiltinProviders.STEPFUN_ID -> mapOf("step-3.7-flash" to ModelReasoningCapabilities(
-                defaultEnabled = true,
                 mandatory = true,
             ))
             else -> return

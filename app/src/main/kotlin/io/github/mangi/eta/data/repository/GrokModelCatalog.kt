@@ -80,7 +80,6 @@ internal object GrokModelCatalog {
         return ModelReasoningCapabilities(
             supportedEfforts = levels.filter { it != ReasoningEffort.OFF },
             defaultEffort = default,
-            defaultEnabled = default?.enablesReasoning,
             mandatory = levels.isNotEmpty() && !canDisable,
             canDisable = canDisable,
         )

@@ -20,16 +20,16 @@ class GeminiModelCapabilitiesTest {
         val known = Model(id = "fixture", modelId = "gemini-4-carbon", displayName = "Carbon",
             reasoning = true, reasoningCapabilities = remote)
         assertEquals(remote, GeminiModelCapabilities.resolveReasoning(known))
-        assertEquals(emptyList<ReasoningEffort>(), GeminiModelCapabilities.resolveReasoning(
-            known.copy(reasoning = false)).supportedEfforts)
+        // 关思考＝没声明思考能力（null），不再合成「只有 Default」的空声明（3.4.50 审理 P3-25）。
+        assertNull(GeminiModelCapabilities.resolveReasoning(known.copy(reasoning = false)))
+        assertNull(GeminiModelCapabilities.resolveReasoning(known.copy(reasoningOverride = false)))
         for (id in listOf("gemini-4-carbon", "gemini-future")) {
             assertEquals(manual, GeminiModelCapabilities.resolveReasoning(known.copy(modelId = id,
                 reasoning = false, reasoningOverride = true, reasoningCapabilitiesOverride = manual)))
-            assertEquals(listOf(ReasoningEffort.DEFAULT), GeminiModelCapabilities.resolveReasoning(
-                known.copy(modelId = id, reasoningOverride = false)).selectableEfforts)
         }
-        assertEquals(listOf(ReasoningEffort.DEFAULT), GeminiModelCapabilities.resolveReasoning(
-            known.copy(modelId = "gemini-future", reasoningCapabilities = null)).selectableEfforts)
+        // 目录里没有、模型也没声明 ⇒ null，交给上层回落（不是空声明）。
+        assertNull(GeminiModelCapabilities.resolveReasoning(
+            known.copy(modelId = "gemini-future", reasoningCapabilities = null)))
     }
 
     @Test

@@ -432,15 +432,14 @@ class ProviderRepositoryTest {
                         ReasoningEffort.MAX,
                     ),
                     defaultEffort = ReasoningEffort.HIGH,
-                    defaultEnabled = true,
                     canDisable = true,
                 ),
             ),
             BuiltinProviders.STEPFUN_ID to mapOf(
-                "step-3.7-flash" to ModelReasoningCapabilities(defaultEnabled = true, mandatory = true),
+                "step-3.7-flash" to ModelReasoningCapabilities(mandatory = true),
             ),
         )
-        val override = ModelReasoningCapabilities(defaultEnabled = true, mandatory = true)
+        val override = ModelReasoningCapabilities(mandatory = true)
         val original = legacyByProvider.map { (providerId, legacy) ->
             val provider = ProviderRepository.providerById(providerId)!!
             val changed = provider.models.map { model ->

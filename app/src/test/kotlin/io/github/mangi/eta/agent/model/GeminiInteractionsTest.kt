@@ -349,7 +349,16 @@ class GeminiInteractionsTest {
         val unlisted = GeminiInteractionsRequest.build(cfg.copy(model = "gemini-future",
             reasoningEffort = ReasoningEffort.MINIMAL), JSONArray(), JSONArray())
         assertEquals("minimal", unlisted.getJSONObject("generation_config").getString("thinking_level"))
-        for (effort in listOf(ReasoningEffort.OFF, ReasoningEffort.XHIGH, ReasoningEffort.MAX)) {
+        // 3.4.51 P1-4：OFF 不再抛错。全局关思考 + 模型没有 OFF 档时，档位在运行时侧就被
+        // 归一化到可发送档；万一真走到这里，也只是不发 thinking_level（交给上游默认），
+        // 不许把整轮打死。真正协议外的档位仍然拒绝。
+        val off = GeminiInteractionsRequest.build(
+            cfg.copy(reasoningEffort = ReasoningEffort.OFF),
+            JSONArray(),
+            JSONArray(),
+        )
+        assertFalse(off.getJSONObject("generation_config").has("thinking_level"))
+        for (effort in listOf(ReasoningEffort.XHIGH, ReasoningEffort.MAX)) {
             try {
                 GeminiInteractionsRequest.build(cfg.copy(reasoningEffort = effort), JSONArray(), JSONArray())
                 fail("不支持的档位必须拒绝")

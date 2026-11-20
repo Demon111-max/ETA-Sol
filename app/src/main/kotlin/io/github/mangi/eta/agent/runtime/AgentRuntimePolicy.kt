@@ -43,7 +43,15 @@ internal object AgentRuntimePolicy {
         permissions: Permissions,
     ): AgentModelClient.ModelConfig {
         val requestedEffort = config.effectiveReasoningEffort
-        val effectiveEffort = if (permissions.thinking) requestedEffort else ReasoningEffort.OFF
+        // 全局关思考时不能把 OFF 直接塞给发送侧：模型强制思考或没声明可关档时，
+        // OFF 不在可选集里，发送侧 require 会抛错把整轮打死（3.4.50 审理 P1-4）。
+        // 有声明就按声明归一化（能关就真关，不能关就落到可发送档），没声明照旧 OFF
+        // ——没声明时发送侧本来什么都不发。
+        val effectiveEffort = if (permissions.thinking) {
+            requestedEffort
+        } else {
+            config.reasoningCapabilities?.disabledEffort() ?: ReasoningEffort.OFF
+        }
         val thinkingEnabled = effectiveEffort.enablesReasoning
         val constrained = config.copy(
             terminalTools = config.terminalTools && permissions.terminalTools,

@@ -308,7 +308,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 val request = AgentRuntimeRequestConfigResolver.constrainPresentation(
                     AgentRuntimeImageTransfer.materialize(incoming), isEtaProcess,
                 )
-                if (!AgentRuntimeRequestConfigResolver.requiresRuntimeConfig(request)) {
+                val configured = if (!AgentRuntimeRequestConfigResolver.requiresRuntimeConfig(request)) {
                     request
                 } else {
                     val runtimeConfig = runBlocking {
@@ -323,6 +323,20 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                         }
                     } ?: throw RuntimeConfigUnavailableException()
                     AgentRuntimeRequestConfigResolver.applyRuntimeConfig(request, runtimeConfig)
+                }
+                // 思考能力只信 Runtime 侧自己重解析的结果：入口进程带来的那份可能是 UI 的
+                // 回落形状（能力未知时放行全档），而「是不是猜的」这种标记过不了 Bundle/JSON，
+                // 跨进程就丢了，发送侧会把猜出来的档位当真声明写进请求、撞上服务商硬表整轮失败
+                // （3.4.50 审理 P1-1）。查不到＝没声明，发送侧据此什么都不发。
+                AgentRuntimeRequestConfigResolver.applyDeclaredReasoningCapabilities(configured) {
+                        providerId, authMode, modelId ->
+                    runBlocking {
+                        RuntimeConfigRepository.declaredReasoningCapabilities(
+                            providerId = providerId,
+                            authMode = authMode,
+                            modelId = modelId,
+                        )
+                    }
                 }
             }
             mainHandler.post {

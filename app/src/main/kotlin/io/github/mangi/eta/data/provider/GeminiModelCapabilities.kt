@@ -29,17 +29,23 @@ internal object GeminiModelCapabilities {
 
     fun reasoningCapabilities(modelId: String): ModelReasoningCapabilities? = knownModels[normalize(modelId)]?.reasoning
 
-    fun resolveReasoning(model: Model): ModelReasoningCapabilities = when (model.reasoningOverride) {
-        false -> ModelReasoningCapabilities()
-        true -> model.reasoningCapabilitiesOverride ?: ModelReasoningCapabilities()
-        null -> if (model.reasoning == false) ModelReasoningCapabilities() else {
-            model.reasoningCapabilities ?: requestReasoningCapabilities(model.modelId)
+    /**
+     * 原生 Gemini 的声明口径，null = 未声明。此前「关思考」也合成一份空声明，
+     * 与「确实声明了但没有具体档位」混成同一个值，仓库侧
+     * RuntimeConfigRepository.effectiveReasoningCapabilities 的 null 分支对 Gemini
+     * 因此不可达（3.4.50 审理 P3-25）。关思考本来就是「没声明思考能力」，
+     * 服务端按默认跑，这里必须给出 null 而不是空声明。
+     *
+     * reasoningOverride = true 只表示「用户要求开思考」，没写具体档位时沿用模型自身的
+     * 声明（目录/远端写入的 reasoningCapabilities），再没有才是未声明。
+     */
+    fun resolveReasoning(model: Model): ModelReasoningCapabilities? = when (model.reasoningOverride) {
+        false -> null
+        true -> model.reasoningCapabilitiesOverride ?: model.reasoningCapabilities
+        null -> if (model.reasoning == false) null else {
+            model.reasoningCapabilities ?: reasoningCapabilities(model.modelId)
         }
     }
-
-    // 未知模型只使用服务端默认值；不据此推断支持思考或必须思考。
-    fun requestReasoningCapabilities(modelId: String): ModelReasoningCapabilities =
-        reasoningCapabilities(modelId) ?: ModelReasoningCapabilities()
 
     fun supportsHostedSearch(modelId: String): Boolean = knownModels[normalize(modelId)]?.hostedSearch == true
 
@@ -53,7 +59,6 @@ internal object GeminiModelCapabilities {
         reasoning = ModelReasoningCapabilities(
             supportedEfforts = efforts,
             defaultEffort = default,
-            defaultEnabled = true,
             mandatory = true,
         ),
         hostedSearch = hostedSearch,

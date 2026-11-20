@@ -436,6 +436,15 @@ class OpenAiChatCompletionsProviderTest {
                         model = "deepseek-v4-pro",
                         thinkingEnabled = true,
                         reasoningEffort = io.github.mangi.eta.data.model.ReasoningEffort.HIGH,
+                        // 3.4.51 P1-1：没声明＝什么都不发，档位不再靠回落形状蒙出去。
+                        reasoningCapabilities = io.github.mangi.eta.data.model.ModelReasoningCapabilities(
+                            supportedEfforts = listOf(
+                                io.github.mangi.eta.data.model.ReasoningEffort.LOW,
+                                io.github.mangi.eta.data.model.ReasoningEffort.MEDIUM,
+                                io.github.mangi.eta.data.model.ReasoningEffort.HIGH,
+                            ),
+                            canDisable = true,
+                        ),
                     )
                 },
                 runController = AgentRunController(),

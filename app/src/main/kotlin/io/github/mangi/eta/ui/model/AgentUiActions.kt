@@ -10,6 +10,13 @@ sealed interface AgentHomeAction {
     data class ReasoningEffortChanged(val effort: ReasoningEffort) : AgentHomeAction
     data class ModelSelected(val modelId: String) : AgentHomeAction
     data class InputChanged(val text: String) : AgentHomeAction
+    /**
+     * 输入栏销毁前的草稿补交（3.4.51 P1-2），带草稿归属的会话键。
+     *
+     * 与 [InputChanged] 分开是必须的：销毁发生在切会话之后（selectedConversationId 已经指向
+     * 新会话），按「当前会话」写会把旧会话的字塞进新会话、旧会话照样丢。
+     */
+    data class InputFlushed(val conversationKey: String?, val text: String) : AgentHomeAction
     data class SubmitMessage(val text: String) : AgentHomeAction
     data class InterruptAndSubmitMessage(val text: String) : AgentHomeAction
     data class SteerQueuedMessage(val id: String) : AgentHomeAction

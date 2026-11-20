@@ -758,6 +758,8 @@ fun AgentAppRoot(
                                 AgentHomeAction.RetryConversationLoad -> agentState.retryConversationLoad()
                                 is AgentHomeAction.ModelSelected -> agentState.selectModel(action.modelId)
                                 is AgentHomeAction.InputChanged -> agentState.updateInputDraft(action.text)
+                                is AgentHomeAction.InputFlushed ->
+                                    agentState.flushInputDraft(action.conversationKey, action.text)
                                 is AgentHomeAction.SubmitMessage -> { requestExecutionNotifications(); agentState.sendCurrentMessage(action.text) }
                                 is AgentHomeAction.InterruptAndSubmitMessage -> { requestExecutionNotifications(); agentState.interruptAndSendCurrentMessage(action.text) }
                                 is AgentHomeAction.SteerQueuedMessage -> { requestExecutionNotifications(); agentState.steerQueuedMessage(action.id) }

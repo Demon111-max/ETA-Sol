@@ -192,7 +192,7 @@ internal fun SubagentSettingsScreen(
         effortOptions.indexOf(shown).takeIf { it >= 0 } ?: 0
     }
 
-    var showModelSheet by remember { mutableStateOf(false) }
+    var showModelSheet by remember { mutableStateOf(value = false) }
     var inspectedProfile by remember { mutableStateOf<SubagentProfile?>(null) }
     var editorDraft by remember { mutableStateOf<CustomSubagentDraft?>(null) }
     var editorError by remember { mutableStateOf<String?>(null) }
@@ -213,6 +213,31 @@ internal fun SubagentSettingsScreen(
             runCatching {
                 RuntimeConfigRepository.setSubagentSettings(
                     subagentSettings.copy(reasoningEffort = chosen?.wireValue),
+                )
+            }
+        }
+    }
+    // 换模型要连档位一起重算：旧实现只写 modelId，把上一个模型专有的档位原样留给新模型，
+    // 聊天侧再按新模型能力归一化，界面显示的档位与实际发送的对不上（3.4.50 P3-24）。
+    // 与 AssistantOverlaySettingsScreen 的 keepEffort 同口径：新模型还能表达这个档位才留，
+    // 否则退回「跟随模型默认」。
+    val onSelectModel: (String?) -> Unit = { modelId ->
+        showModelSheet = false
+        val nextTarget = modelId?.let { id -> providers.enabledModel(id) }
+            ?: providers.enabledModel(primaryModelId)
+        val nextCapabilities = nextTarget?.let { (provider, model) ->
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
+        }
+        val keptEffort = subagentSettings.resolvedReasoningEffort?.takeIf { effort ->
+            nextCapabilities?.selectableEfforts?.contains(effort) == true
+        }
+        scope.launch {
+            runCatching {
+                RuntimeConfigRepository.setSubagentSettings(
+                    subagentSettings.copy(
+                        modelId = modelId,
+                        reasoningEffort = keptEffort?.wireValue,
+                    ),
                 )
             }
         }
@@ -286,16 +311,7 @@ internal fun SubagentSettingsScreen(
                             selectedSecondaryModelId = resolvedSecondary?.model?.id,
                             followTitle = "跟随主模型",
                             followSubtitle = primaryModelName?.let { "当前：$it" } ?: "默认继承会话正在使用的主模型",
-                            onSelectModel = { modelId ->
-                                showModelSheet = false
-                                scope.launch {
-                                    runCatching {
-                                        RuntimeConfigRepository.setSubagentSettings(
-                                            subagentSettings.copy(modelId = modelId),
-                                        )
-                                    }
-                                }
-                            },
+                            onSelectModel = onSelectModel,
                         )
                     }
 
@@ -510,16 +526,7 @@ internal fun SubagentSettingsScreen(
                             selectedSecondaryModelId = resolvedSecondary?.model?.id,
                             followTitle = "跟随主模型",
                             followSubtitle = primaryModelName?.let { "当前：$it" } ?: "默认继承会话正在使用的主模型",
-                            onSelectModel = { modelId ->
-                                showModelSheet = false
-                                scope.launch {
-                                    runCatching {
-                                        RuntimeConfigRepository.setSubagentSettings(
-                                            subagentSettings.copy(modelId = modelId),
-                                        )
-                                    }
-                                }
-                            },
+                            onSelectModel = onSelectModel,
                         )
                     }
 

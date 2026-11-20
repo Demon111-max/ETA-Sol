@@ -236,6 +236,12 @@ internal data class QueuedMessageUi(
     val pendingImages: List<PendingImageUi> = emptyList(),
     val pendingFileReferences: List<PendingFileReferenceUi> = emptyList(),
     val immediateInterrupt: Boolean = false,
+    /**
+     * 出队后又被发送门拦下（模型不支持图片、文件引用需要终端）：消息留在队列里等用户处理，
+     * 但泵必须跳过它，否则这条发不出去的消息会把后面所有排队消息一起堵死
+     * （3.4.50 审理 P2-2）。用户改模型/开终端后重新插话或撤回再发即可清掉这个标记。
+     */
+    val blocked: Boolean = false,
 )
 
 @Immutable

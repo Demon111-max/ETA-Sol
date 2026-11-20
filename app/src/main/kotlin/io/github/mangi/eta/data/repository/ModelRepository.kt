@@ -58,6 +58,10 @@ internal object ModelRepository {
                 source = ModelSource.MANUAL,
             )
         } else {
+            // 整行替换：draft 里为 null 的字段就是「清空」，仓库不做「null 即未提供」的合并。
+            // 所以调用方（模型编辑弹窗）必须自己决定 reasoningCapabilitiesOverride 的三态：
+            // 用户没动过档位时把已存声明原样带回来，否则一次改名保存就会把手工档位集写没
+            // （3.4.50 P1-3）。
             draft.copy(
                 id = existing.id,
                 modelId = modelId,

@@ -205,18 +205,20 @@ internal fun ProviderModelsTab(
     val context = LocalContext.current
     val fetchScope = rememberCoroutineScope()
     val selectedModelId by RuntimeConfigRepository.selectedModelIdFlow().collectAsState(initial = null)
-    var isFetching by remember { mutableStateOf(false) }
-    var isMutatingModel by remember { mutableStateOf(false) }
+    // 布尔一律具名：位置传参的 mutableStateOf(false) 与可空类型的状态混在一屏里，
+    // 读代码时分不清这个 false 是「开关」还是「集合初值」（3.4.50 P3-22）。
+    var isFetching by remember { mutableStateOf(value = false) }
+    var isMutatingModel by remember { mutableStateOf(value = false) }
     var message by remember { mutableStateOf<String?>(null) }
     var editingModel by remember { mutableStateOf<Model?>(null) }
-    var isCreatingModel by remember { mutableStateOf(false) }
+    var isCreatingModel by remember { mutableStateOf(value = false) }
     var editorError by remember { mutableStateOf<String?>(null) }
     var modelPendingDelete by remember { mutableStateOf<Model?>(null) }
-    var selectionMode by remember(provider.id) { mutableStateOf(false) }
+    var selectionMode by remember(provider.id) { mutableStateOf(value = false) }
     // 退出多选时不清空已选集合：编辑栏和删除按钮还在退场动画里，清空会让数量闪成 0。
     // 下次进入多选会整体替换为当次长按的模型，旧集合不会带进新一轮选择。
     var selectedModelIds by remember(provider.id) { mutableStateOf(setOf<String>()) }
-    var showBatchDeleteDialog by remember { mutableStateOf(false) }
+    var showBatchDeleteDialog by remember { mutableStateOf(value = false) }
     var modelSearchQuery by remember(provider.id) { mutableStateOf("") }
     var pendingImport by remember(provider.id) { mutableStateOf<RemoteModelImport?>(null) }
     val normalizedModelSearchQuery = modelSearchQuery.trim()
@@ -548,7 +550,7 @@ internal fun ProviderModelsTab(
 
     editingModel?.let { model ->
         ModelEditDialog(
-            nativeGemini = provider is GeminiProviderSetting,
+            provider = provider,
             model = model,
             isNew = isCreatingModel,
             isSaving = isMutatingModel,
@@ -922,7 +924,7 @@ private fun ModelListItem(
 
 @Composable
 private fun ModelEditDialog(
-    nativeGemini: Boolean,
+    provider: ProviderSetting,
     model: Model,
     isNew: Boolean,
     isSaving: Boolean,
@@ -932,8 +934,25 @@ private fun ModelEditDialog(
     onDelete: (() -> Unit)?,
 ) {
     val context = LocalContext.current
-    val initialCapabilities = if (nativeGemini) GeminiModelCapabilities.resolveReasoning(model)
-        else model.effectiveReasoningCapabilities
+    val nativeGemini = provider is GeminiProviderSetting
+    // 档位的「显示/可选」与聊天侧同源：走服务商/目录解析，并含「能力未知」回落
+    // （即 RuntimeConfigRepository.effectiveReasoningCapabilities 的口径）。
+    // 此前直接读 Model 级能力，目录模型在弹窗里只剩 DEFAULT，用户为「补勾」勾一档保存，
+    // 就把目录给的整份档位集收窄成一档（3.4.50 P2-4）。
+    // 口径必须与聊天侧一致：弹窗打开时看到的档位＝发送时真正可用的档位。
+    // 思考开关关着时解析会按「明确不支持思考」返回 null，勾选集退回只剩 DEFAULT；
+    // 用户再把开关打开、动一下档位，就会拿这份退化的勾选集覆盖库里原有的声明
+    // （P2-4 的同一条丢档路径）。开关只管「要不要思考」、不管「有哪些档」，
+    // 所以这里按 reasoningOverride = null 再解析一次，把已有声明原样铺回勾选集。
+    val initialCapabilities = RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
+        ?: if (model.effectiveReasoning == false) {
+            RuntimeConfigRepository.effectiveReasoningCapabilities(
+                provider,
+                model.copy(reasoningOverride = null),
+            )
+        } else {
+            null
+        }
     val availableEfforts = if (nativeGemini) GeminiModelCapabilities.configurableEfforts else editableReasoningEfforts
     var displayName by remember(model.id, isNew) { mutableStateOf(model.displayName) }
     var modelId by remember(model.id, isNew) { mutableStateOf(model.modelId) }
@@ -967,11 +986,13 @@ private fun ModelEditDialog(
     var selectedDefaultEffort by remember(model.id, isNew) {
         mutableStateOf(initialCapabilities?.defaultEffort)
     }
-    // 用户是否亲手动过「档位集/默认档」。没动过就不写 reasoningCapabilitiesOverride：
+    // 用户是否亲手动过「档位集/默认档」。没动过就不重建 reasoningCapabilitiesOverride：
     // 旧实现只要开着思考就无条件写一份 supportedEfforts = 勾选集、mandatory = 无 OFF 的声明，
     // 手动模型（勾选集只剩 DEFAULT）保存一次就被钉成「只支持 Default、强制思考」，
     // 目录/远端推断出的档位被整份顶掉（3.4.49 审理 P2-7 / P3-13）。
-    var effortsTouched by remember(model.id, isNew) { mutableStateOf(false) }
+    // 3.4.50 P1-3 补：没动过也不能写 null，否则「只改显示名」这类保存会把库里已有的
+    // 手工声明抹成 null（静默丢数据）。
+    var effortsTouched by remember(model.id, isNew) { mutableStateOf(value = false) }
     // 输入能力：与思考能力同级的能力声明，Assist 与 Forge 共用这一份，
     // 不许任何一侧再单独存一份（链式反应防冲突）。「图片」勾选即 supportsVision：
     // ForgeSharedConfig 据此把 image 写进 opencode 配置的 modalities/attachment。
@@ -986,9 +1007,12 @@ private fun ModelEditDialog(
     fun resetAutomaticReasoning() {
         reasoningOverrideActive = false
         effortsTouched = false
-        val automaticCapabilities = if (nativeGemini) GeminiModelCapabilities.resolveReasoning(
+        // 与弹窗初始值同一口径（含目录兜底与「能力未知」回落），换回自动后用户看到的
+        // 档位集就是聊天侧真正生效的那一份（3.4.50 P2-4）。
+        val automaticCapabilities = RuntimeConfigRepository.effectiveReasoningCapabilities(
+            provider,
             model.copy(modelId = modelId, reasoningOverride = null, reasoningCapabilitiesOverride = null),
-        ) else model.reasoningCapabilities
+        )
         reasoningEnabled = if (nativeGemini) automaticCapabilities?.supportedEfforts.orEmpty().isNotEmpty()
             else model.reasoning == true
         selectedReasoningEfforts = automaticCapabilities
@@ -1020,20 +1044,33 @@ private fun ModelEditDialog(
         }.ifEmpty { listOf(Model.TEXT_MODALITY) },
         attachment = imageInputEnabled,
         reasoningOverride = reasoningEnabled.takeIf { reasoningOverrideActive },
-        reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled && effortsTouched) {
-            val canDisable = !nativeGemini && ReasoningEffort.OFF in selectedReasoningEfforts
-            (model.effectiveReasoningCapabilities ?: ModelReasoningCapabilities()).copy(
-                supportedEfforts = availableEfforts.filter { effort ->
-                    effort != ReasoningEffort.OFF && effort in selectedReasoningEfforts
-                },
-                // 默认档只允许落在已勾选的具体档上；勾选集为空时整份声明不写，
-                // 让目录/远端推断继续生效，而不是存一份空声明把它顶掉。
-                defaultEffort = selectedDefaultEffort?.takeIf { it in selectedReasoningEfforts },
-                mandatory = !canDisable,
-                canDisable = canDisable,
-            ).takeIf { it.supportedEfforts.isNotEmpty() }
-        } else {
-            null
+        // 「思考开关」与「档位集声明」是两件事：开关只写 reasoningOverride，
+        // 档位集只在用户亲手动过档位时才重建。没动过时保留库里原有的声明，
+        // 不许写 null——旧实现在这里无条件走 else，只改显示名保存就把手工档位集
+        // 与默认档抹掉（3.4.50 P1-3）。
+        // 关于 null 的含义（3.4.50 P3-23，此前这里的注释与 Model.kt 的实际行为相反）：
+        // Model.effectiveReasoningCapabilities 在 reasoningOverride = true 且没有 override
+        // 时返回的是 reasoningCapabilities（真声明），所以写 null 不会「顶掉」目录推断——
+        // 目录/远端解析照旧生效，代价是用户手工声明过的那份档位集被抹掉；
+        // 真正会顶掉目录推断的是写一份空声明（supportedEfforts 为空、canDisable = false）。
+        reasoningCapabilitiesOverride = when {
+            // 「恢复自动」是唯一允许清掉声明的路径。
+            !reasoningOverrideActive -> null
+            !effortsTouched -> model.reasoningCapabilitiesOverride
+            else -> {
+                val canDisable = !nativeGemini && ReasoningEffort.OFF in selectedReasoningEfforts
+                (initialCapabilities ?: ModelReasoningCapabilities()).copy(
+                    supportedEfforts = availableEfforts.filter { effort ->
+                        effort != ReasoningEffort.OFF && effort in selectedReasoningEfforts
+                    },
+                    // 默认档只允许落在已勾选的具体档上。只勾 OFF 也是合法声明
+                    // （supportedEfforts 为空 + canDisable），所以不再拿「非空」当写入门槛，
+                    // 否则连「关掉思考档」都存不下来（3.4.50 P2-5）。
+                    defaultEffort = selectedDefaultEffort?.takeIf { it in selectedReasoningEfforts },
+                    mandatory = !canDisable,
+                    canDisable = canDisable,
+                )
+            }
         },
     )
 
@@ -1225,14 +1262,14 @@ private fun ModelEditDialog(
                                     )
                                 }
                             }
-                            // 默认档行必须对「手动模型」也可见：这类模型没有声明能力，
-                            // 勾选集里只有 DEFAULT，旧实现据此把整行藏掉，用户根本没有
-                            // 入口设新对话的初始档（3.4.49 审理 P2-7）。
-                            val concreteEfforts = availableEfforts.filter { effort ->
-                                effort != ReasoningEffort.OFF && effort != ReasoningEffort.DEFAULT
+                            // 默认档候选只来自已勾选的具体档：候选里混进未勾选的档会让
+                            // 「档位区」和「默认档区」同屏自相矛盾，点一下还偷偷把该档加回
+                            // 勾选集（3.4.50 P2-6）。要设默认档，先勾上对应档位。
+                            val defaultCandidates = availableEfforts.filter { effort ->
+                                effort != ReasoningEffort.OFF &&
+                                    effort != ReasoningEffort.DEFAULT &&
+                                    effort in selectedReasoningEfforts
                             }
-                            val checkedConcrete = concreteEfforts.filter { it in selectedReasoningEfforts }
-                            val defaultCandidates = checkedConcrete.ifEmpty { concreteEfforts }
                             if (defaultCandidates.isNotEmpty()) {
                                 CouiText(
                                     text = stringResource(R.string.model_default_effort_label),
@@ -1250,9 +1287,8 @@ private fun ModelEditDialog(
                                             onClick = {
                                                 reasoningOverrideActive = true
                                                 effortsTouched = true
-                                                // 候选是「没勾任何具体档」时的兜底全集，
-                                                // 这时点它同时把该档勾上，保证默认档一定在档位集里。
-                                                selectedReasoningEfforts = selectedReasoningEfforts + effort
+                                                // 候选一定在勾选集里，这里只切默认档，
+                                                // 不再顺手改档位集（3.4.50 P2-6）。
                                                 selectedDefaultEffort =
                                                     if (effort == selectedDefaultEffort) null else effort
                                             },
@@ -1482,13 +1518,13 @@ private fun ModelEditDialog(
                                 }
                             }
                         }
-                        // 同 COUI 分支：勾选集里没有具体档时退回全集，默认档行对手动模型也可见（P2-7）。
-                        val miuixConcreteEfforts = availableEfforts.filter { effort ->
-                            effort != ReasoningEffort.OFF && effort != ReasoningEffort.DEFAULT
-                        }
-                        val miuixCheckedConcrete = miuixConcreteEfforts.filter { it in selectedReasoningEfforts }
+                        // 同 COUI 分支：候选只来自已勾选的具体档，不退回全集（3.4.50 P2-6）。
                         val miuixDefaultCandidates = if (reasoningEnabled) {
-                            miuixCheckedConcrete.ifEmpty { miuixConcreteEfforts }
+                            availableEfforts.filter { effort ->
+                                effort != ReasoningEffort.OFF &&
+                                    effort != ReasoningEffort.DEFAULT &&
+                                    effort in selectedReasoningEfforts
+                            }
                         } else {
                             emptyList()
                         }
@@ -1511,7 +1547,7 @@ private fun ModelEditDialog(
                                         onClick = {
                                             reasoningOverrideActive = true
                                             effortsTouched = true
-                                            selectedReasoningEfforts = selectedReasoningEfforts + effort
+                                            // 同 COUI 分支：只切默认档，不动档位集（3.4.50 P2-6）。
                                             selectedDefaultEffort =
                                                 if (effort == selectedDefaultEffort) null else effort
                                         },
