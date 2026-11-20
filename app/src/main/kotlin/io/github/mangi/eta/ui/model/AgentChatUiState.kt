@@ -40,6 +40,20 @@ internal data class AgentChatUiState(
     val hasEarlierMessages: Boolean = false,
     val conversationCharacterName: String? = null,
     val conversationCharacterAvatarPath: String? = null,
+    /**
+     * 回退钳制期间保存的原档位（3.4.49 审理 P1-2）：会话绑定的模型被禁用后，
+     * [reasoningEffort] 会被当前回退模型的能力钳到更低档——那只是**显示与本次发送**的口径，
+     * 存档里必须还是用户原来选的档。钳制发生时原档搬到这里，落盘一律取它
+     * （见 AgentConversationPersistence.Content），模型重新可用后原档自动回来。
+     * 只有「确实被钳低了」才非 null。
+     */
+    val archivedReasoningEffort: ReasoningEffort? = null,
+    /**
+     * 用户是否亲手选过档（3.4.49 审理 P3-15/P2-4）：false 表示当前档只是播种/回落的产物，
+     * 换模型时可以按新模型的声明默认档重新播种；一旦用户选过就置 true，永不覆盖。
+     * 新建对话（emptyChatState）为 false，其余路径默认 true（老会话不重新播种）。
+     */
+    val reasoningEffortExplicit: Boolean = true,
 ) {
     val canCompactContext: Boolean get() = !isStreaming && messageEdit == null && history.any {
         !it.contextSummary && (it.role == "assistant" || it.role == "tool")

@@ -135,6 +135,7 @@ private fun forgeConfigFingerprint(
     settings: ForgeSettings,
     credentials: ForgeCredentials,
     distributionWireName: String,
+    variantSignature: String,
     reasoningDisabled: Boolean,
 ): String = buildString {
     append(settings.providerId).append('\n')
@@ -144,6 +145,8 @@ private fun forgeConfigFingerprint(
     append(credentials.apiKey).append('\n')
     append(settings.endpointMode).append('\n')
     append(reasoningDisabled).append('\n')
+    // 配置里写哪些 variant 由能力声明决定（3.4.50）：能力变了不重写，server 里还是旧档位表。
+    append(variantSignature).append('\n')
     // 识图能力会写进 opencode 配置的 modalities/attachment：不进指纹的话，
     // 在设置页改了勾选也不会触发重写+重启，Forge 里改了等于没改（链式反应防漏项）。
     append(settings.supportsVision).append('\n')
@@ -165,17 +168,19 @@ internal suspend fun prewarmForgeServer(context: Context) {
     val server = ForgeServerManager.default(context)
     configApplyMutex.withLock {
         val fingerprint = forgeConfigFingerprint(
-            shared.settings,
-            shared.credentials,
-            LinuxEnvironmentSettingsRepository.current(context).wireName,
-            shared.reasoningDisabled,
+            settings = shared.settings,
+            credentials = shared.credentials,
+            distributionWireName = LinuxEnvironmentSettingsRepository.current(context).wireName,
+            variantSignature = ForgeConfigWriter.variantSignature(shared.reasoningCapabilities),
+            reasoningDisabled = shared.reasoningDisabled,
         )
         if (fingerprint != appliedConfigFingerprint) {
             if (ForgeConfigWriter.write(
-                    context,
-                    shared.settings,
-                    shared.credentials,
-                    shared.reasoningDisabled,
+                    context = context,
+                    settings = shared.settings,
+                    credentials = shared.credentials,
+                    reasoningCapabilities = shared.reasoningCapabilities,
+                    reasoningDisabled = shared.reasoningDisabled,
                 )
                 is ForgeConfigWriteResult.Written
             ) {
@@ -295,12 +300,21 @@ internal class ForgeChatState(
     /** Forge 的思考档位：发送时按档位名选 opencode 配置里预置的 variant。 */
     var reasoningEffort by mutableStateOf(ReasoningEffort.DEFAULT)
 
+    /** 用户是否在药丸里亲手选过档：选过就不再被「播种」覆盖（3.4.49 审理 P2-4）。 */
+    private var reasoningEffortExplicit = false
+
+    /** 上次播种时的模型 id：换模型要按新模型的声明默认档重播一次（3.4.49 审理 P3-15）。 */
+    private var seededModelId: String? = null
+
     /** 输入栏改档的唯一入口：先过能力归一化再落状态，保证控件显示的档就是发送时用的档。 */
     fun updateReasoningEffort(effort: ReasoningEffort) {
+        // 用户亲手选档：此后不许播种再改它（选「默认」也要被尊重）。
+        reasoningEffortExplicit = true
         reasoningEffort = if (reasoningDisabled) {
             ReasoningEffort.DEFAULT
         } else {
-            reasoningCapabilities?.normalize(effort) ?: effort
+            // 与 Assist 同口径：能力未知（回落表）也放行；明确不支持时归 DEFAULT。
+            reasoningCapabilities?.normalize(effort) ?: ReasoningEffort.DEFAULT
         }
     }
 
@@ -328,7 +342,8 @@ internal class ForgeChatState(
     /**
      * 当前模型的思考能力声明（与 Assist 共用同一份，来自设置页/拉取的解析结果）：
      * 输入栏合并控件的可停档以它的 selectableEfforts 为上限，发送前当前档也过它的 normalize()。
-     * 为 null = 能力未知，控件才放行全部 5 档（旧行为）。由 applySharedConfig() 在每次对齐时同步。
+     * 走 effectiveReasoningCapabilities：能力未知时是那份回落表（放行全部档位），
+     * 明确不支持时为 null（控件只剩模型名）。由 applySharedConfig() 在每次对齐时同步。
      */
     var reasoningCapabilities by mutableStateOf<ModelReasoningCapabilities?>(null)
         private set
@@ -654,6 +669,11 @@ internal class ForgeChatState(
         turnError = null
         turnStartedAtMs = 0L
         clearNotice()
+        // 新对话重新播种默认档：上一轮亲手选的档不跨会话沿用（与 Assist 新建对话同口径），
+        // 播种标记一起清掉，下一次对齐按当前模型的声明默认档重播一次（3.4.49 审理 P2-4）。
+        reasoningEffortExplicit = false
+        seededModelId = null
+        reasoningEffort = ReasoningEffort.DEFAULT
     }
 
     /** 没有可用工作区（挂载建不出来）时明示：当前在私有目录干活、产出文件拿不出来，不静默。 */
@@ -818,25 +838,34 @@ internal class ForgeChatState(
         reasoningEffort = when {
             shared.reasoningDisabled -> ReasoningEffort.DEFAULT
             shared.reasoningCapabilities != null -> shared.reasoningCapabilities.normalize(reasoningEffort)
-            else -> reasoningEffort
+            else -> ReasoningEffort.OFF
         }
-        // 新对话初始档播种（与 Assist 同一口径，见 initialReasoningEffort）：
-        // DEFAULT 只是「还没选过」的占位，能力已知时落到声明的默认档、没有才兜底
-        // High。此前 defaultEffort 在 Forge 同样没有任何消费方，药丸显示「默认」、
-        // 滑块停在 High 位、实际发出去的是 opencode 上游默认（3.4.49 审理）。
-        reasoningEffort = initialReasoningEffort(shared.reasoningCapabilities, reasoningEffort)
+        // 新对话/换模型时播种一次（与 Assist 同一口径，见 initialReasoningEffort）：
+        // DEFAULT 只是「还没选过」的占位，能力已知时落到声明的默认档、没有才兜底 High。
+        // 只播一次：此前每次发送前都重播，用户在药丸里选「默认」后下一次发送又被打回 High，
+        // 而且换模型时播不出去（当前档已不是 DEFAULT）（3.4.49 审理 P2-4 / P3-15）。
+        if (!shared.reasoningDisabled && !reasoningEffortExplicit &&
+            seededModelId != shared.settings.modelId
+        ) {
+            reasoningEffort = shared.reasoningCapabilities?.let { capabilities ->
+                capabilities.normalize(capabilities.defaultEffort ?: ReasoningEffort.HIGH)
+            } ?: ReasoningEffort.OFF
+            seededModelId = shared.settings.modelId
+        }
         val fingerprint = forgeConfigFingerprint(
-            shared.settings,
-            shared.credentials,
-            LinuxEnvironmentSettingsRepository.current(context).wireName,
-            shared.reasoningDisabled,
+            settings = shared.settings,
+            credentials = shared.credentials,
+            distributionWireName = LinuxEnvironmentSettingsRepository.current(context).wireName,
+            variantSignature = ForgeConfigWriter.variantSignature(shared.reasoningCapabilities),
+            reasoningDisabled = shared.reasoningDisabled,
         )
         if (fingerprint != appliedConfigFingerprint) {
             when (val written = ForgeConfigWriter.write(
-                context,
-                shared.settings,
-                shared.credentials,
-                shared.reasoningDisabled,
+                context = context,
+                settings = shared.settings,
+                credentials = shared.credentials,
+                reasoningCapabilities = shared.reasoningCapabilities,
+                reasoningDisabled = shared.reasoningDisabled,
             )) {
                 ForgeConfigWriteResult.Written -> {
                     // 重启失败要让调用方知道：server 没起来还继续往下发，只会无声卡死；
@@ -1918,9 +1947,14 @@ internal class ForgeChatState(
         messages = current
     }
 
-    /** DEFAULT / OFF 不发 variant（用上游默认）；其余档位按 wireValue 选 variant。 */
+    /**
+     * DEFAULT 不发 variant（用上游默认）；OFF 发 "off"——配置里那个 variant 是「真关」
+     * （reasoningEffort=none + thinking disabled，见 ForgeConfigWriter）。此前 OFF 与 DEFAULT
+     * 同产物（都不发 variant），药丸显示「关闭」、上游照样开着思考（3.4.49 审理 P1-3）。
+     */
     private fun ReasoningEffort.forgeVariant(): String? = when (this) {
-        ReasoningEffort.DEFAULT, ReasoningEffort.OFF -> null
+        ReasoningEffort.DEFAULT -> null
+        ReasoningEffort.OFF -> "off"
         else -> wireValue
     }
 

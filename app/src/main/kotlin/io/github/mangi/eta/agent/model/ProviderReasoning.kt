@@ -16,7 +16,7 @@ internal object ProviderReasoning {
         val effort = validatedEffort(config)
         val sourceType = sourceType(config)
         if (
-            config.reasoningCapabilities == null &&
+            !config.hasDeclaredReasoningCapabilities() &&
             !isLegacyReasoningModel(sourceType, config.model)
         ) {
             return
@@ -44,7 +44,7 @@ internal object ProviderReasoning {
         request: JSONObject,
         config: AgentModelClient.ModelConfig,
     ) {
-        if (config.reasoningCapabilities == null) return
+        if (!config.hasDeclaredReasoningCapabilities()) return
         val effort = validatedEffort(config)
         request.put(
             "reasoning",
@@ -83,6 +83,14 @@ internal object ProviderReasoning {
         request: JSONObject,
         config: AgentModelClient.ModelConfig,
     ) {
+        // 能力未知的模型按 DEFAULT 处理：thinking / output_config 一个都不写。
+        // 此前这条路径没有 null 护栏，未知模型会带档位发出去（3.4.49 审理 P1-1）。
+        if (
+            !config.hasDeclaredReasoningCapabilities() &&
+            !isLegacyReasoningModel(sourceType(config), config.model)
+        ) {
+            return
+        }
         val effort = validatedEffort(config)
         if (effort == ReasoningEffort.DEFAULT) return
         if (effort == ReasoningEffort.OFF) {
@@ -293,6 +301,10 @@ internal object ProviderReasoning {
     private fun validatedEffort(config: AgentModelClient.ModelConfig): ReasoningEffort {
         val effort = config.effectiveReasoningEffort
         val capabilities = config.reasoningCapabilities ?: return effort
+        // 回落能力是猜的，不是服务商声明：一律按 DEFAULT 处理——不校验、也不把猜出来的档位
+        // 送进任何一家服务商的硬表（那会让整轮请求抛 IllegalArgumentException 打死）。
+        // 这就是旧的 null 护栏口径：什么都不发（3.4.49 审理 P1-1）。
+        if (capabilities.isFallback) return ReasoningEffort.DEFAULT
         require(effort in capabilities.selectableEfforts) {
             "当前模型不支持 ${effort.displayName} thinking effort"
         }
@@ -300,6 +312,15 @@ internal object ProviderReasoning {
             "当前模型强制启用思考，不能选择 Off"
         }
         return effort
+    }
+
+    /**
+     * 能力是否由服务商/目录真实声明。null 与 [io.github.mangi.eta.data.model.UnknownReasoningCapabilities]
+     * 都算「没声明」：发送侧按 DEFAULT 处理，什么都不发（3.4.49 审理 P1-1）。
+     */
+    private fun AgentModelClient.ModelConfig.hasDeclaredReasoningCapabilities(): Boolean {
+        val capabilities = reasoningCapabilities ?: return false
+        return !capabilities.isFallback
     }
 
     private fun sourceType(config: AgentModelClient.ModelConfig): String =

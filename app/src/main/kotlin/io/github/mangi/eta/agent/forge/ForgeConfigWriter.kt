@@ -8,12 +8,15 @@ import io.github.mangi.eta.agent.terminal.runOneShotShell
 import io.github.mangi.eta.agent.terminal.terminalEnvironment
 import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
+import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
+import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -40,8 +43,54 @@ internal object ForgeConfigWriter {
     const val PROVIDER_ID = "relay"
     private const val WRITE_TIMEOUT_SECONDS = 60L
 
+    /**
+     * 写进 opencode 配置的档位集：与输入栏可停档同源（能力的 selectableEfforts），
+     * 去掉 DEFAULT（不发 variant、用上游默认）。能力未知（回落表）时给六档，
+     * 与 Assist 的 UnknownReasoningCapabilities 同一口径。
+     * 此前写死六档：服务商不认的档（MiniMax 的 xhigh、只认 low/high/max 的 kimi-k3）
+     * 也会被写进配置，选中就 400（3.4.49 审理 P3-22）。
+     */
+    internal fun forgeVariantEfforts(
+        capabilities: ModelReasoningCapabilities?,
+    ): List<ReasoningEffort> {
+        val efforts = capabilities?.selectableEfforts ?: listOf(
+            ReasoningEffort.MINIMAL,
+            ReasoningEffort.LOW,
+            ReasoningEffort.MEDIUM,
+            ReasoningEffort.HIGH,
+            ReasoningEffort.XHIGH,
+            ReasoningEffort.MAX,
+        )
+        return efforts.filter { it != ReasoningEffort.DEFAULT }.distinct()
+    }
+
+    /**
+     * 档位集指纹：配置里写了哪些 variant 取决于能力声明，能力变了（设置页改了档位、
+     * 换了模型）就必须重写配置，否则 server 里还是旧档位表（链式反应防漏项）。
+     */
+    internal fun variantSignature(capabilities: ModelReasoningCapabilities?): String =
+        forgeVariantEfforts(capabilities).joinToString(",") { it.wireValue }
+
+    /**
+     * 一个 variant 条目：档位名与 reasoningEffort 都用 wireValue，和 Assist 发出去的一致。
+     * OFF 要真关：reasoningEffort=none（OpenAI 兼容家族）+ thinking disabled（DeepSeek/
+     * 百炼/Moonshot 这一族认这个开关）两套口径一起写，各服务商认自己那套、忽略另一套。
+     * 此前 OFF 直接不发 variant，于是药丸显示「关闭」、上游照样开着思考（3.4.49 审理 P1-3）。
+     */
+    private fun JsonObjectBuilder.putVariant(effort: ReasoningEffort) {
+        putJsonObject(effort.wireValue) {
+            if (effort == ReasoningEffort.OFF) {
+                put("reasoningEffort", "none")
+                putJsonObject("thinking") { put("type", "disabled") }
+            } else {
+                put("reasoningEffort", effort.wireValue)
+            }
+        }
+    }
+
     internal fun opencodeConfigJson(
         settings: ForgeSettings,
+        reasoningCapabilities: ModelReasoningCapabilities? = null,
         reasoningDisabled: Boolean = false,
     ): JsonObject = buildJsonObject {
         put("\$schema", "https://opencode.ai/config.json")
@@ -92,16 +141,15 @@ internal object ForgeConfigWriter {
                         // variant 的 reasoningEffort 也必须与 wireValue 一致：此前 "max"
                         // 写的是 "xhigh"，药丸显示 Max、实际深度只有 Extra High，
                         // 与 Assist 同档位发出的 "max" 不一致（3.4.49 审理）。
+                        // 档位集按当前模型的能力声明生成（见 forgeVariantEfforts），不再写死六档。
                         // 模型明确不支持思考时不写 variants：行为层本来就不发 variant，
                         // 配置里留着只会让人手改/排查时误以为可用（3.4.49 审理）。
                         if (!reasoningDisabled) {
-                            putJsonObject("variants") {
-                                putJsonObject("minimal") { put("reasoningEffort", "minimal") }
-                                putJsonObject("low") { put("reasoningEffort", "low") }
-                                putJsonObject("medium") { put("reasoningEffort", "medium") }
-                                putJsonObject("high") { put("reasoningEffort", "high") }
-                                putJsonObject("xhigh") { put("reasoningEffort", "xhigh") }
-                                putJsonObject("max") { put("reasoningEffort", "max") }
+                            val efforts = forgeVariantEfforts(reasoningCapabilities)
+                            if (efforts.isNotEmpty()) {
+                                putJsonObject("variants") {
+                                    efforts.forEach { effort -> putVariant(effort) }
+                                }
                             }
                         }
                     }
@@ -127,6 +175,7 @@ internal object ForgeConfigWriter {
         context: Context,
         settings: ForgeSettings,
         credentials: ForgeCredentials,
+        reasoningCapabilities: ModelReasoningCapabilities? = null,
         reasoningDisabled: Boolean = false,
     ): ForgeConfigWriteResult = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
@@ -137,7 +186,11 @@ internal object ForgeConfigWriter {
             return@withContext ForgeConfigWriteResult.EnvironmentNotReady
         }
         val command = writeCommand(
-            configJson = opencodeConfigJson(settings, reasoningDisabled).toString(),
+            configJson = opencodeConfigJson(
+                settings = settings,
+                reasoningCapabilities = reasoningCapabilities,
+                reasoningDisabled = reasoningDisabled,
+            ).toString(),
             authJson = authJson(settings, credentials).toString(),
             providerId = settings.providerId,
         )

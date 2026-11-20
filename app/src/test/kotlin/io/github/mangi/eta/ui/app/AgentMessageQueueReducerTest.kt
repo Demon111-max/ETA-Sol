@@ -57,6 +57,31 @@ class AgentMessageQueueReducerTest {
     }
 
     @Test
+    fun requeuePutsTheRejectedMessageBackAtTheHeadWithoutDuplicatingIt() {
+        val state = baseState(isStreaming = true).let {
+            val s1 = AgentMessageQueueReducer.enqueue(it, QueuedMessageUi(id = "q-1", content = "后面的"))
+            AgentMessageQueueReducer.enqueue(s1, QueuedMessageUi(id = "q-2", content = "被门拦下的"))
+        }
+        // 出队那一步已经落盘，被发送门拦下后必须原样回到队首，否则消息从界面上消失。
+        val rejected = state.queuedMessages.first { it.id == "q-1" }.copy(immediateInterrupt = true)
+
+        val requeued = AgentMessageQueueReducer.requeue(state, rejected)
+
+        assertEquals(listOf("q-1", "q-2"), requeued.queuedMessages.map { it.id })
+        assertFalse(requeued.queuedMessages.first().immediateInterrupt)
+        assertEquals(state, AgentMessageQueueReducer.requeue(requeued, rejected))
+    }
+
+    @Test
+    fun enqueueBumpsTheInputSyncVersionSoTheTextFieldActuallyClears() {
+        val initial = baseState(isStreaming = true, input = "草稿")
+
+        val next = AgentMessageQueueReducer.enqueue(initial, QueuedMessageUi(id = "q-1", content = "排队"))
+
+        assertEquals(initial.inputSyncVersion + 1, next.inputSyncVersion)
+    }
+
+    @Test
     fun promoteToInterruptMovesItemToFrontWhenStreamingAndPopsImmediatelyWhenIdle() {
         val queued = listOf(
             QueuedMessageUi(id = "q-1", content = "第一条"),

@@ -88,7 +88,12 @@ internal class AgentConversationPersistence(initial: AgentConversationStore.Snap
             updatedAt: Long,
             isPinned: Boolean = false,
         ) : this(
-            title, updatedAt, isPinned, state.reasoningEffort, state.appliedRuntimeRunIds,
+            title, updatedAt, isPinned,
+            // 落盘一律取原档：回退钳制只影响显示与本次发送，不许覆盖会话存档里的原档位
+            // （3.4.49 审理 P1-2）。六条写回路径（逐字草稿、改档、挂图、排队、分支、发送/完成）
+            // 最终都从这里出，收口一处即可，不必逐条堵。
+            state.archivedReasoningEffort ?: state.reasoningEffort,
+            state.appliedRuntimeRunIds,
             state.roleplay, if (state.roleplay == null) RoleplayMessageState() else state.roleplayMessages,
             state.modelId, state.messages, state.history, state.journal.ifEmpty { state.history },
             state.isConversationLoaded, state.messageStartIndex,

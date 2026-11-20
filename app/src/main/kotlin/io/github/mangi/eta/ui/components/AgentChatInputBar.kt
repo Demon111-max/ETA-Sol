@@ -44,7 +44,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.input.TextFieldLineLimits
-import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
@@ -57,6 +56,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -108,6 +108,9 @@ import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.QueuedMessageUi
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import top.yukonga.miuix.kmp.basic.DropdownImpl
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -126,6 +129,9 @@ private val SendIconSize = 16.dp
 private val StopIconSize = 10.dp
 private val ThinkingIconSize = 21.dp
 private val InputContainerShape = RoundedCornerShape(20.dp)
+
+/** 草稿外传的静默窗口：连续输入期间只按这个间隔落一次，见 AgentChatInputBar 的 snapshotFlow。 */
+private const val InputDraftSyncDelayMillis = 200L
 
 /**
  * Agent 输入器始终保持同一空间结构，聚焦、输入和执行过程只改变状态，不搬动操作入口。
@@ -182,8 +188,21 @@ internal fun AgentChatInputBar(
     val textFieldState = rememberTextFieldState(initialText = input)
     // 把输入内容外传：本组件自己持有 TextFieldState（普通输入不往上抛，避免每个字符带整个
     // 聊天舞台重组），但需要跨重建保住草稿的调用方拿不到内容，所以在这里做一次单向外抛。
+    //
+    // 两点修正（3.4.49 审理 P2-1 / P3-6）：
+    // 1. 按 [InputDraftSyncDelayMillis] 的静默窗口节流：此前逐字符直抛，每敲一个字就把
+    //    homeState.input 改一遍、整张会话表复制一次、整屏重组一次。节流窗口内连打只落一次，
+    //    代价是切走瞬间最多丢最后一个窗口内的字符（切走时输入栏会被销毁，收不到新的快照）。
+    // 2. 回调经 rememberUpdatedState 取最新值：LaunchedEffect 只按 textFieldState 启动一次，
+    //    直接捕获 onInputChange 会把首次组合的旧闭包一直用到销毁。
+    val currentOnInputChange by rememberUpdatedState(onInputChange)
     LaunchedEffect(textFieldState) {
-        snapshotFlow { textFieldState.text.toString() }.collect(onInputChange)
+        snapshotFlow { textFieldState.text.toString() }
+            .distinctUntilChanged()
+            .collectLatest { text ->
+                delay(InputDraftSyncDelayMillis)
+                currentOnInputChange(text)
+            }
     }
     var wasEditingMessage by remember { mutableStateOf(isEditingMessage) }
     var syncedVersion by remember { mutableIntStateOf(inputSyncVersion) }
@@ -494,7 +513,11 @@ internal fun AgentChatInputBar(
                         val submitCurrentDraft: (Boolean) -> Unit = { interrupt ->
                             if (canSend) {
                                 val submittedText = textFieldState.text.toString()
-                                textFieldState.clearText()
+                                // 不在这里 clearText()：发送可能被上层拒绝（模型不支持图片、文件引用
+                                // 需要终端、会话正在删除……），本地先清空就等于把用户刚打的字连同
+                                // 草稿一起扔掉，上层再想还原也只剩空串（3.4.49 审理 P2-2）。
+                                // 真正的清空交给上层：它把 input 置空并递增 inputSyncVersion，
+                                // 输入栏在 LaunchedEffect(inputSyncVersion) 里同步成空。
                                 if (interrupt) {
                                     onInterruptAndSubmit(submittedText)
                                 } else {

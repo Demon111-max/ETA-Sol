@@ -28,6 +28,8 @@ internal object AgentMessageQueueReducer {
             pendingFileReferences = emptyList(),
             messageEdit = null,
             queuedMessages = nextQueue,
+            // 输入栏不再自己 clearText（发送可能被拒，3.4.49 审理 P2-2），清空由版本号驱动。
+            inputSyncVersion = state.inputSyncVersion + 1,
         )
     }
 
@@ -77,6 +79,22 @@ internal object AgentMessageQueueReducer {
             queuedMessages = rest,
             inputSyncVersion = state.inputSyncVersion + 1,
             focusInputOnSync = true,
+        )
+    }
+
+    /**
+     * 出队后又被发送门拦下（模型不支持图片、文件引用需要终端）时把消息放回队首。
+     *
+     * 出队那一步已经落盘（[pollNextToSendAfterRun] / [promoteToInterrupt] 都先写状态再发），
+     * 拦下后如果只是 return，这条消息在界面上就彻底消失了（3.4.49 审理 P2-3）。
+     */
+    fun requeue(
+        state: AgentChatUiState,
+        item: QueuedMessageUi,
+    ): AgentChatUiState {
+        if (state.queuedMessages.any { it.id == item.id }) return state
+        return state.copy(
+            queuedMessages = listOf(item.copy(immediateInterrupt = false)) + state.queuedMessages,
         )
     }
 

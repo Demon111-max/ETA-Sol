@@ -8,6 +8,7 @@ import io.github.mangi.eta.agent.roleplay.RoleplayMessageLink
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.agent.roleplay.RoleplayReplyRevision
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
@@ -307,6 +308,38 @@ class AgentConversationPersistenceTest {
         persistence.save(context, loaded.copy(titles = mapOf("active" to "合法改名")))
         assertEquals("合法改名", EtaDatabase.get(context).conversationDao().conversation("active")!!.title)
         assertEquals(current.roleplayMessages, AgentConversationStore.loadConversation(context, "active")!!.roleplayMessages)
+    }
+
+    @Test
+    fun fallbackClampIsNeverWrittenBackToTheArchivedEffort() = runBlocking {
+        // 会话绑 M1(MAX) → M1 被禁用 → 显示与本次发送钳到 HIGH：存档里必须还是 MAX，
+        // 否则重新启用 M1 后原档位就没了（3.4.50 P1-2）。
+        val clamped = state("active").copy(
+            reasoningEffort = ReasoningEffort.HIGH,
+            archivedReasoningEffort = ReasoningEffort.MAX,
+            thinkingEnabled = true,
+        )
+
+        AgentConversationPersistence().save(context, snapshot(mapOf("active" to clamped)))
+
+        val row = EtaDatabase.get(context).conversationDao().conversation("active")!!
+        assertEquals(ReasoningEffort.MAX.wireValue, row.reasoningEffort)
+        assertTrue(row.thinkingEnabled)
+        // 模型恢复可用后重新载入，档位回到原档。
+        assertEquals(ReasoningEffort.MAX, AgentConversationStore.loadConversation(context, "active")!!.reasoningEffort)
+    }
+
+    @Test
+    fun unclampedEffortIsStoredAsIs() = runBlocking {
+        val state = state("active").copy(
+            reasoningEffort = ReasoningEffort.LOW,
+            thinkingEnabled = true,
+        )
+
+        AgentConversationPersistence().save(context, snapshot(mapOf("active" to state)))
+
+        assertEquals(ReasoningEffort.LOW.wireValue,
+            EtaDatabase.get(context).conversationDao().conversation("active")!!.reasoningEffort)
     }
 
     private fun state(id: String): AgentChatHomeUiState {

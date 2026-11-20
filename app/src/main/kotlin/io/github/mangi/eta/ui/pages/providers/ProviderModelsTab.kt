@@ -967,6 +967,11 @@ private fun ModelEditDialog(
     var selectedDefaultEffort by remember(model.id, isNew) {
         mutableStateOf(initialCapabilities?.defaultEffort)
     }
+    // 用户是否亲手动过「档位集/默认档」。没动过就不写 reasoningCapabilitiesOverride：
+    // 旧实现只要开着思考就无条件写一份 supportedEfforts = 勾选集、mandatory = 无 OFF 的声明，
+    // 手动模型（勾选集只剩 DEFAULT）保存一次就被钉成「只支持 Default、强制思考」，
+    // 目录/远端推断出的档位被整份顶掉（3.4.49 审理 P2-7 / P3-13）。
+    var effortsTouched by remember(model.id, isNew) { mutableStateOf(false) }
     // 输入能力：与思考能力同级的能力声明，Assist 与 Forge 共用这一份，
     // 不许任何一侧再单独存一份（链式反应防冲突）。「图片」勾选即 supportsVision：
     // ForgeSharedConfig 据此把 image 写进 opencode 配置的 modalities/attachment。
@@ -980,6 +985,7 @@ private fun ModelEditDialog(
 
     fun resetAutomaticReasoning() {
         reasoningOverrideActive = false
+        effortsTouched = false
         val automaticCapabilities = if (nativeGemini) GeminiModelCapabilities.resolveReasoning(
             model.copy(modelId = modelId, reasoningOverride = null, reasoningCapabilitiesOverride = null),
         ) else model.reasoningCapabilities
@@ -1014,17 +1020,18 @@ private fun ModelEditDialog(
         }.ifEmpty { listOf(Model.TEXT_MODALITY) },
         attachment = imageInputEnabled,
         reasoningOverride = reasoningEnabled.takeIf { reasoningOverrideActive },
-        reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled) {
+        reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled && effortsTouched) {
             val canDisable = !nativeGemini && ReasoningEffort.OFF in selectedReasoningEfforts
             (model.effectiveReasoningCapabilities ?: ModelReasoningCapabilities()).copy(
                 supportedEfforts = availableEfforts.filter { effort ->
                     effort != ReasoningEffort.OFF && effort in selectedReasoningEfforts
                 },
+                // 默认档只允许落在已勾选的具体档上；勾选集为空时整份声明不写，
+                // 让目录/远端推断继续生效，而不是存一份空声明把它顶掉。
                 defaultEffort = selectedDefaultEffort?.takeIf { it in selectedReasoningEfforts },
-                defaultEnabled = true,
                 mandatory = !canDisable,
                 canDisable = canDisable,
-            )
+            ).takeIf { it.supportedEfforts.isNotEmpty() }
         } else {
             null
         },
@@ -1202,21 +1209,30 @@ private fun ModelEditDialog(
                                         selected = checked,
                                         onClick = {
                                             reasoningOverrideActive = true
+                                            effortsTouched = true
                                             selectedReasoningEfforts = if (checked) {
                                                 selectedReasoningEfforts - effort
                                             } else {
                                                 selectedReasoningEfforts + effort
+                                            }
+                                            // 取消勾选正好是当前默认档时当场清掉默认档，
+                                            // 别留到保存时被 takeIf 静默抹掉（3.4.49 审理 P3-10）。
+                                            if (checked && selectedDefaultEffort == effort) {
+                                                selectedDefaultEffort = null
                                             }
                                         },
                                         enabled = !isSaving,
                                     )
                                 }
                             }
-                            val defaultCandidates = availableEfforts.filter { effort ->
-                                effort != ReasoningEffort.OFF &&
-                                    effort != ReasoningEffort.DEFAULT &&
-                                    effort in selectedReasoningEfforts
+                            // 默认档行必须对「手动模型」也可见：这类模型没有声明能力，
+                            // 勾选集里只有 DEFAULT，旧实现据此把整行藏掉，用户根本没有
+                            // 入口设新对话的初始档（3.4.49 审理 P2-7）。
+                            val concreteEfforts = availableEfforts.filter { effort ->
+                                effort != ReasoningEffort.OFF && effort != ReasoningEffort.DEFAULT
                             }
+                            val checkedConcrete = concreteEfforts.filter { it in selectedReasoningEfforts }
+                            val defaultCandidates = checkedConcrete.ifEmpty { concreteEfforts }
                             if (defaultCandidates.isNotEmpty()) {
                                 CouiText(
                                     text = stringResource(R.string.model_default_effort_label),
@@ -1233,6 +1249,10 @@ private fun ModelEditDialog(
                                             selected = effort == selectedDefaultEffort,
                                             onClick = {
                                                 reasoningOverrideActive = true
+                                                effortsTouched = true
+                                                // 候选是「没勾任何具体档」时的兜底全集，
+                                                // 这时点它同时把该档勾上，保证默认档一定在档位集里。
+                                                selectedReasoningEfforts = selectedReasoningEfforts + effort
                                                 selectedDefaultEffort =
                                                     if (effort == selectedDefaultEffort) null else effort
                                             },
@@ -1446,10 +1466,15 @@ private fun ModelEditDialog(
                                         selected = checked,
                                         onClick = {
                                             reasoningOverrideActive = true
+                                            effortsTouched = true
                                             selectedReasoningEfforts = if (checked) {
                                                 selectedReasoningEfforts - effort
                                             } else {
                                                 selectedReasoningEfforts + effort
+                                            }
+                                            // 同 COUI 分支：取消勾选正好是当前默认档时当场清掉（P3-10）。
+                                            if (checked && selectedDefaultEffort == effort) {
+                                                selectedDefaultEffort = null
                                             }
                                         },
                                         enabled = !isSaving,
@@ -1457,12 +1482,13 @@ private fun ModelEditDialog(
                                 }
                             }
                         }
+                        // 同 COUI 分支：勾选集里没有具体档时退回全集，默认档行对手动模型也可见（P2-7）。
+                        val miuixConcreteEfforts = availableEfforts.filter { effort ->
+                            effort != ReasoningEffort.OFF && effort != ReasoningEffort.DEFAULT
+                        }
+                        val miuixCheckedConcrete = miuixConcreteEfforts.filter { it in selectedReasoningEfforts }
                         val miuixDefaultCandidates = if (reasoningEnabled) {
-                            availableEfforts.filter { effort ->
-                                effort != ReasoningEffort.OFF &&
-                                    effort != ReasoningEffort.DEFAULT &&
-                                    effort in selectedReasoningEfforts
-                            }
+                            miuixCheckedConcrete.ifEmpty { miuixConcreteEfforts }
                         } else {
                             emptyList()
                         }
@@ -1484,6 +1510,8 @@ private fun ModelEditDialog(
                                         selected = effort == selectedDefaultEffort,
                                         onClick = {
                                             reasoningOverrideActive = true
+                                            effortsTouched = true
+                                            selectedReasoningEfforts = selectedReasoningEfforts + effort
                                             selectedDefaultEffort =
                                                 if (effort == selectedDefaultEffort) null else effort
                                         },

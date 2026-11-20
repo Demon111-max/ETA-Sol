@@ -65,7 +65,6 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -73,10 +72,13 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -177,7 +179,11 @@ internal fun ModelEffortControl(
         ink.copy(alpha = if (isDark) 0.10f else 0.065f)
     }
     val interactionSource = remember { MutableInteractionSource() }
-    val description = stringResource(R.string.chat_reasoning_effort, gearLabel ?: modelName)
+    // OFF 时药丸视觉上只剩模型名，读屏不能也跟着丢掉「思考已关」这层意思（3.4.49 审理 P3-4）。
+    val description = stringResource(
+        R.string.chat_reasoning_effort,
+        gearLabel ?: "$modelName · ${stringResource(R.string.effort_off_label)}",
+    )
 
     val density = LocalDensity.current
     var anchorLeftPx by remember { mutableStateOf(0) }
@@ -186,13 +192,13 @@ internal fun ModelEffortControl(
     var anchorHeightPx by remember { mutableStateOf(0) }
     val statusBarTopPx = WindowInsets.statusBars.getTop(density)
     // 模型浮层高度上限（Sol 锚点公式）：药丸上沿 − 间隙 5 − 状态栏下沿 − 8。
-    // 下限只留 96dp（提示行 + 两行模型）：3.4.47 问题 19 去掉 120dp 下限是怕把浮层
-    // 顶出屏幕上沿，但 0 高会让浮层「开着却看不见」——列表被压没、只剩压暗，
-    // 用户只能点遮罩关掉（3.4.49 审理）。96dp 下极端矮窗口里卡片上沿至多略压
-    // 状态栏，列表仍可滚动、遮罩/返回仍可关，比不可见强。
+    // 下限 108dp = 提示行 28 + 上下内边距 6 + 6 + 两行模型 34 × 2（3.4.49 审理 P3-5 修正了
+    // 原来写 96dp 的算术错误）：3.4.47 问题 19 去掉 120dp 下限是怕把浮层顶出屏幕上沿，
+    // 但 0 高会让浮层「开着却看不见」——列表被压没、只剩压暗，用户只能点遮罩关掉。
+    // 极端矮窗口里卡片上沿至多压进状态栏 12dp，列表仍可滚动、遮罩/返回仍可关，比不可见强。
     val modelSheetMaxHeight = with(density) {
         ((anchorTopPx - statusBarTopPx).coerceAtLeast(0).toDp() - 5.dp - 8.dp)
-            .coerceAtLeast(96.dp)
+            .coerceAtLeast(108.dp)
     }
 
     // 浮层进出场：renderedSheet 是实际在画的那张（退场动画播完才撤），sheet 是目标状态。
@@ -204,6 +210,9 @@ internal fun ModelEffortControl(
     val sheetScope = rememberCoroutineScope()
     var pickedModelId by remember { mutableStateOf<String?>(null) }
     var pickJob by remember { mutableStateOf<Job?>(null) }
+    // 本次收层是不是「被禁用自动收起」引起的：那种情况不该把焦点抢回输入框
+    // （流式期间键盘本来就该收着，3.4.49 审理 P3-7）。
+    var sheetClosedByDisable by remember { mutableStateOf(false) }
     // 档位↔模型内容切换的 160ms 内，旧内容不许再接手势（审计问题 12），用一层罩子吃掉。
     var contentSwitching by remember { mutableStateOf(false) }
     var lastRenderedSheet by remember { mutableStateOf(ModelEffortSheet.None) }
@@ -240,9 +249,14 @@ internal fun ModelEffortControl(
             if (sheet == ModelEffortSheet.None) {
                 renderedSheet = ModelEffortSheet.None
                 pickedModelId = null
+                // 切换遮罩的单向闩锁在这里解开：只有这里知道「内容切换/退场都结束了」
+                // （3.4.49 审理 P3-3）。
+                contentSwitching = false
                 // 焦点归还等浮层真正撤下后再发：退场动画期间卡片 Popup 还是可聚焦窗口，
                 // 提前 requestFocus 会被它抢走、键盘回不来（3.4.49 审理，原问题 6 的时序补完）。
-                onSheetClosed()
+                // 被禁用自动收起的路径不还焦点：那是流式开始，键盘本就该收着。
+                if (!sheetClosedByDisable) onSheetClosed()
+                sheetClosedByDisable = false
             }
         }
     }
@@ -251,6 +265,7 @@ internal fun ModelEffortControl(
     // 在 Forge 侧会真改全局模型、让下一条排队消息换模型跑（3.4.49 审理）。
     LaunchedEffect(enabled) {
         if (!enabled && sheet != ModelEffortSheet.None) {
+            sheetClosedByDisable = true
             sheet = ModelEffortSheet.None
         }
     }
@@ -428,8 +443,11 @@ internal fun ModelEffortControl(
                                     pickJob?.cancel()
                                     pickJob = sheetScope.launch {
                                         delay(140)
-                                        sheet = ModelEffortSheet.None
+                                        // 先落选择、再关层。反过来的话，关层那一步会走
+                                        // LaunchedEffect(sheet) 的取消分支把本任务 cancel 掉，
+                                        // 全靠「两条语句之间没有挂起点」才侥幸没丢选择（3.4.49 审理 P2-8）。
                                         onModelSelected(modelId)
+                                        sheet = ModelEffortSheet.None
                                     }
                                 },
                             )
@@ -806,8 +824,9 @@ private fun EffortSheetContent(
                         previewIndex = index
                     },
                     onRelease = { index ->
-                        val picked = gears[index]
-                        if (picked != effort) onEffortChange(picked)
+                        // 落档按「相对打开时的位置有没有移动」判断：DEFAULT 在滑块上的兜底位置
+                        // 就是 High，点在自己手柄上不该把「默认」具体化成 High（3.4.49 审理 P3-6）。
+                        if (index != initialIndex) onEffortChange(gears[index])
                     },
                     onDragCancelled = {
                         // 手势被系统取消/中途禁用：预览与「已交互」标记一起退回，
@@ -825,7 +844,9 @@ private fun EffortSheetContent(
                         .clip(CircleShape)
                         .background(colors.primary.copy(alpha = 0.12f), CircleShape)
                         .border(0.5.dp, colors.primary.copy(alpha = 0.25f), CircleShape)
-                        .clickable(role = Role.Button) { if (enabled) onEffortChange(only) }
+                        .clickable(enabled = enabled, role = Role.Button) {
+                            if (enabled) onEffortChange(only)
+                        }
                         .padding(horizontal = 14.dp),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -864,7 +885,9 @@ private fun EffortSlider(
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val segments = (gears.size - 1).coerceAtLeast(1)
-    val fractionState = remember { mutableFloatStateOf(selectedIndex.toFloat() / segments) }
+    // 档位集变了（切模型、能力表变化）就按新刻度重算手柄位置，否则旧 fraction 会停在
+    // 错误的刻度上（3.4.49 审理 P3-2）。
+    val fractionState = remember(segments) { mutableFloatStateOf(selectedIndex.toFloat() / segments) }
     var trackWidthPx by remember { mutableStateOf(0) }
     var dragging by remember { mutableStateOf(false) }
     var gestureActive by remember { mutableStateOf(false) }
@@ -879,7 +902,7 @@ private fun EffortSlider(
     // 手势回路改成同步写状态值跟手，落定动画由本 effect 用 animate() 写回同一状态。
     // 手势与 effect 都在主线程串行执行，不存在旧实现里游离 animateTo 与 effect
     // 互相取消、把手柄卡在半路的问题。
-    LaunchedEffect(selectedIndex, gestureActive) {
+    LaunchedEffect(selectedIndex, gestureActive, segments) {
         if (!gestureActive) {
             animate(
                 initialValue = fractionState.floatValue,
@@ -909,10 +932,33 @@ private fun EffortSlider(
     val latestOnPreviewChange by rememberUpdatedState(onPreviewChange)
     val latestOnRelease by rememberUpdatedState(onRelease)
     val latestOnDragCancelled by rememberUpdatedState(onDragCancelled)
+    // 滑块此前完全没有无障碍语义：读屏只能听到一片空白，也没法改档（3.4.49 审理 P3-5）。
+    val sliderDescription = stringResource(
+        R.string.chat_reasoning_effort,
+        gears.getOrNull(selectedIndex)?.let { solGearLabel(it) } ?: "",
+    )
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(45.dp)
+            .semantics {
+                contentDescription = sliderDescription
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    current = selectedIndex.toFloat(),
+                    range = 0f..gears.lastIndex.coerceAtLeast(0).toFloat(),
+                    steps = (gears.size - 2).coerceAtLeast(0),
+                )
+                setProgress { target ->
+                    if (!latestEnabled) {
+                        false
+                    } else {
+                        val index = target.roundToInt().coerceIn(0, gears.lastIndex)
+                        latestOnPreviewChange(index)
+                        latestOnRelease(index)
+                        true
+                    }
+                }
+            }
             .onGloballyPositioned { trackWidthPx = it.size.width }
             .pointerInput(gears) {
                 // 点按与拖动共用一条手势回路。旧实现是两个 pointerInput 分别跑
@@ -938,21 +984,24 @@ private fun EffortSlider(
                         (fractionForX(x) * segments).roundToInt().coerceIn(0, gears.lastIndex)
                     gestureActive = true
                     var dragged = false
-                    var lastIndex = indexForX(down.position.x)
                     var upX = down.position.x
                     var released = false
+                    var settled = false
                     try {
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: continue
                             if (change.isConsumed) break
-                            // 抬起或被系统取消：changedToUpOrCanceled 在本项目 compose-ui
-                            // 版本里不存在，用 previousPressed && !pressed 等价表达；
-                            // 是不是用户真抬手（而非系统取消）靠 changedToUp() 区分。
+                            // 拖动途中被禁用（流式开始）就不再跟手：直接退出回路，
+                            // 由下面的取消分支把预览退回实际档位（3.4.49 审理 P2-10）。
+                            if (!latestEnabled) break
+                            // 抬起或被系统取消。系统取消（ACTION_CANCEL）在 compose 里是合成一个
+                            // pressed=false 且已被消费的 PointerEvent，走上面的 isConsumed 分支，
+                            // 所以能走到这里的一定是用户真抬手——不用再拿 changedToUp() 判别
+                            // （那个判据在此处恒为真，是死逻辑，3.4.49 审理 P2-9）。
                             if (change.previousPressed && !change.pressed) {
                                 upX = change.position.x
-                                // 被系统取消（不是用户抬手）不落档，手柄由对齐 effect 弹回原档。
-                                released = change.changedToUp()
+                                released = true
                                 break
                             }
                             if (change.positionChanged()) {
@@ -966,7 +1015,6 @@ private fun EffortSlider(
                                 if (dragged) {
                                     fractionState.floatValue = fractionForX(change.position.x)
                                     val index = indexForX(change.position.x)
-                                    lastIndex = index
                                     if (index != hapticIndex.intValue) {
                                         hapticIndex.intValue = index
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -976,23 +1024,33 @@ private fun EffortSlider(
                             }
                         }
                         if (released && latestEnabled) {
-                            val finalIndex = if (dragged) lastIndex else indexForX(upX)
+                            // 落档一律按抬手坐标算：拖动途中最后一次 move 的坐标可能落后于
+                            // 真实抬手点，用 lastIndex 会把手柄落在差一档的位置（3.4.49 审理 P3-8）。
+                            val finalIndex = indexForX(upX)
                             if (finalIndex != hapticIndex.intValue) {
                                 hapticIndex.intValue = finalIndex
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             }
                             latestOnPreviewChange(finalIndex)
                             latestOnRelease(finalIndex)
+                            settled = true
                         } else if (dragged) {
                             // 系统取消（来电/下拉通知栏）或拖到一半被禁用：不落档，
                             // 预览也必须退回实际档位——否则词与手柄停在拖到的档上、
                             // 实际生效的还是原档，又是显示一套实际一套（3.4.49 审理）。
                             hapticIndex.intValue = latestSelectedIndex
                             latestOnDragCancelled()
+                            settled = true
                         }
                     } finally {
                         dragging = false
                         gestureActive = false
+                        // 协程被取消（节点 detach、pointerInput key 变化、密度变化）走不到上面
+                        // 任何一支，预览会停在拖到的档位上；这里补一次回退（3.4.49 审理 P3-7）。
+                        if (dragged && !settled) {
+                            hapticIndex.intValue = latestSelectedIndex
+                            latestOnDragCancelled()
+                        }
                     }
                 }
             },

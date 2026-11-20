@@ -4,6 +4,7 @@ import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.data.model.UnknownReasoningCapabilities
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -399,6 +400,68 @@ class ProviderReasoningTest {
             )
 
             assertEquals(setOf("metadata"), request.keys().asSequence().toSet())
+        }
+    }
+
+    @Test
+    fun unknownCapabilityModelAcceptsEveryEffortWithoutThrowingOrSendingAnything() {
+        // 能力未声明（解析 null → 回落 Unknown）的模型：药丸里选任何档发送都不许抛错、
+        // 不许整轮失败，发送侧按 DEFAULT 处理（等价旧 null 护栏：什么都不发）。3.4.50 P1-1。
+        val fallback = UnknownReasoningCapabilities
+        val cases = listOf(
+            ProviderSourceTypes.MINIMAX to "MiniMax-M3",
+            ProviderSourceTypes.MIMO to "mimo-v2.6",
+            ProviderSourceTypes.MOONSHOT to "kimi-k2.7-code",
+            ProviderSourceTypes.STEPFUN to "step-unknown-2609",
+            ProviderSourceTypes.BAILIAN to "qwen3.8-max",
+            ProviderSourceTypes.DEEPSEEK to "deepseek-v4",
+        )
+        for ((source, model) in cases) {
+            for (effort in fallback.selectableEfforts) {
+                val request = JSONObject().put("kept", "yes")
+                ProviderReasoning.applyOpenAiCompatibleRequest(
+                    request,
+                    config(source, effort, model).copy(reasoningCapabilities = fallback),
+                )
+                assertEquals("$source/$model/$effort", setOf("kept"), request.keys().asSequence().toSet())
+            }
+        }
+    }
+
+    @Test
+    fun unknownCapabilityModelSendsNoReasoningBlockOnResponsesAndAnthropic() {
+        val fallback = UnknownReasoningCapabilities
+        for (effort in fallback.selectableEfforts) {
+            val responses = JSONObject()
+            ProviderReasoning.applyResponsesRequest(
+                responses,
+                config(ProviderSourceTypes.OPENAI, effort, "gpt-6.1-sol").copy(reasoningCapabilities = fallback),
+            )
+            assertFalse("responses/$effort", responses.has("reasoning"))
+
+            val anthropic = JSONObject()
+            ProviderReasoning.applyAnthropicRequest(
+                anthropic,
+                config(ProviderSourceTypes.ANTHROPIC, effort, "claude-unknown-9").copy(reasoningCapabilities = fallback),
+            )
+            assertFalse("anthropic/$effort", anthropic.has("thinking"))
+            assertFalse("anthropic/$effort", anthropic.has("output_config"))
+        }
+    }
+
+    @Test
+    fun declaredCapabilitiesStillRejectUnsupportedEfforts() {
+        // 已声明能力的模型维持硬表校验：P1-1 只给「未知能力」开口子。
+        val declared = ModelReasoningCapabilities(
+            supportedEfforts = listOf(ReasoningEffort.LOW),
+            mandatory = true,
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            ProviderReasoning.applyOpenAiCompatibleRequest(
+                JSONObject(),
+                config(ProviderSourceTypes.MINIMAX, ReasoningEffort.HIGH, "MiniMax-M3")
+                    .copy(reasoningCapabilities = declared),
+            )
         }
     }
 

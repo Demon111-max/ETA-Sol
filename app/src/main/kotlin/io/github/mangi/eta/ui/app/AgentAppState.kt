@@ -47,7 +47,7 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ProviderSetting
-import io.github.mangi.eta.data.model.initialReasoningEffort
+import io.github.mangi.eta.data.model.seededReasoningEffort
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.enabledModel
 import io.github.mangi.eta.data.repository.EtaBackupRepository
@@ -291,21 +291,36 @@ internal class AgentAppState(
         }
     }
 
-    /** 新对话初始档播种：只认声明能力的默认档（口径见 initialReasoningEffort）。 */
+    /**
+     * 新对话初始档播种：只认声明能力的默认档（口径见 seededReasoningEffort）。
+     * 用户亲手选过档就不动；换模型时按新模型的声明默认档重播一次（3.4.49 审理 P3-15）。
+     */
     private fun AgentChatHomeUiState.withSeededInitialEffort(): AgentChatHomeUiState {
-        val seeded = initialReasoningEffort(
-            currentDeclaredReasoningCapabilities,
-            reasoningEffort,
+        val seeded = seededReasoningEffort(
+            capabilities = currentDeclaredReasoningCapabilities,
+            current = reasoningEffort,
+            explicit = reasoningEffortExplicit,
         )
         if (seeded == reasoningEffort) return this
         return copy(thinkingEnabled = seeded.enablesReasoning, reasoningEffort = seeded)
     }
 
+    /**
+     * 按当前（可能是回退后的）模型能力归一化显示档。
+     *
+     * 回退钳制只影响显示与本次发送：钳低时把原档搬进 [AgentChatUiState.archivedReasoningEffort]，
+     * 落盘一律取原档（见 AgentConversationPersistence.Content），模型重新可用后原档自动回来。
+     * 此前这里直接把归一化结果写回 homeState 再 updateConversation 落盘，会话绑定的模型
+     * 被禁用一次、用户敲一个字，原档 MAX 就被永久改成 HIGH（3.4.49 审理 P1-2）。
+     */
     private fun AgentChatHomeUiState.withCurrentReasoningCapabilities(): AgentChatHomeUiState {
-        val normalized = currentReasoningCapabilities?.normalize(reasoningEffort) ?: ReasoningEffort.OFF
+        val original = archivedReasoningEffort ?: reasoningEffort
+        val normalized = currentReasoningCapabilities?.normalize(original) ?: ReasoningEffort.OFF
         return copy(
             thinkingEnabled = normalized.enablesReasoning,
             reasoningEffort = normalized,
+            // 只有真被钳低了才留档；模型恢复后归一化会还原原档，这里自然清空。
+            archivedReasoningEffort = original.takeIf { it != normalized },
             availableReasoningEfforts = currentReasoningCapabilities?.selectableEfforts.orEmpty(),
         )
     }
@@ -831,6 +846,10 @@ internal class AgentAppState(
             homeState.copy(
                 thinkingEnabled = normalized.enablesReasoning,
                 reasoningEffort = normalized,
+                // 用户亲手选档：此后不再被播种覆盖，也不再保留回退前的原档——
+                // 他这次选的档就是要存档的档（3.4.49 审理 P1-2 / P3-15）。
+                archivedReasoningEffort = null,
+                reasoningEffortExplicit = true,
             )
         )
         if (selectedConversationId != null) persistConversations()
@@ -846,7 +865,21 @@ internal class AgentAppState(
         ) {
             return
         }
-        updateCurrentConversation(homeState.copy(modelId = modelId))
+        // 新对话页的档位只是「按上一个模型播种」的产物，用户没亲手选过（explicit=false）时
+        // 换模型要重新按新模型的默认档播种；否则停在旧模型播出来的档上，看着像用户选的
+        // （3.4.49 审理 P3-15）。绑定会话里的档位是用户数据，一律不动。
+        val reseed = !homeState.reasoningEffortExplicit && selectedConversationId == null
+        updateCurrentConversation(
+            if (reseed) {
+                homeState.copy(
+                    modelId = modelId,
+                    reasoningEffort = ReasoningEffort.DEFAULT,
+                    archivedReasoningEffort = null,
+                )
+            } else {
+                homeState.copy(modelId = modelId)
+            },
+        )
         refreshConversationModel()
         if (selectedConversationId != null) persistConversations()
         modelPickerState = modelPickerState.copy(isChanging = true)
@@ -923,9 +956,10 @@ internal class AgentAppState(
         fileAttachmentOwnerVersion += 1
         selectedConversationId = conversationId
         homeState = state
-        // 已加载的会话立刻同步刷新模型投影：等异步加载任务回来再刷，
-        // 药丸会先闪几帧上一条会话的模型名（3.4.49 审理）。异步任务里还会再刷一次，幂等。
-        if (state.isConversationLoaded) refreshConversationModel()
+        // 切会话立刻同步刷新模型投影与能力：等异步加载任务回来再刷，药丸会先闪几帧
+        // 上一条会话的模型名/档位（3.4.49 审理）。异步任务里还会再刷一次，幂等。
+        // 未加载的会话也要刷：能力先就绪，载入后才有正确档位可显示（不许先显示原档再跳低）。
+        refreshConversationModel()
         conversationLoadFailed = false
         isLoadingConversation = !state.isConversationLoaded
         // 选中即清搜索词：不清的话下次打开抽屉还带着上次的过滤词，看着像会话丢了。
@@ -979,11 +1013,19 @@ internal class AgentAppState(
                     conversationId in conversationPinnedIds,
                 )
                 val latest = conversationsById[conversationId] ?: return@withLock false
-                updateConversation(conversationId, restored.copy(
+                val merged = restored.copy(
                     input = latest.input,
                     pendingImages = latest.pendingImages,
                     pendingFileReferences = latest.pendingFileReferences,
-                ), updateTimestamp = false)
+                )
+                // 载入后立刻按当前能力归一化显示档：原档留在 archivedReasoningEffort 里，
+                // 落盘照旧取原档（3.4.49 审理 P1-2）。后台预加载的会话不在这里算——
+                // 能力是「当前选中模型」的，切过去时由 refreshConversationModel 重算。
+                updateConversation(
+                    conversationId,
+                    if (conversationId == selectedConversationId) merged.withCurrentReasoningCapabilities() else merged,
+                    updateTimestamp = false,
+                )
                 refreshConversationSummaries()
                 true
             }
@@ -1504,6 +1546,7 @@ internal class AgentAppState(
                 appContext.getString(R.string.state_ui_file_path_reference_requires_opening_the_termina_deca4c),
                 Toast.LENGTH_SHORT,
             ).show()
+            requeueRejectedMessage(targetConversationId, item)
             return
         }
         // 排队消息真发前再查一次识图门：排队期间可能已经换了模型（与提交时同口径）。
@@ -1517,6 +1560,7 @@ internal class AgentAppState(
                     appContext.getString(R.string.state_ui_current_model_does_not_support_images),
                     Toast.LENGTH_SHORT,
                 ).show()
+                requeueRejectedMessage(targetConversationId, item)
                 return
             }
         }
@@ -1529,6 +1573,21 @@ internal class AgentAppState(
             editBoundary = null,
             preserveCurrentDraft = true,
         )
+    }
+
+    /**
+     * 排队消息出队后又被发送门拦下：放回队首并落盘，别让这条消息凭空消失
+     * （出队那一步已经落过盘，3.4.49 审理 P2-3）。用户能在队列条上看到它并撤回继续编辑。
+     */
+    private fun requeueRejectedMessage(
+        conversationId: String,
+        item: QueuedMessageUi,
+    ) {
+        val current = conversationsById[conversationId] ?: return
+        val next = AgentMessageQueueReducer.requeue(current, item)
+        if (next === current) return
+        updateConversation(conversationId, next, updateTimestamp = false)
+        if (conversationId == selectedConversationId) persistConversations()
     }
 
     private fun dispatchMessageToConversation(
@@ -1608,13 +1667,18 @@ internal class AgentAppState(
                     pendingImages = emptyList(),
                     pendingFileReferences = emptyList(),
                     messageEdit = null,
+                    // 输入栏不再自己 clearText（发送可能被拒，见 P2-2），清空改由这里驱动：
+                    // 递增 inputSyncVersion 让输入栏把本地 TextFieldState 同步成空。
+                    inputSyncVersion = state.inputSyncVersion + 1,
                 )
             },
             reasoningEffort = state.reasoningEffort,
         )
         if (!runLaunched && !preserveCurrentDraft) {
             // 注册被拒（已有 run 在跑等）时不能静默吞掉这条消息：把草稿放回输入区，用户可改后再发。
-            val draftText = messages.filterIsInstance<UserMessageUi>().lastOrNull()?.content.orEmpty()
+            val draftText = prompt.ifBlank {
+                messages.filterIsInstance<UserMessageUi>().lastOrNull()?.content.orEmpty()
+            }
             conversationsById[conversationId]?.let { current ->
                 updateConversation(
                     conversationId,
@@ -2653,7 +2717,7 @@ internal class AgentAppState(
         if (messages === state.messages) return false
         updateConversation(
             conversationId = conversationId,
-            state = state.copy(messages = messages),
+            state = normalizeForDisplay(conversationId, state.copy(messages = messages)),
             updateTimestamp = updateTimestamp,
         )
         return true
@@ -2668,8 +2732,19 @@ internal class AgentAppState(
         val conversationId = conversationIdForRun(runId) ?: return
         val state = conversationsById[conversationId] ?: return
         val outcome = AgentRuntimeHistoryReducer.apply(state, runId, additions, snapshot, retainPendingSupplements)
-        if (!outcome.alreadyApplied) updateConversation(conversationId, outcome.state)
+        // 事件推进期间能力可能已经变了（模型被禁用/换掉），每步都按当前能力重算显示档，
+        // 否则药丸会在回退期从 HIGH 跳回 MAX（3.4.49 审理 P2-5）。归一化幂等，不会吃掉原档。
+        if (!outcome.alreadyApplied) {
+            updateConversation(conversationId, normalizeForDisplay(conversationId, outcome.state))
+        }
     }
+
+    /** 只对当前显示的会话做能力归一化：后台会话的能力口径要等切过去时再算。 */
+    private fun normalizeForDisplay(
+        conversationId: String,
+        state: AgentChatHomeUiState,
+    ): AgentChatHomeUiState =
+        if (conversationId == selectedConversationId) state.withCurrentReasoningCapabilities() else state
 
     private fun updateCurrentConversation(
         state: AgentChatHomeUiState,
@@ -2690,6 +2765,9 @@ internal class AgentAppState(
             input = draft.input,
             thinkingEnabled = draft.reasoningEffort.enablesReasoning,
             reasoningEffort = draft.reasoningEffort,
+            // 原档与「用户亲手选过」这两个标记要跟着草稿走，否则新对话一落盘就把回退前的原档丢了。
+            archivedReasoningEffort = draft.archivedReasoningEffort,
+            reasoningEffortExplicit = draft.reasoningEffortExplicit,
             availableReasoningEfforts = currentReasoningCapabilities?.selectableEfforts.orEmpty(),
             pendingImages = draft.pendingImages,
             pendingFileReferences = draft.pendingFileReferences,
@@ -2865,6 +2943,8 @@ internal class AgentAppState(
                 input = "",
                 isStreaming = false,
                 thinkingEnabled = thinkingEnabled,
+                // 新对话的档位是播种出来的，不是用户选的：换模型时允许按新模型的默认档重播。
+                reasoningEffortExplicit = false,
             )
 
         fun newConversationId(): String = "conv-${UUID.randomUUID()}"

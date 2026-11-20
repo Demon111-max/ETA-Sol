@@ -92,7 +92,6 @@ import io.github.mangi.eta.agent.forge.ForgeWorkspaces
 import io.github.mangi.eta.agent.model.AgentFileReference
 import io.github.mangi.eta.agent.model.AgentFileReferenceKind
 import io.github.mangi.eta.core.AndroidAgentLogger
-import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.QueuedMessageUi
@@ -154,7 +153,10 @@ internal fun ForgeChatPane(
     // 直接返回（并把断掉的事件订阅接回去），所以这里无条件调用是安全的。
     LaunchedEffect(Unit) { state.start() }
     // 合并控件里切了模型：不等下一次发送，立刻按新选择对齐共用配置（能力与档位上限也随之换）。
-    LaunchedEffect(modelPickerState?.selectedModel?.id) {
+    // 键用整个选中模型（data class 全字段）而不是只它的 id：同一个 id 的模型在设置页改了
+    // 上下文窗口/显示名/协议也要重新对齐（3.4.49 审理 P3-21）。Key、BaseURL 不在选择器状态里，
+    // 那类改动由进面板时的 start() 与发送前的 applySharedConfig() 兜住。
+    LaunchedEffect(modelPickerState?.selectedModel) {
         if (modelPickerState != null) state.onSharedSelectionChanged()
     }
     // 轮次进行中来的选择变化会被 onSharedSelectionChanged 推迟（怕重启 server 打断轮次）：
@@ -916,12 +918,13 @@ private fun ForgeComposer(
                 showContextUsage = true,
                 isStreaming = state.busy,
                 reasoningEffort = state.reasoningEffort,
-                // 档位上限与 Assist 同源：解析出的能力声明（与 Assist 同一个解析入口）；
-                // 明确不支持思考 → 空列表（控件只剩模型名）；能力未知才回落写死 7 档（控件再收敛成 Sol 5 档）。
+                // 档位上限与 Assist 同源：解析出的能力声明（与 Assist 同一个解析入口，
+                // 能力未知时那份回落表就在里面）。明确不支持思考 → 空列表（控件只剩模型名）。
+                // 不再有 Forge 自己的第二份档位表（3.4.49 审理 P1-3）。
                 availableReasoningEfforts = if (state.reasoningDisabled) {
                     emptyList()
                 } else {
-                    state.reasoningCapabilities?.selectableEfforts ?: ForgeReasoningEfforts
+                    state.reasoningCapabilities?.selectableEfforts ?: emptyList()
                 },
                 modelPickerState = modelPickerState,
                 onModelSelected = onModelSelected,
@@ -1602,20 +1605,5 @@ private fun summarizeInput(input: String?): String? {
     }
     return raw.lineSequence().firstOrNull()?.take(MAX_SUMMARY_CHARS)
 }
-
-/**
- * 能力未知时的回落档位表：当前模型的能力声明解析出来后，可选档以能力的 selectableEfforts 为准
- * （与 Assist 同源，见 ForgeComposer 的 availableReasoningEfforts）。opencode 侧靠 variant 落地
- * （配置写入时预置），OFF 在这条链路上关不掉思考、不提供；DEFAULT 不发 variant、用上游默认。
- */
-private val ForgeReasoningEfforts = listOf(
-    ReasoningEffort.DEFAULT,
-    ReasoningEffort.MINIMAL,
-    ReasoningEffort.LOW,
-    ReasoningEffort.MEDIUM,
-    ReasoningEffort.HIGH,
-    ReasoningEffort.XHIGH,
-    ReasoningEffort.MAX,
-)
 
 private const val MAX_SUMMARY_CHARS = 120

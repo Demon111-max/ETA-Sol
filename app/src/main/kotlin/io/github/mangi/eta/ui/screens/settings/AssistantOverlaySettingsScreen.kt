@@ -83,10 +83,12 @@ internal fun AssistantOverlaySettingsScreen(
         else -> followTitle
     }
 
+    // 档位集必须与聊天侧同源：走 effectiveReasoningCapabilities（未知能力回落表、
+    // 明确不支持为 null），只读原始声明会让这里与药丸显示的档位对不上（3.4.49 审理 P2-6）。
     val effectiveCapabilities = remember(providers, resolvedCustom, primaryModelId) {
         val target = resolvedCustom ?: providers.enabledModel(primaryModelId)
         target?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
         }
     }
     val effortOptions = remember(effectiveCapabilities) {
@@ -104,9 +106,14 @@ internal fun AssistantOverlaySettingsScreen(
             }
         }
     }
-    val selectedEffortIndex = remember(effortOptions, overlaySettings.reasoningEffort) {
+    val selectedEffortIndex = remember(effortOptions, overlaySettings.reasoningEffort, effectiveCapabilities) {
         val current = overlaySettings.resolvedReasoningEffort
-        effortOptions.indexOf(current).takeIf { it >= 0 } ?: 0
+        // 存档档位被能力收窄时按 normalize 结果展示（与聊天侧钳制同口径），
+        // 不能 indexOf(...) ?: 0 掉回「跟随默认」——那会显示一套、存着另一套（3.4.49 审理 P2-6）。
+        val shown = current?.let { effort ->
+            effectiveCapabilities?.normalize(effort) ?: effort
+        }
+        effortOptions.indexOf(shown).takeIf { it >= 0 } ?: 0
     }
 
     var showModelSheet by remember { mutableStateOf(false) }
@@ -115,7 +122,7 @@ internal fun AssistantOverlaySettingsScreen(
         showModelSheet = false
         val nextTarget = modelId?.let { providers.enabledModel(it) } ?: providers.enabledModel(primaryModelId)
         val nextCapabilities = nextTarget?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
         }
         val currentEffort = overlaySettings.resolvedReasoningEffort
         val keepEffort = currentEffort != null &&

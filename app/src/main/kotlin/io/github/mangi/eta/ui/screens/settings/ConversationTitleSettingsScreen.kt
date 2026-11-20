@@ -85,10 +85,11 @@ internal fun ConversationTitleSettingsScreen(
         else -> followTitle
     }
 
+    // 与聊天侧同源：未知能力回落表、明确不支持为 null（3.4.49 审理 P2-6）。
     val effectiveCapabilities = remember(providers, resolvedCustom, primaryModelId) {
         val target = resolvedCustom ?: providers.enabledModel(primaryModelId)
         target?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
         }
     }
     val effortOptions = remember(effectiveCapabilities) {
@@ -106,9 +107,13 @@ internal fun ConversationTitleSettingsScreen(
             }
         }
     }
-    val selectedEffortIndex = remember(effortOptions, titleSettings.reasoningEffort) {
+    val selectedEffortIndex = remember(effortOptions, titleSettings.reasoningEffort, effectiveCapabilities) {
         val current = titleSettings.resolvedReasoningEffort
-        effortOptions.indexOf(current).takeIf { it >= 0 } ?: 0
+        // 收窄时按 normalize 结果展示，别掉回「自动」把存档档位藏起来（3.4.49 审理 P2-6）。
+        val shown = current?.let { effort ->
+            effectiveCapabilities?.normalize(effort) ?: effort
+        }
+        effortOptions.indexOf(shown).takeIf { it >= 0 } ?: 0
     }
 
     var showModelSheet by remember { mutableStateOf(false) }
@@ -126,7 +131,7 @@ internal fun ConversationTitleSettingsScreen(
         showModelSheet = false
         val nextTarget = modelId?.let { providers.enabledModel(it) } ?: providers.enabledModel(primaryModelId)
         val nextCapabilities = nextTarget?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
         }
         val currentEffort = titleSettings.resolvedReasoningEffort
         val keepEffort = currentEffort != null &&

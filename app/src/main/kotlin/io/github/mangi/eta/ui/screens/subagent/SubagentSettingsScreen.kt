@@ -163,10 +163,11 @@ internal fun SubagentSettingsScreen(
         else -> "跟随主模型"
     }
 
+    // 与聊天侧同源：未知能力回落表、明确不支持为 null（3.4.49 审理 P2-6）。
     val effectiveCapabilities = remember(providers, resolvedSecondary, primaryProviderId, primaryModelId) {
         val target = resolvedSecondary ?: providers.enabledModel(primaryModelId)
         target?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
         }
     }
     val effortOptions = remember(effectiveCapabilities) {
@@ -182,9 +183,13 @@ internal fun SubagentSettingsScreen(
             }
         }
     }
-    val selectedEffortIndex = remember(effortOptions, subagentSettings.reasoningEffort) {
+    val selectedEffortIndex = remember(effortOptions, subagentSettings.reasoningEffort, effectiveCapabilities) {
         val current = subagentSettings.resolvedReasoningEffort
-        effortOptions.indexOf(current).takeIf { it >= 0 } ?: 0
+        // 收窄时按 normalize 结果展示，别掉回「跟随模型默认」（3.4.49 审理 P2-6）。
+        val shown = current?.let { effort ->
+            effectiveCapabilities?.normalize(effort) ?: effort
+        }
+        effortOptions.indexOf(shown).takeIf { it >= 0 } ?: 0
     }
 
     var showModelSheet by remember { mutableStateOf(false) }
