@@ -106,3 +106,36 @@ data class ModelReasoningCapabilities(
             ?: ReasoningEffort.DEFAULT
     }
 }
+
+/**
+ * 能力未知（模型没声明思考能力、也没明确声明不支持）时的回落能力：放行全部档位。
+ * Assist 与 Forge 共用这一份口径，不许各写一份、各猜一个方向——此前 Assist 把
+ * 「未知」当成「不支持」（档位段直接消失），Forge 放行 5 档，同一个模型两边两样
+ * （3.4.49 审理）。明确不支持（解析入口返回 null 且模型声明了不支持）不走这里。
+ */
+internal val UnknownReasoningCapabilities = ModelReasoningCapabilities(
+    supportedEfforts = listOf(
+        ReasoningEffort.MINIMAL,
+        ReasoningEffort.LOW,
+        ReasoningEffort.MEDIUM,
+        ReasoningEffort.HIGH,
+        ReasoningEffort.XHIGH,
+        ReasoningEffort.MAX,
+    ),
+    canDisable = true,
+)
+
+/**
+ * 新对话的初始档（用户定案）：能力声明里写了默认档就用默认档，没写才兜底 High，
+ * 都要先过 normalize 落进可选集。当前档不是 DEFAULT（用户已选过/已被归一化）时原样保留。
+ * 能力未知（[capabilities] 为 null）时不猜，保持 DEFAULT（服务商默认）。
+ * 此前 defaultEffort 只写进目录、没有任何消费方，新对话实际发的是服务商默认、
+ * 滑块却停在 High 位——显示一套实际一套（3.4.49 审理）。Assist 与 Forge 共用。
+ */
+internal fun initialReasoningEffort(
+    capabilities: ModelReasoningCapabilities?,
+    current: ReasoningEffort,
+): ReasoningEffort {
+    if (capabilities == null || current != ReasoningEffort.DEFAULT) return current
+    return capabilities.normalize(capabilities.defaultEffort ?: ReasoningEffort.HIGH)
+}

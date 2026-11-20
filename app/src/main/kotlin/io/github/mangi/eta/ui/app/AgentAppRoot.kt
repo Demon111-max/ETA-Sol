@@ -676,9 +676,7 @@ fun AgentAppRoot(
             },
             homeCharacter = if (isHome) agentState.homeState.roleplayChatUi() else null,
             homeModelPickerState = if (isHome) agentState.modelPickerState else null,
-            isHomeStreaming = isHome && agentState.homeState.isStreaming,
             hasPermissionAttention = isHome && hasPermissionAttention,
-            onHomeModelSelected = agentState::selectModel,
             chatMode = chatMode,
             onChatModeSelected = { mode -> selectChatMode(mode) },
             forgeWorkspaces = forgeWorkspaces,
@@ -759,6 +757,7 @@ fun AgentAppRoot(
                                 is AgentHomeAction.HistoryViewportChanged -> agentState.updateHistoryViewport(action.atLatest)
                                 AgentHomeAction.RetryConversationLoad -> agentState.retryConversationLoad()
                                 is AgentHomeAction.ModelSelected -> agentState.selectModel(action.modelId)
+                                is AgentHomeAction.InputChanged -> agentState.updateInputDraft(action.text)
                                 is AgentHomeAction.SubmitMessage -> { requestExecutionNotifications(); agentState.sendCurrentMessage(action.text) }
                                 is AgentHomeAction.InterruptAndSubmitMessage -> { requestExecutionNotifications(); agentState.interruptAndSendCurrentMessage(action.text) }
                                 is AgentHomeAction.SteerQueuedMessage -> { requestExecutionNotifications(); agentState.steerQueuedMessage(action.id) }

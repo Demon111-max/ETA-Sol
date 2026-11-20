@@ -1159,6 +1159,9 @@
   <string name="browser_close_page">关闭网页</string>
   <string name="model_not_selected">未选择</string>
   <string name="conversation_model_unavailable">此会话原用的模型不可用，已改用 %1$s</string>
+  <string name="conversation_model_unavailable_no_fallback">此会话原用的模型不可用，且没有配置其他可用模型</string>
+  <string name="model_default_effort_label">新对话默认档位</string>
+  <string name="state_ui_current_model_does_not_support_images">当前模型不支持图片输入，请移除图片或换一个支持图片的模型</string>
   <string name="model_switch_current">切换模型，当前为 %1$s</string>
   <string name="model_picker_title">选择模型</string>
   <string name="model_picker_empty">暂无可用模型</string>

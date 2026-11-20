@@ -30,6 +30,7 @@ import io.github.mangi.eta.data.model.ForgeCredentials
 import io.github.mangi.eta.data.model.ForgeSettings
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.data.model.initialReasoningEffort
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -123,14 +124,18 @@ private val configApplyMutex = Mutex()
 /**
  * 配置指纹要覆盖一切会影响写入结果与 server 行为的输入：
  * 服务商身份/地址/模型/Key/协议之外，还有显示名（写进配置的 name）、自定义请求头、
- * 上下文上限，以及**当前 Linux 发行版**——配置是写进该发行版 rootfs 的，
- * 换发行版后新 rootfs 里根本没有这份配置，指纹不含发行版就会误判「已对齐」跳过写入，
- * 与 3.4.25「换 Key 不生效」是同一族漏项。
+ * 是否禁用思考（决定 variants 写不写），以及**当前 Linux 发行版**——配置是写进该
+ * 发行版 rootfs 的，换发行版后新 rootfs 里根本没有这份配置，指纹不含发行版就会
+ * 误判「已对齐」跳过写入，与 3.4.25「换 Key 不生效」是同一族漏项。
+ * 上下文上限不在指纹里：它不写进 opencode 配置（见 ForgeConfigWriter 的注释）、
+ * 也不影响 server 行为，只供 App 侧用量显示——此前把它算进指纹，在设置里改一下
+ * 上下文窗口就会白白重写配置并重启 server（3.4.49 审理）。
  */
 private fun forgeConfigFingerprint(
     settings: ForgeSettings,
     credentials: ForgeCredentials,
     distributionWireName: String,
+    reasoningDisabled: Boolean,
 ): String = buildString {
     append(settings.providerId).append('\n')
     append(settings.providerName).append('\n')
@@ -138,7 +143,7 @@ private fun forgeConfigFingerprint(
     append(settings.modelId).append('\n')
     append(credentials.apiKey).append('\n')
     append(settings.endpointMode).append('\n')
-    append(settings.contextWindow?.toString().orEmpty()).append('\n')
+    append(reasoningDisabled).append('\n')
     // 识图能力会写进 opencode 配置的 modalities/attachment：不进指纹的话，
     // 在设置页改了勾选也不会触发重写+重启，Forge 里改了等于没改（链式反应防漏项）。
     append(settings.supportsVision).append('\n')
@@ -163,9 +168,15 @@ internal suspend fun prewarmForgeServer(context: Context) {
             shared.settings,
             shared.credentials,
             LinuxEnvironmentSettingsRepository.current(context).wireName,
+            shared.reasoningDisabled,
         )
         if (fingerprint != appliedConfigFingerprint) {
-            if (ForgeConfigWriter.write(context, shared.settings, shared.credentials)
+            if (ForgeConfigWriter.write(
+                    context,
+                    shared.settings,
+                    shared.credentials,
+                    shared.reasoningDisabled,
+                )
                 is ForgeConfigWriteResult.Written
             ) {
                 // 重启成功（或本来没在跑）才认这份指纹：重启失败还置位，
@@ -809,13 +820,24 @@ internal class ForgeChatState(
             shared.reasoningCapabilities != null -> shared.reasoningCapabilities.normalize(reasoningEffort)
             else -> reasoningEffort
         }
+        // 新对话初始档播种（与 Assist 同一口径，见 initialReasoningEffort）：
+        // DEFAULT 只是「还没选过」的占位，能力已知时落到声明的默认档、没有才兜底
+        // High。此前 defaultEffort 在 Forge 同样没有任何消费方，药丸显示「默认」、
+        // 滑块停在 High 位、实际发出去的是 opencode 上游默认（3.4.49 审理）。
+        reasoningEffort = initialReasoningEffort(shared.reasoningCapabilities, reasoningEffort)
         val fingerprint = forgeConfigFingerprint(
             shared.settings,
             shared.credentials,
             LinuxEnvironmentSettingsRepository.current(context).wireName,
+            shared.reasoningDisabled,
         )
         if (fingerprint != appliedConfigFingerprint) {
-            when (val written = ForgeConfigWriter.write(context, shared.settings, shared.credentials)) {
+            when (val written = ForgeConfigWriter.write(
+                context,
+                shared.settings,
+                shared.credentials,
+                shared.reasoningDisabled,
+            )) {
                 ForgeConfigWriteResult.Written -> {
                     // 重启失败要让调用方知道：server 没起来还继续往下发，只会无声卡死；
                     // 指纹只在重启成功后才认账，失败下次还要重试对齐。

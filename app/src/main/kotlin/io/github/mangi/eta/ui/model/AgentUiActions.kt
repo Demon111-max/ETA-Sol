@@ -9,6 +9,7 @@ sealed interface AgentHomeAction {
     data object CompactContext : AgentHomeAction
     data class ReasoningEffortChanged(val effort: ReasoningEffort) : AgentHomeAction
     data class ModelSelected(val modelId: String) : AgentHomeAction
+    data class InputChanged(val text: String) : AgentHomeAction
     data class SubmitMessage(val text: String) : AgentHomeAction
     data class InterruptAndSubmitMessage(val text: String) : AgentHomeAction
     data class SteerQueuedMessage(val id: String) : AgentHomeAction

@@ -185,11 +185,13 @@ internal fun ModelEffortControl(
     var anchorHeightPx by remember { mutableStateOf(0) }
     val statusBarTopPx = WindowInsets.statusBars.getTop(density)
     // 模型浮层高度上限（Sol 锚点公式）：药丸上沿 − 间隙 5 − 状态栏下沿 − 8。
-    // 不设 120dp 下限：横屏/分屏 + 键盘时可用高度可能不足 120dp，
-    // 硬下限会把浮层顶出屏幕上沿（3.4.47 审计问题 19）。
+    // 下限只留 96dp（提示行 + 两行模型）：3.4.47 问题 19 去掉 120dp 下限是怕把浮层
+    // 顶出屏幕上沿，但 0 高会让浮层「开着却看不见」——列表被压没、只剩压暗，
+    // 用户只能点遮罩关掉（3.4.49 审理）。96dp 下极端矮窗口里卡片上沿至多略压
+    // 状态栏，列表仍可滚动、遮罩/返回仍可关，比不可见强。
     val modelSheetMaxHeight = with(density) {
         ((anchorTopPx - statusBarTopPx).coerceAtLeast(0).toDp() - 5.dp - 8.dp)
-            .coerceAtLeast(0.dp)
+            .coerceAtLeast(96.dp)
     }
 
     // 浮层进出场：renderedSheet 是实际在画的那张（退场动画播完才撤），sheet 是目标状态。
@@ -225,7 +227,10 @@ internal fun ModelEffortControl(
                 animationSpec = spring(dampingRatio = 0.93f, stiffness = 480f),
             )
         } else if (renderedSheet != ModelEffortSheet.None) {
-            onSheetClosed()
+            // 关层意图一出现就取消待确认的选模型：140ms 内点遮罩/按返回关层，
+            // 是用户明确的取消，不许任务到期后照样把模型换掉（3.4.49 审理）。
+            pickJob?.cancel()
+            pickJob = null
             exiting = true
             sheetProgress.animateTo(
                 targetValue = 0f,
@@ -234,8 +239,18 @@ internal fun ModelEffortControl(
             if (sheet == ModelEffortSheet.None) {
                 renderedSheet = ModelEffortSheet.None
                 pickedModelId = null
-                pickJob = null
+                // 焦点归还等浮层真正撤下后再发：退场动画期间卡片 Popup 还是可聚焦窗口，
+                // 提前 requestFocus 会被它抢走、键盘回不来（3.4.49 审理，原问题 6 的时序补完）。
+                onSheetClosed()
             }
+        }
+    }
+    // 流式开始时浮层还开着：立刻收起。浮层内的选模型/跳模型入口没有流式门控，
+    // 留着它，用户点选在 Assist 侧会被状态层挡下却照样移勾关层（显示一套实际一套），
+    // 在 Forge 侧会真改全局模型、让下一条排队消息换模型跑（3.4.49 审理）。
+    LaunchedEffect(enabled) {
+        if (!enabled && sheet != ModelEffortSheet.None) {
+            sheet = ModelEffortSheet.None
         }
     }
     val scrimAlpha by animateFloatAsState(
@@ -386,7 +401,12 @@ internal fun ModelEffortControl(
                                 effort = effort,
                                 modelName = modelName,
                                 enabled = enabled,
-                                onOpenModels = { sheet = ModelEffortSheet.Model },
+                                onOpenModels = {
+                                    // 切换遮罩同步置位：等 LaunchedEffect(renderedSheet) 再置位
+                                    // 会漏出新内容首帧无遮罩的空窗（3.4.49 审理）。
+                                    contentSwitching = true
+                                    sheet = ModelEffortSheet.Model
+                                },
                                 // 选档不收浮层（Sol 原版口径）：松手只落档，
                                 // 收起只走点遮罩（含药丸所在位置，打开时药丸被遮罩盖住）或返回键。
                                 onEffortChange = { picked ->
@@ -397,16 +417,18 @@ internal fun ModelEffortControl(
                                 state = modelPickerState,
                                 maxHeight = modelSheetMaxHeight,
                                 confirmedModelId = pickedModelId,
+                                enabled = enabled,
                                 onModelSelected = { modelId ->
                                     // 先把勾落到新行上（SolModelList 读 confirmedModelId），
                                     // 140ms 后才回调并收起（审计问题 14）。
-                                    if (pickJob?.isActive != true) {
-                                        pickedModelId = modelId
-                                        pickJob = sheetScope.launch {
-                                            delay(140)
-                                            sheet = ModelEffortSheet.None
-                                            onModelSelected(modelId)
-                                        }
+                                    // 140ms 内改主意点另一行：以最后一次为准——取消上一笔、
+                                    // 勾跟到新行，不许把第二击静默吞掉（3.4.49 审理）。
+                                    pickedModelId = modelId
+                                    pickJob?.cancel()
+                                    pickJob = sheetScope.launch {
+                                        delay(140)
+                                        sheet = ModelEffortSheet.None
+                                        onModelSelected(modelId)
                                     }
                                 },
                             )
@@ -511,6 +533,7 @@ private fun SolModelList(
     state: AgentModelPickerUiState,
     maxHeight: Dp,
     confirmedModelId: String?,
+    enabled: Boolean,
     onModelSelected: (String) -> Unit,
 ) {
     val colors = MiuixTheme.colorScheme
@@ -578,7 +601,7 @@ private fun SolModelList(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 34.dp)
-                        .clickable(role = Role.Button) { onModelSelected(model.id) }
+                        .clickable(role = Role.Button, enabled = enabled) { onModelSelected(model.id) }
                         .semantics { selected = isSelected }
                         .padding(horizontal = 12.dp),
                 ) {
@@ -643,6 +666,8 @@ private fun ShrinkingPillText(
         ),
         color = color,
         maxLines = 1,
+        // 缩到 9.5sp 下限仍放不下时走省略号，不许硬裁掉半个字（3.4.49 审理）。
+        overflow = TextOverflow.Ellipsis,
         onTextLayout = { result ->
             if (result.hasVisualOverflow && fontSize > 9.5.sp) {
                 fontSize = (fontSize.value - 1f).sp
@@ -742,7 +767,7 @@ private fun EffortSheetContent(
                 .padding(top = 39.dp)
                 .height(16.dp)
                 .clip(RoundedCornerShape(6.dp))
-                .clickable(role = Role.Button, onClick = onOpenModels)
+                .clickable(role = Role.Button, enabled = enabled, onClick = onOpenModels)
                 .padding(horizontal = 4.dp),
         ) {
             Text(
@@ -782,6 +807,12 @@ private fun EffortSheetContent(
                     onRelease = { index ->
                         val picked = gears[index]
                         if (picked != effort) onEffortChange(picked)
+                    },
+                    onDragCancelled = {
+                        // 手势被系统取消/中途禁用：预览与「已交互」标记一起退回，
+                        // 大词要变回「默认/关」的原始文案，不许停在某个档位词上。
+                        interacted = false
+                        previewIndex = initialIndex
                     },
                 )
             } else if (gears.size == 1) {
@@ -827,6 +858,7 @@ private fun EffortSlider(
     enabled: Boolean,
     onPreviewChange: (Int) -> Unit,
     onRelease: (Int) -> Unit,
+    onDragCancelled: () -> Unit,
 ) {
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
@@ -865,6 +897,13 @@ private fun EffortSlider(
     LaunchedEffect(selectedIndex) { hapticIndex.intValue = selectedIndex }
     // 流式开始等禁用态：浮层开着时药丸已被门控，浮层内的滑块同样不许改档。
     val latestEnabled by rememberUpdatedState(enabled)
+    // 回调与选中档一律走最新值：pointerInput 只以 gears 为 key，块里直接抓的参数
+    // 会停在手势块创建那一刻——外部改档后旧 onRelease 闭包里的 effort 是陈值，
+    // 「拖回原档」会被误判成没变化而吞掉（3.4.49 审理）。
+    val latestSelectedIndex by rememberUpdatedState(selectedIndex)
+    val latestOnPreviewChange by rememberUpdatedState(onPreviewChange)
+    val latestOnRelease by rememberUpdatedState(onRelease)
+    val latestOnDragCancelled by rememberUpdatedState(onDragCancelled)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -881,6 +920,9 @@ private fun EffortSlider(
                 // gestureActive，让对齐 effect 把手柄弹簧到落定档位。
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    // 已被退场/切换罩子吃掉的按下不归滑块：罩子的 consume 只是标记，
+                    // 不查 isConsumed 的话滑块照样跟手改档，罩子在主控件上落空（3.4.49 审理）。
+                    if (down.isConsumed) return@awaitEachGesture
                     if (!latestEnabled || trackWidthPx <= 0) return@awaitEachGesture
                     val railPaddingPx = with(density) { railPadding.toPx() }
                     fun fractionForX(x: Float): Float {
@@ -898,6 +940,7 @@ private fun EffortSlider(
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                            if (change.isConsumed) break
                             if (change.changedToUpOrCanceled()) {
                                 upX = change.position.x
                                 // 被系统取消（不是用户抬手）不落档，手柄由对齐 effect 弹回原档。
@@ -920,7 +963,7 @@ private fun EffortSlider(
                                         hapticIndex.intValue = index
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     }
-                                    onPreviewChange(index)
+                                    latestOnPreviewChange(index)
                                 }
                             }
                         }
@@ -930,8 +973,14 @@ private fun EffortSlider(
                                 hapticIndex.intValue = finalIndex
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             }
-                            onPreviewChange(finalIndex)
-                            onRelease(finalIndex)
+                            latestOnPreviewChange(finalIndex)
+                            latestOnRelease(finalIndex)
+                        } else if (dragged) {
+                            // 系统取消（来电/下拉通知栏）或拖到一半被禁用：不落档，
+                            // 预览也必须退回实际档位——否则词与手柄停在拖到的档上、
+                            // 实际生效的还是原档，又是显示一套实际一套（3.4.49 审理）。
+                            hapticIndex.intValue = latestSelectedIndex
+                            latestOnDragCancelled()
                         }
                     } finally {
                         dragging = false
@@ -1046,22 +1095,28 @@ internal fun solGearLabel(effort: ReasoningEffort): String? = when (effort) {
     ReasoningEffort.OFF, ReasoningEffort.DEFAULT -> null
 }
 
-/** 当前档在滑块上的位置；DEFAULT 兜底 High 的位置（Sol 原版），没有 High 就取最接近的一档。 */
+/**
+ * 当前档在滑块上的位置；DEFAULT 兜底 High 的位置（Sol 原版）。
+ * 目标档不在滑块上（被设置页能力挡掉）时，与 normalize() 同方向**向下**收敛：
+ * 取不超过目标的最高档，没有更低的才落第一档。旧实现按 rank 距离取最近，
+ * 目标下方无档、上方有档时会停到比 normalize 结果更高的档上——手柄位置与
+ * 状态层收敛出的实际档位对不上（3.4.49 审理）。
+ */
 internal fun solGearIndex(effort: ReasoningEffort, gears: List<ReasoningEffort>): Int {
     if (gears.isEmpty()) return 0
-    val direct = when (effort) {
+    val target = if (effort == ReasoningEffort.DEFAULT) ReasoningEffort.HIGH else effort
+    val direct = when (target) {
         ReasoningEffort.MINIMAL, ReasoningEffort.LOW ->
             gears.indexOfFirst { it == ReasoningEffort.LOW || it == ReasoningEffort.MINIMAL }
         ReasoningEffort.MEDIUM -> gears.indexOf(ReasoningEffort.MEDIUM)
-        ReasoningEffort.HIGH, ReasoningEffort.DEFAULT -> gears.indexOf(ReasoningEffort.HIGH)
+        ReasoningEffort.HIGH -> gears.indexOf(ReasoningEffort.HIGH)
         ReasoningEffort.XHIGH -> gears.indexOf(ReasoningEffort.XHIGH)
         ReasoningEffort.MAX -> gears.indexOf(ReasoningEffort.MAX)
-        ReasoningEffort.OFF -> -1
+        ReasoningEffort.OFF, ReasoningEffort.DEFAULT -> -1
     }
     if (direct >= 0) return direct
-    // 目标档不在滑块上（被设置页能力挡掉）：按 rank 取最接近的一档，与 normalize() 的收敛方向一致。
-    val targetRank = effort.rank
-    return gears.indices.minByOrNull { index ->
-        kotlin.math.abs(gears[index].rank - targetRank)
-    } ?: 0
+    return gears.withIndex()
+        .filter { it.value.rank <= target.rank }
+        .maxByOrNull { it.value.rank }
+        ?.index ?: 0
 }

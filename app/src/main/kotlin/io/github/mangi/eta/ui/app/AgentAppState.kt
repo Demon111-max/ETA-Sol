@@ -47,6 +47,7 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.data.model.initialReasoningEffort
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.enabledModel
 import io.github.mangi.eta.data.repository.EtaBackupRepository
@@ -115,6 +116,9 @@ internal class AgentAppState(
     @Volatile
     private var conversationPersistence = AgentConversationPersistence(initialConversations)
     private var currentReasoningCapabilities: ModelReasoningCapabilities? = null
+
+    /** 当前有效模型的声明能力（原始解析结果，不含未知回落）：只供新对话播种初始档。 */
+    private var currentDeclaredReasoningCapabilities: ModelReasoningCapabilities? = null
     private var providers: List<ProviderSetting> = emptyList()
     private var defaultModelId: String? = null
     private var defaultProviderId: String? = null
@@ -226,10 +230,13 @@ internal class AgentAppState(
      * 会话绑定的模型仍可用时用它，否则用默认模型。回落只影响显示与发送，不改写会话绑定，
      * 模型重新启用后会话自动回到原模型；真正发送后才把实际模型写入绑定。
      */
-    // 会话绑定模型失效（被删/被禁用）时已经提醒过的模型 id：流程会反复发射，
+    // 会话绑定模型失效（被删/被禁用）时已经提醒过的模型 id 集合：流程会反复发射，
     // 同一个失效只弹一次提示（3.4.47 审计问题 17：此前只有载入会话的路径会提示，
-    // 在设置里删掉正在用的模型时是静默换掉的）。
-    private var unavailableModelNotifiedId: String? = null
+    // 在设置里删掉正在用的模型时是静默换掉的）。3.4.49 改集合口径：旧实现是单值
+    // 标记、任何一次健康刷新就清零，在失效会话与健康会话之间来回切会反复弹；
+    // 且没有回落模型时连弹都不弹。现在按模型 id 记账，某个模型恢复可用才解除它的
+    // 标记；没有回落模型时也要出声，不许静默。
+    private val unavailableModelNotifiedIds = mutableSetOf<String>()
 
     private fun refreshConversationModel() {
         val bound = providers.enabledModel(homeState.modelId)
@@ -238,31 +245,60 @@ internal class AgentAppState(
         } else {
             AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
         }
+        val missingModelId = homeState.modelId
         if (bound != null) {
-            unavailableModelNotifiedId = null
-        } else if (homeState.isConversationLoaded && homeState.modelId != null &&
-            unavailableModelNotifiedId != homeState.modelId
+            unavailableModelNotifiedIds.remove(bound.model.id)
+        } else if (homeState.isConversationLoaded && missingModelId != null &&
+            missingModelId !in unavailableModelNotifiedIds
         ) {
-            unavailableModelNotifiedId = homeState.modelId
-            pickerState.selectedModel?.let { fallback ->
-                Toast.makeText(
-                    appContext,
-                    appContext.getString(R.string.conversation_model_unavailable, fallback.displayName),
-                    Toast.LENGTH_SHORT,
-                ).show()
-            }
+            unavailableModelNotifiedIds += missingModelId
+            val fallback = pickerState.selectedModel
+            Toast.makeText(
+                appContext,
+                if (fallback != null) {
+                    appContext.getString(
+                        R.string.conversation_model_unavailable,
+                        fallback.displayName,
+                    )
+                } else {
+                    appContext.getString(R.string.conversation_model_unavailable_no_fallback)
+                },
+                Toast.LENGTH_SHORT,
+            ).show()
         }
         modelPickerState = pickerState.copy(isChanging = modelPickerState.isChanging)
         forgeModelPickerState = AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
         val effective = bound ?: providers.enabledModel(pickerState.selectedModel?.id)
-        currentReasoningCapabilities = effective?.let { (provider, model) ->
+        // 声明能力（原始解析结果）只供新对话播种初始档；有效能力（含未知回落）
+        // 管归一化与可选档，两份不许混用。
+        currentDeclaredReasoningCapabilities = effective?.let { (provider, model) ->
             RuntimeConfigRepository.reasoningCapabilities(provider, model)
+        }
+        currentReasoningCapabilities = effective?.let { (provider, model) ->
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
         }
         if (!homeState.isConversationLoaded) return
         val resolved = homeState.withCurrentReasoningCapabilities()
         val conversationId = selectedConversationId
-        if (conversationId == null) homeState = resolved
-        else updateConversation(conversationId, resolved, updateTimestamp = false)
+        when {
+            // 还没落号的新对话页：按声明能力播种初始档（默认档优先、没有才兜底 High）。
+            conversationId == null -> homeState = resolved.withSeededInitialEffort()
+            // 回退到默认模型只影响显示与发送，绝不写回会话存档：绑定模型恢复后
+            // 会话要回到它原来的档位。上方类注释的口径此前只护住了 modelId，
+            // reasoningEffort 照样被回退模型的归一化结果写回存档（3.4.49 审理）。
+            bound == null -> homeState = resolved
+            else -> updateConversation(conversationId, resolved, updateTimestamp = false)
+        }
+    }
+
+    /** 新对话初始档播种：只认声明能力的默认档（口径见 initialReasoningEffort）。 */
+    private fun AgentChatHomeUiState.withSeededInitialEffort(): AgentChatHomeUiState {
+        val seeded = initialReasoningEffort(
+            currentDeclaredReasoningCapabilities,
+            reasoningEffort,
+        )
+        if (seeded == reasoningEffort) return this
+        return copy(thinkingEnabled = seeded.enablesReasoning, reasoningEffort = seeded)
     }
 
     private fun AgentChatHomeUiState.withCurrentReasoningCapabilities(): AgentChatHomeUiState {
@@ -777,6 +813,17 @@ internal class AgentAppState(
         updateReasoningEffort(ReasoningEffort.fromLegacy(enabled))
     }
 
+    /**
+     * 输入框草稿回写：输入栏自己持有文本状态，这里只把内容同步回会话状态，
+     * 让切会话/切模式把输入栏子树销毁重建后草稿还在（与 Forge 的 draft 同口径；
+     * 此前 Assist 侧没接这条回写，打一半的字一切就没）。不逐字落盘：
+     * 落盘跟随发送等既有 persist 时机，状态本身先保住。
+     */
+    fun updateInputDraft(text: String) {
+        if (homeState.input == text) return
+        updateCurrentConversation(homeState.copy(input = text), updateTimestamp = false)
+    }
+
     fun updateReasoningEffort(effort: ReasoningEffort) {
         if (!homeState.isConversationLoaded) return
         val normalized = currentReasoningCapabilities?.normalize(effort) ?: ReasoningEffort.OFF
@@ -876,6 +923,9 @@ internal class AgentAppState(
         fileAttachmentOwnerVersion += 1
         selectedConversationId = conversationId
         homeState = state
+        // 已加载的会话立刻同步刷新模型投影：等异步加载任务回来再刷，
+        // 药丸会先闪几帧上一条会话的模型名（3.4.49 审理）。异步任务里还会再刷一次，幂等。
+        if (state.isConversationLoaded) refreshConversationModel()
         conversationLoadFailed = false
         isLoadingConversation = !state.isConversationLoaded
         // 选中即清搜索词：不清的话下次打开抽屉还带着上次的过滤词，看着像会话丢了。
@@ -1148,7 +1198,8 @@ internal class AgentAppState(
             AgentModelClient.ConversationMessage(role = "assistant", content = text, messageId = greetingId),
         )
         selectedConversationId = id
-        homeState = emptyChatState(defaultThinkingEnabled).withCurrentReasoningCapabilities().copy(
+        homeState = emptyChatState(defaultThinkingEnabled).withCurrentReasoningCapabilities()
+            .withSeededInitialEffort().copy(
             roleplay = binding,
             history = transcript,
             journal = transcript,
@@ -1371,6 +1422,23 @@ internal class AgentAppState(
             return
         }
 
+        // 识图能力门（与设置页「图片」勾选同一份声明）：当前模型不支持图片还照发，
+        // 服务商会把整轮打回来。此前这个勾选只有 Forge 在消费，Assist 侧勾了等于
+        // 没勾（3.4.49 审理）。模型判不出来（没配模型）时不拦，按原路走。
+        if (pendingImages.isNotEmpty()) {
+            val sendModel = homeState.effectiveModelId?.let { modelId ->
+                providers.enabledModel(modelId)?.model
+            }
+            if (sendModel != null && !sendModel.supportsVision) {
+                Toast.makeText(
+                    appContext,
+                    appContext.getString(R.string.state_ui_current_model_does_not_support_images),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return
+            }
+        }
+
         if (homeState.isStreaming) {
             val queued = QueuedMessageUi(
                 id = "queue-${UUID.randomUUID()}",
@@ -1437,6 +1505,20 @@ internal class AgentAppState(
                 Toast.LENGTH_SHORT,
             ).show()
             return
+        }
+        // 排队消息真发前再查一次识图门：排队期间可能已经换了模型（与提交时同口径）。
+        if (item.pendingImages.isNotEmpty()) {
+            val sendModel = state.effectiveModelId?.let { modelId ->
+                providers.enabledModel(modelId)?.model
+            }
+            if (sendModel != null && !sendModel.supportsVision) {
+                Toast.makeText(
+                    appContext,
+                    appContext.getString(R.string.state_ui_current_model_does_not_support_images),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return
+            }
         }
         dispatchMessageToConversation(
             conversationId = targetConversationId,
@@ -1745,7 +1827,8 @@ internal class AgentAppState(
         // 发送即绑定：会话记住本轮实际使用的模型，回落到默认模型时也随之更新。
         val runModelId = state.effectiveModelId
         val runReasoningEffort = providers.enabledModel(runModelId)?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)?.normalize(reasoningEffort)
+            RuntimeConfigRepository.effectiveReasoningCapabilities(provider, model)
+                ?.normalize(reasoningEffort)
         } ?: ReasoningEffort.OFF
 
         updateConversation(

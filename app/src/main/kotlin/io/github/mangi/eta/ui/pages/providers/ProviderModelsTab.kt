@@ -960,6 +960,13 @@ private fun ModelEditDialog(
                 .orEmpty() + ReasoningEffort.DEFAULT
         )
     }
+    // 默认档位：新对话的初始档（消费方是 initialReasoningEffort）。此前弹窗里根本
+    // 没有入口选它，保存时只能沿用旧声明、旧值不在新勾选集里还会被静默清掉
+    // （3.4.49 审理）。候选只来自已勾选的具体档；保存时再用 takeIf 兜底，
+    // 不许存下「默认档不在可选集里」的声明。
+    var selectedDefaultEffort by remember(model.id, isNew) {
+        mutableStateOf(initialCapabilities?.defaultEffort)
+    }
     // 输入能力：与思考能力同级的能力声明，Assist 与 Forge 共用这一份，
     // 不许任何一侧再单独存一份（链式反应防冲突）。「图片」勾选即 supportsVision：
     // ForgeSharedConfig 据此把 image 写进 opencode 配置的 modalities/attachment。
@@ -982,6 +989,7 @@ private fun ModelEditDialog(
             ?.selectableEfforts
             ?.toSet()
             .orEmpty() + ReasoningEffort.DEFAULT
+        selectedDefaultEffort = automaticCapabilities?.defaultEffort
     }
 
     fun updated(): Model = model.copy(
@@ -1012,9 +1020,7 @@ private fun ModelEditDialog(
                 supportedEfforts = availableEfforts.filter { effort ->
                     effort != ReasoningEffort.OFF && effort in selectedReasoningEfforts
                 },
-                defaultEffort = model.effectiveReasoningCapabilities
-                    ?.defaultEffort
-                    ?.takeIf { it in selectedReasoningEfforts },
+                defaultEffort = selectedDefaultEffort?.takeIf { it in selectedReasoningEfforts },
                 defaultEnabled = true,
                 mandatory = !canDisable,
                 canDisable = canDisable,
@@ -1204,6 +1210,35 @@ private fun ModelEditDialog(
                                         },
                                         enabled = !isSaving,
                                     )
+                                }
+                            }
+                            val defaultCandidates = availableEfforts.filter { effort ->
+                                effort != ReasoningEffort.OFF &&
+                                    effort != ReasoningEffort.DEFAULT &&
+                                    effort in selectedReasoningEfforts
+                            }
+                            if (defaultCandidates.isNotEmpty()) {
+                                CouiText(
+                                    text = stringResource(R.string.model_default_effort_label),
+                                    kind = CouiTextKind.ItemSummary,
+                                    color = colors.summary,
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    defaultCandidates.forEach { effort ->
+                                        EtaChoiceChip(
+                                            text = effort.displayName,
+                                            selected = effort == selectedDefaultEffort,
+                                            onClick = {
+                                                reasoningOverrideActive = true
+                                                selectedDefaultEffort =
+                                                    if (effort == selectedDefaultEffort) null else effort
+                                            },
+                                            enabled = !isSaving,
+                                        )
+                                    }
                                 }
                             }
                             CouiText(
@@ -1416,6 +1451,41 @@ private fun ModelEditDialog(
                                             } else {
                                                 selectedReasoningEfforts + effort
                                             }
+                                        },
+                                        enabled = !isSaving,
+                                    )
+                                }
+                            }
+                        }
+                        val miuixDefaultCandidates = if (reasoningEnabled) {
+                            availableEfforts.filter { effort ->
+                                effort != ReasoningEffort.OFF &&
+                                    effort != ReasoningEffort.DEFAULT &&
+                                    effort in selectedReasoningEfforts
+                            }
+                        } else {
+                            emptyList()
+                        }
+                        if (miuixDefaultCandidates.isNotEmpty()) {
+                            Text(
+                                text = stringResource(R.string.model_default_effort_label),
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.padding(start = 4.dp, top = 10.dp),
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(top = 6.dp),
+                            ) {
+                                miuixDefaultCandidates.forEach { effort ->
+                                    EtaChoiceChip(
+                                        text = effort.displayName,
+                                        selected = effort == selectedDefaultEffort,
+                                        onClick = {
+                                            reasoningOverrideActive = true
+                                            selectedDefaultEffort =
+                                                if (effort == selectedDefaultEffort) null else effort
                                         },
                                         enabled = !isSaving,
                                     )

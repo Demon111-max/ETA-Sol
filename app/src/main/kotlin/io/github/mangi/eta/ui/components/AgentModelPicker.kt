@@ -27,7 +27,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.mangi.eta.R
-import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -38,15 +37,13 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 3.4.45 起模型选择与思考档位合并进输入栏右下角的合并控件（ModelEffortControl，
  * 仿旧 Sol 的 Codex 式药丸），顶栏按用户定案只留居中标题：有会话标题显示标题，
  * 角色对话显示头像+角色名（点开角色详情），都没有时显示应用名。
- * [state] / [isStreaming] / [onModelSelected] 参数保留只是为了不动壳层调用点，内部不再使用。
+ * （3.4.49 清理：此前为不动壳层而保留的 state/isStreaming/onModelSelected 死参数已删，
+ * 壳层只保留「是否在主页且有模型上下文」的门控，不再往标题里透传选择状态。）
  */
 @Composable
 internal fun AgentTopBarChatHeader(
     conversationTitle: String?,
     character: RoleplayChatUi?,
-    state: AgentModelPickerUiState,
-    isStreaming: Boolean,
-    onModelSelected: (String) -> Unit,
     onOpenCharacter: () -> Unit,
     modifier: Modifier = Modifier,
 ) {

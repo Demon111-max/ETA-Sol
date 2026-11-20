@@ -144,9 +144,7 @@ internal fun AgentAppShell(
     currentForgeWorkspaceName: String? = null,
     onForgeNewConversationInWorkspace: (String) -> Unit = {},
     onForgeWorkspacesChanged: () -> Unit = {},
-    isHomeStreaming: Boolean = false,
     hasPermissionAttention: Boolean = false,
-    onHomeModelSelected: (String) -> Unit = {},
     onOpenCharacter: () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
@@ -175,9 +173,6 @@ internal fun AgentAppShell(
                                             AgentTopBarChatHeader(
                                                 conversationTitle = homeTitle,
                                                 character = homeCharacter,
-                                                state = homeModelPickerState,
-                                                isStreaming = isHomeStreaming,
-                                                onModelSelected = onHomeModelSelected,
                                                 onOpenCharacter = onOpenCharacter,
                                             )
                                         }
@@ -266,8 +261,6 @@ internal fun AgentAppShell(
                                     homeTitle = homeTitle,
                                     homeCharacter = homeCharacter,
                                     homeModelPickerState = homeModelPickerState,
-                                    isHomeStreaming = isHomeStreaming,
-                                    onHomeModelSelected = onHomeModelSelected,
                                     onOpenCharacter = onOpenCharacter,
                                 )
                             }
@@ -440,8 +433,6 @@ private fun AgentTopBar(
     homeTitle: String?,
     homeCharacter: RoleplayChatUi?,
     homeModelPickerState: AgentModelPickerUiState?,
-    isHomeStreaming: Boolean,
-    onHomeModelSelected: (String) -> Unit,
     onOpenCharacter: () -> Unit,
 ) {
     val isHome = route is AppRoute.Home
@@ -461,9 +452,6 @@ private fun AgentTopBar(
             AgentTopBarChatHeader(
                 conversationTitle = homeTitle,
                 character = homeCharacter,
-                state = homeModelPickerState,
-                isStreaming = isHomeStreaming,
-                onModelSelected = onHomeModelSelected,
                 onOpenCharacter = onOpenCharacter,
             )
         }

@@ -62,6 +62,11 @@ class AgentModelPickerProjectorTest {
                     models = listOf(selected),
                 ),
                 provider(
+                    id = "missing-key-unused",
+                    apiKey = "",
+                    models = listOf(model(id = "unselected-no-key")),
+                ),
+                provider(
                     id = "configured",
                     models = listOf(model(id = "available")),
                 ),
@@ -72,6 +77,8 @@ class AgentModelPickerProjectorTest {
 
         // 无 Key 的服务商照旧隐藏，但当前选中模型所属的除外：它必须留在列表里，
         // 否则药丸显示着这个模型、列表里却没有它的行和勾（3.4.47 审计问题 18）。
+        // 第三个无 Key 服务商（没被选中）必须仍然隐藏——这条负分支是「没 Key
+        // 就不给选」主规则唯一的护栏，不许丢（3.4.49 审理补回）。
         assertEquals(listOf("missing-key", "configured"), result.providerGroups.map { it.providerId })
         assertEquals(
             listOf(selected.id),
@@ -79,6 +86,40 @@ class AgentModelPickerProjectorTest {
         )
         assertEquals(selected.id, result.selectedModel?.id)
         assertEquals("missing-key", result.selectedModel?.providerId)
+    }
+
+    @Test
+    fun project_ordersGroupsByProviderSortOrderNotInputOrder() {
+        val result = AgentModelPickerProjector.project(
+            providers = listOf(
+                provider(id = "second", sortOrder = 2, models = listOf(model(id = "m-second"))),
+                provider(id = "first", sortOrder = 1, models = listOf(model(id = "m-first"))),
+            ),
+            selectedProviderId = "second",
+            selectedModelId = "m-second",
+        )
+
+        assertEquals(listOf("first", "second"), result.providerGroups.map { it.providerId })
+    }
+
+    @Test
+    fun project_disabledSelectedModelDoesNotSurfaceItsProvider() {
+        // 选中模型被禁用：与「无 Key 例外」不同，禁用是硬过滤——它的服务商
+        // 若没有其他可用模型就整组消失，selectedModel 也不许指向它（3.4.49 审理补测）。
+        val result = AgentModelPickerProjector.project(
+            providers = listOf(
+                provider(
+                    id = "disabled-selection",
+                    models = listOf(model(id = "off-model", enabled = false)),
+                ),
+                provider(id = "configured", models = listOf(model(id = "available"))),
+            ),
+            selectedProviderId = "disabled-selection",
+            selectedModelId = "off-model",
+        )
+
+        assertEquals(listOf("configured"), result.providerGroups.map { it.providerId })
+        assertNull(result.selectedModel)
     }
 
     @Test
@@ -386,6 +427,7 @@ class AgentModelPickerProjectorTest {
         enabled: Boolean = true,
         apiKey: String = "test-key",
         authMode: String = ProviderAuthModes.API_KEY,
+        sortOrder: Int = 0,
         models: List<Model>,
     ) = CustomProviderSetting(
         id = id,
@@ -395,6 +437,7 @@ class AgentModelPickerProjectorTest {
         apiKey = apiKey,
         authMode = authMode,
         isEnabled = enabled,
+        sortOrder = sortOrder,
         models = models,
     )
 

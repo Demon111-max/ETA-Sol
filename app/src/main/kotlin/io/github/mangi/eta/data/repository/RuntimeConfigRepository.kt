@@ -17,6 +17,7 @@ import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.SubagentSettings
+import io.github.mangi.eta.data.model.UnknownReasoningCapabilities
 import io.github.mangi.eta.data.model.enabledModel
 import io.github.mangi.eta.data.model.runtimeProviderType
 import io.github.mangi.eta.data.model.selectedOrFirstModel
@@ -291,7 +292,7 @@ internal object RuntimeConfigRepository {
         val sourceType = ProviderSourceRegistry.resolve(provider)
         val profile = ProviderConnectionProfile.forAuthMode(provider.authMode)
         val endpointMode = profile?.endpointMode ?: provider.endpointMode()
-        val reasoningCapabilities = reasoningCapabilities(provider, model)
+        val reasoningCapabilities = effectiveReasoningCapabilities(provider, model)
         return AgentModelClient.ModelConfig(
             providerId = provider.id,
             providerName = provider.name,
@@ -317,6 +318,23 @@ internal object RuntimeConfigRepository {
             customHeaders = provider.customHeaders + model.customHeaders,
             customBody = provider.customBody + model.customBody,
         )
+    }
+
+    /**
+     * 聊天链路的有效能力口径（Assist 与 Forge 共用）：解析得到就用解析结果；
+     * 解析不到但模型明确声明不支持思考 → null（真不支持）；其余属于「能力未知」
+     * → 回落全档位 [UnknownReasoningCapabilities]。档位上限、发送归一化与运行时
+     * 配置只许走这一份，不许调用方各自拿 [reasoningCapabilities] 的 null 猜方向——
+     * 此前 Assist 把未知当不支持（档位消失）、Forge 放行 5 档，同模型两边两样
+     * （3.4.49 审理）。
+     */
+    fun effectiveReasoningCapabilities(
+        provider: ProviderSetting,
+        model: Model,
+    ): ModelReasoningCapabilities? {
+        reasoningCapabilities(provider, model)?.let { return it }
+        if (model.effectiveReasoning == false) return null
+        return UnknownReasoningCapabilities
     }
 
     fun reasoningCapabilities(provider: ProviderSetting, model: Model): ModelReasoningCapabilities? {

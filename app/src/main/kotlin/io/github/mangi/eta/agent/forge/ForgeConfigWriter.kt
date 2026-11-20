@@ -40,7 +40,10 @@ internal object ForgeConfigWriter {
     const val PROVIDER_ID = "relay"
     private const val WRITE_TIMEOUT_SECONDS = 60L
 
-    internal fun opencodeConfigJson(settings: ForgeSettings): JsonObject = buildJsonObject {
+    internal fun opencodeConfigJson(
+        settings: ForgeSettings,
+        reasoningDisabled: Boolean = false,
+    ): JsonObject = buildJsonObject {
         put("\$schema", "https://opencode.ai/config.json")
         putJsonObject("provider") {
             putJsonObject(settings.providerId) {
@@ -86,13 +89,20 @@ internal object ForgeConfigWriter {
                         // 上下文窗口目前只供 App 侧用量显示（ForgeSettings.contextWindow）。
                         // 思考档位：variant 名与 Eta 的 ReasoningEffort wireValue 对齐，
                         // Forge 发送消息时按档位名选 variant（见 ForgeChatState）。
-                        putJsonObject("variants") {
-                            putJsonObject("minimal") { put("reasoningEffort", "minimal") }
-                            putJsonObject("low") { put("reasoningEffort", "low") }
-                            putJsonObject("medium") { put("reasoningEffort", "medium") }
-                            putJsonObject("high") { put("reasoningEffort", "high") }
-                            putJsonObject("xhigh") { put("reasoningEffort", "xhigh") }
-                            putJsonObject("max") { put("reasoningEffort", "xhigh") }
+                        // variant 的 reasoningEffort 也必须与 wireValue 一致：此前 "max"
+                        // 写的是 "xhigh"，药丸显示 Max、实际深度只有 Extra High，
+                        // 与 Assist 同档位发出的 "max" 不一致（3.4.49 审理）。
+                        // 模型明确不支持思考时不写 variants：行为层本来就不发 variant，
+                        // 配置里留着只会让人手改/排查时误以为可用（3.4.49 审理）。
+                        if (!reasoningDisabled) {
+                            putJsonObject("variants") {
+                                putJsonObject("minimal") { put("reasoningEffort", "minimal") }
+                                putJsonObject("low") { put("reasoningEffort", "low") }
+                                putJsonObject("medium") { put("reasoningEffort", "medium") }
+                                putJsonObject("high") { put("reasoningEffort", "high") }
+                                putJsonObject("xhigh") { put("reasoningEffort", "xhigh") }
+                                putJsonObject("max") { put("reasoningEffort", "max") }
+                            }
                         }
                     }
                 }
@@ -117,6 +127,7 @@ internal object ForgeConfigWriter {
         context: Context,
         settings: ForgeSettings,
         credentials: ForgeCredentials,
+        reasoningDisabled: Boolean = false,
     ): ForgeConfigWriteResult = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
         val distribution = LinuxEnvironmentSettingsRepository.current(appContext)
@@ -126,7 +137,7 @@ internal object ForgeConfigWriter {
             return@withContext ForgeConfigWriteResult.EnvironmentNotReady
         }
         val command = writeCommand(
-            configJson = opencodeConfigJson(settings).toString(),
+            configJson = opencodeConfigJson(settings, reasoningDisabled).toString(),
             authJson = authJson(settings, credentials).toString(),
             providerId = settings.providerId,
         )

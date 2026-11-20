@@ -70,6 +70,67 @@ class ConversationDrawerGroupingTest {
     }
 
     @Test
+    fun interleavedSectionsMergeIntoOneGroupPerSection() {
+        val now = todayNoonMillis()
+        val day = TimeUnit.DAYS.toMillis(1)
+        // 输入不是按 section 排好的：今天的会话被昨天的隔开。
+        // 只合并相邻项的实现会把「今天」裂成两组、组头 key 撞车闪退（3.4.44 C1 的另一半）。
+        val conversations = listOf(
+            conversation(id = "today-1", updatedAtMillis = now),
+            conversation(id = "yesterday-1", updatedAtMillis = now - day),
+            conversation(id = "today-2", updatedAtMillis = now - TimeUnit.HOURS.toMillis(2)),
+        )
+
+        val groups = conversations.groupForDrawer()
+
+        assertEquals("交错输入也只应有两个组", 2, groups.size)
+        val todayGroup = groups.first { it.section is ConversationDrawerSection.Day }
+        assertEquals(
+            setOf("today-1", "today-2"),
+            todayGroup.items.map { it.id }.toSet(),
+        )
+        assertEquals(
+            "组头 key 仍须互不相同",
+            groups.size,
+            groups.map { sectionKey(it.section) }.toSet().size,
+        )
+    }
+
+    @Test
+    fun missingTimestampFallsIntoTodayGroup() {
+        val now = todayNoonMillis()
+        val conversations = listOf(
+            conversation(id = "old-1", updatedAtMillis = now - TimeUnit.DAYS.toMillis(5)),
+            conversation(id = "timeless", updatedAtMillis = 0L),
+        )
+
+        val groups = conversations.groupForDrawer()
+
+        val timelessGroup = groups.first { group -> group.items.any { it.id == "timeless" } }
+        assertEquals(
+            "时间缺失（0）应按今天归组",
+            expectedDayKey(now),
+            sectionKey(timelessGroup.section),
+        )
+    }
+
+    @Test
+    fun interleavedPinnedStayInSinglePinnedGroup() {
+        val now = todayNoonMillis()
+        val conversations = listOf(
+            conversation(id = "pinned-1", updatedAtMillis = now, isPinned = true),
+            conversation(id = "today-1", updatedAtMillis = now),
+            conversation(id = "pinned-2", updatedAtMillis = now - TimeUnit.HOURS.toMillis(1), isPinned = true),
+        )
+
+        val groups = conversations.groupForDrawer()
+
+        assertEquals(2, groups.size)
+        val pinnedGroup = groups.first { it.section == ConversationDrawerSection.Pinned }
+        assertEquals(listOf("pinned-1", "pinned-2"), pinnedGroup.items.map { it.id })
+    }
+
+    @Test
     fun pinnedConversationsStayInSinglePinnedGroup() {
         val now = todayNoonMillis()
         val conversations = listOf(
