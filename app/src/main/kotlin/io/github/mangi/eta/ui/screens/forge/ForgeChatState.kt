@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
 import android.net.Uri
 import io.github.mangi.eta.agent.forge.ForgeApiClient
@@ -14,14 +15,20 @@ import io.github.mangi.eta.agent.forge.ForgeChatMessage
 import io.github.mangi.eta.agent.forge.ForgeConfigWriteResult
 import io.github.mangi.eta.agent.forge.ForgeConfigWriter
 import io.github.mangi.eta.agent.forge.ForgeEvent
+import io.github.mangi.eta.agent.forge.ForgeLastSelection
+import io.github.mangi.eta.agent.forge.ForgeLastSelectionStore
 import io.github.mangi.eta.agent.forge.ForgeOutgoingAttachment
 import io.github.mangi.eta.agent.forge.ForgePart
 import io.github.mangi.eta.agent.forge.ForgeQuestionRequest
+import io.github.mangi.eta.agent.forge.ForgeRestoreDecision
 import io.github.mangi.eta.agent.forge.ForgeRole
 import io.github.mangi.eta.agent.forge.ForgeServerManager
 import io.github.mangi.eta.agent.forge.ForgeServerStartResult
 import io.github.mangi.eta.agent.forge.ForgeWorkspace
 import io.github.mangi.eta.agent.forge.ForgeWorkspaces
+import io.github.mangi.eta.agent.forge.forgeArchivedEffortForModel
+import io.github.mangi.eta.agent.forge.forgeRestoreDecision
+import io.github.mangi.eta.agent.forge.forgeRestoreModelFor
 import io.github.mangi.eta.agent.forge.hasHttpCode
 import io.github.mangi.eta.agent.forge.ForgeSharedConfig
 import io.github.mangi.eta.agent.forge.resolveForgeSharedConfig
@@ -32,6 +39,7 @@ import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.initialReasoningEffort
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
+import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -165,6 +173,15 @@ private fun forgeConfigFingerprint(
 internal suspend fun prewarmForgeServer(context: Context) {
     val shared = resolveForgeSharedConfig()
     if (shared !is ForgeSharedConfig.Ready) return
+    // 存档指向另一个模型时不预热（3.4.52 口径 6）：预热按「共享当前选择」写一遍 opencode 配置、
+    // 把 server 拉起来，用户进 Forge 时再按存档模型重写一遍并重启——冷启动就先按旧模型写一遍，
+    // 正是要避免的那条路。跳过只是少一次抢跑（预热本来就是尽力而为），进 Forge 时会按存档模型
+    // 走一遍完整启动。存档模型已不可用时决策是 Keep，照旧预热。
+    val archived = ForgeLastSelectionStore.load(context)
+    if (archived != null) {
+        val decision = forgeRestoreDecision(archived, forgeRestoreModelFor(archived.modelId))
+        if (decision is ForgeRestoreDecision.Restore && decision.modelId != shared.settings.modelId) return
+    }
     val server = ForgeServerManager.default(context)
     configApplyMutex.withLock {
         val fingerprint = forgeConfigFingerprint(
@@ -305,6 +322,22 @@ internal class ForgeChatState(
     /** 上次播种时的模型 id：换模型要按新模型的声明默认档重播一次（3.4.49 审理 P3-15）。 */
     private var seededModelId: String? = null
 
+    /**
+     * 上一次真正用过的「模型 + 档位」（3.4.52）。
+     *
+     * 新开对话时据它恢复，用户不必每开一次新对话就重选模型和档位；同时充当内存里的去重依据，
+     * 免得每次发送都写一遍同一个值。
+     */
+    private var lastSelection: ForgeLastSelection? = null
+
+    /**
+     * 存档恢复只做一次：首次 [start] 对齐共享配置之前跑，之后一律以当前选择为准。
+     *
+     * 不能每次都跑——用户在药丸里换过模型后，存档与当前选择就不再一致，重复恢复会把用户
+     * 刚选的模型又改回上次那个。
+     */
+    private var selectionRestored = false
+
     /** 输入栏改档的唯一入口：先过能力归一化再落状态，保证控件显示的档就是发送时用的档。 */
     fun updateReasoningEffort(effort: ReasoningEffort) {
         // 用户亲手选档：此后不许播种再改它（选「默认」也要被尊重）。
@@ -315,6 +348,8 @@ internal class ForgeChatState(
             // 与 Assist 同口径：能力未知（回落表）也放行；明确不支持时归 DEFAULT。
             reasoningCapabilities?.normalize(effort) ?: ReasoningEffort.DEFAULT
         }
+        // 用户在药丸里选了档：这就是「上次真正用过的档位」，下一次新对话要接着用（3.4.52）。
+        persistLastSelection()
     }
 
     /**
@@ -333,7 +368,8 @@ internal class ForgeChatState(
                         forgeErrorText(context, applied.output),
                     ),
                 )
-                ConfigApply.Ready -> Unit
+                // 药丸里换过模型：对齐成功后把「当前生效的模型 + 档位」记成上次选择（3.4.52）。
+                ConfigApply.Ready -> persistLastSelection()
             }
         }
     }
@@ -545,6 +581,10 @@ internal class ForgeChatState(
             startupStage = ForgeStartupStage.Preparing
             val splashStartedAt = SystemClock.elapsedRealtime()
             clearNotice()
+            // 新开对话沿用上次用过的模型与档位（3.4.52）。必须在第一次对齐配置之前：恢复是
+            // 通过「改共享选择」实现的，先对齐一次就等于先按旧模型写一遍 opencode 配置、
+            // 再为恢复的模型重写一遍（多一次写盘 + 多一次 server 重启）。
+            restoreLastSelection()
             // 配置与 Assist 共用同一套服务商设置：解析并应用（变了才重写配置并重启 server）。
             when (val applied = applySharedConfig()) {
                 is ConfigApply.NotConfigured -> {
@@ -673,11 +713,21 @@ internal class ForgeChatState(
         turnError = null
         turnStartedAtMs = 0L
         clearNotice()
-        // 新对话重新播种默认档：上一轮亲手选的档不跨会话沿用（与 Assist 新建对话同口径），
-        // 播种标记一起清掉，下一次对齐按当前模型的声明默认档重播一次（3.4.49 审理 P2-4）。
-        reasoningEffortExplicit = false
-        seededModelId = null
-        reasoningEffort = ReasoningEffort.DEFAULT
+        // 新对话的档位（3.4.52）：同一个模型下沿用上次实际用过的档，不再退回「默认」——
+        // 每开一次新对话就重选一遍模型和档位不是用户想要的。存档属于别的模型（或没有存档）
+        // 时维持老规矩：清掉播种标记，下一次对齐按当前模型的声明默认档重播一次（3.4.49 P2-4）。
+        val archivedEffort = forgeArchivedEffortForModel(modelId, lastSelection, reasoningCapabilities)
+        if (archivedEffort == null) {
+            reasoningEffortExplicit = false
+            seededModelId = null
+            reasoningEffort = ReasoningEffort.DEFAULT
+        } else {
+            // 标成「用户明确选过」+「已按该模型播种」：applySharedConfig 的一次性声明播种
+            // 不许再把它打回声明默认档（3.4.52 口径 3）。
+            reasoningEffort = archivedEffort
+            reasoningEffortExplicit = true
+            seededModelId = modelId
+        }
     }
 
     /** 没有可用工作区（挂载建不出来）时明示：当前在私有目录干活、产出文件拿不出来，不静默。 */
@@ -893,6 +943,57 @@ internal class ForgeChatState(
     }
 
     /**
+     * 把「当前实际生效的模型 + 档位」记成上次选择（3.4.52）。
+     *
+     * 三个写入点：药丸里选档（[updateReasoningEffort]）、药丸里换模型（[onSharedSelectionChanged]
+     * 对齐成功后）、每次发送（[performSend] 对齐成功后）。最后一条是兜底——存档要反映「真正
+     * 用过的那一组」，而不是中途点过的；同一组值不重复写盘。
+     */
+    private fun persistLastSelection() {
+        if (modelId.isEmpty()) return
+        val selection = ForgeLastSelection(modelId = modelId, effort = reasoningEffort)
+        if (selection == lastSelection) return
+        lastSelection = selection
+        scope.launch(Dispatchers.IO) { ForgeLastSelectionStore.save(context, selection) }
+    }
+
+    /**
+     * 新开对话（含进程重建后的全新状态）沿用上次用过的模型与档位（3.4.52）。
+     *
+     * 只做一次，且在第一次 [applySharedConfig] 之前：恢复靠改共享选择实现，随后那次对齐会按
+     * 正常切模型那条链走（指纹变化 → 重写 opencode 配置 → restartIfRunning）。
+     * 从列表打开已有会话时不恢复：那条会话有自己的值，拿存档覆盖它就是把用户打开的会话改掉。
+     */
+    private suspend fun restoreLastSelection() {
+        if (selectionRestored) return
+        selectionRestored = true
+        if (pendingOpenSessionId != null || sessionId != null) return
+        val saved = ForgeLastSelectionStore.load(context) ?: return
+        val model = forgeRestoreModelFor(saved.modelId)
+        when (val decision = forgeRestoreDecision(saved, model)) {
+            ForgeRestoreDecision.Keep -> {
+                // 存档模型没了/被禁用/Forge 用不了：整份作废，走共享当前模型 + 声明播种。
+                if (model == null) ForgeLastSelectionStore.clear(context)
+            }
+
+            is ForgeRestoreDecision.Restore -> {
+                // 与药丸里手选该模型同一条路径：先写共享选择（自带存在 + 启用校验），再同步给
+                // 被 hook 的应用，最后把档位定成存档档位并标成「用户已明确选过」。
+                // 写共享选择要用行 id（存档里存的是模型名，那是稳定标识），见 ForgeRestoreDecision.Restore。
+                RuntimeConfigRepository.setSelectedModelId(decision.rowId)
+                RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                reasoningEffort = decision.effort
+                reasoningEffortExplicit = true
+                seededModelId = decision.modelId
+                lastSelection = ForgeLastSelection(
+                    modelId = decision.modelId,
+                    effort = decision.effort,
+                )
+            }
+        }
+    }
+
+    /**
      * 输入栏的发送入口：带走当前待发附件。本轮还在跑时不吞消息——排进队列，
      * 轮次自然结束时按序续发（以前 busy 直接 return，用户打的字发出去了个寂寞）。
      */
@@ -1047,6 +1148,9 @@ internal class ForgeChatState(
 
             ConfigApply.Ready -> Unit
         }
+        // 对齐完成、模型与档位都已是本次发送真正要用的值：把它记成「上次选择」，
+        // 保证存档永远是最后真正用过的那一组，而不是药丸里点过又改回去的中间态（3.4.52）。
+        persistLastSelection()
         if (superseded()) return
         // 配置刚重启过、或 server 意外不在跑时，先确保它在跑再发；
         // 拉不起来就把失败摆到界面上，不要对着不在跑的 server 无声地发。
